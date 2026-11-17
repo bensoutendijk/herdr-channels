@@ -93,7 +93,9 @@ test('the repo names no person, home folder or host of its own', () => {
   const hits = [];
   for (const f of files) {
     if (!existsSync(join(repo, f))) continue;
-    const text = readFileSync(join(repo, f), 'utf8');
+    let text = readFileSync(join(repo, f), 'utf8');
+    // The license's copyright line names the author, on purpose.
+    if (f === 'LICENSE') text = text.replace(/^Copyright \(c\) .*$/m, '');
     for (const w of words) if (w.test(text)) hits.push(`${f}: ${w}`);
   }
   assert.deepEqual(hits, []);

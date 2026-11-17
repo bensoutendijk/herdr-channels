@@ -24,22 +24,21 @@ What's here:
 - **Claude Code**, signed in: `claude --version` works in a terminal.
 - **python3**, for the task viewer. macOS's `/usr/bin/python3` comes with the Xcode Command Line
   Tools, which Homebrew installs anyway.
-- **git** and access to this repo (`gh auth login`).
+- **git**: `git --version` works (macOS offers to install the Command Line Tools if it doesn't).
 
 ## Install
 
-1. Install Node and the GitHub CLI, and sign in to GitHub:
+1. Install Node:
 
    ```sh
-   brew install node gh
-   gh auth login
+   brew install node
    ```
 
 2. Clone this repo into `~/projects` and keep it there (the `channels` command runs from the clone):
 
    ```sh
    mkdir -p ~/projects && cd ~/projects
-   gh repo clone bensoutendijk/herdr-channels
+   git clone https://github.com/bensoutendijk/herdr-channels
    ```
 
 3. Let Claude Code start sessions in `~/projects`. Background sessions start only in a folder you
@@ -153,3 +152,8 @@ rm -r ~/.config/herdr-app/mods/channels ~/.config/herdr-app/layouts/channels.jso
 
 The store (`~/.local/state/herdr-channels`) and the sessions are left; remove them by hand if you
 want them gone.
+
+## License
+
+MIT, see `LICENSE`. The Lucide icons and the Unicode emoji data keep their own licenses; see
+`THIRD_PARTY_NOTICES.md`.
