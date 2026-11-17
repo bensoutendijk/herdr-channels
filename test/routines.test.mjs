@@ -166,7 +166,7 @@ function setup(t) {
   return { home, dir, projects, run, ok, lines, store, tickAt, env };
 }
 
-const nextNine = () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d.getTime(); };
+const nextNine = () => { const d = new Date(); d.setHours(9, 0, 0, 0); if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1); return d.getTime(); }; // the next 09:00, today or tomorrow
 
 test('routine add, list, edit, on, off and rm keep a routine in the channel\'s store', (t) => {
   const { ok, run, store } = setup(t);
