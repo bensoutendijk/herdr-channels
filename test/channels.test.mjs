@@ -22,10 +22,26 @@ const at = (f) => path.join(home, f);
 fs.appendFileSync(at('claude-calls.jsonl'), JSON.stringify({ args, cwd: process.cwd(), claudecode: process.env.CLAUDECODE ?? null, child: process.env.CLAUDE_CODE_CHILD_SESSION ?? null, keep: process.env.CLAUDE_CONFIG_DIR ?? null }) + '\\n');
 const n = fs.readFileSync(at('claude-calls.jsonl'), 'utf8').split('\\n').filter(Boolean).length;
 if (args[0] === 'agents') { process.stdout.write(fs.existsSync(at('agents.json')) ? fs.readFileSync(at('agents.json'), 'utf8') : '[]'); process.exit(0); }
-if (args[0] === 'stop') { process.stdout.write('stopped ' + args[1] + '\\n'); process.exit(0); }
+// The job's process, from its record in ~/.claude/sessions, and whether it still runs.
+const sessions = path.join(home, '.claude', 'sessions');
+const records = () => (fs.existsSync(sessions) ? fs.readdirSync(sessions).map((f) => JSON.parse(fs.readFileSync(path.join(sessions, f), 'utf8'))) : []);
+const running = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// As Claude Code's does, stop returns at once and the process exits a moment later (unless the test says it hangs).
+if (args[0] === 'stop') {
+  const rec = records().find((r) => r.jobId === args[1]);
+  if (rec && !fs.existsSync(at('stop-hangs'))) require('child_process').spawn('sh', ['-c', 'sleep 0.6; kill ' + rec.pid], { detached: true, stdio: 'ignore' }).unref();
+  process.stdout.write('stopped ' + args[1] + '\\n'); process.exit(0);
+}
+// As Claude Code's does, resuming a session whose process still runs starts a copy: a new job and session.
 if (args[0] === '--bg' && args[1] === '--resume') {
   const jobs = path.join(home, '.claude', 'jobs');
   const job = fs.readdirSync(jobs).find((j) => JSON.parse(fs.readFileSync(path.join(jobs, j, 'state.json'), 'utf8')).sessionId === args[2]);
+  if (fs.existsSync(at('resume-copies')) || records().some((r) => r.sessionId === args[2] && running(r.pid))) {
+    const copy = 'eeee' + String(n).padStart(4, '0');
+    const dir = path.join(jobs, copy); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionId: copy + '-0000-4000-8000-000000000000', state: 'working', name: args[3].slice(0, 30), nameSource: 'auto', cwd: process.cwd() }));
+    process.stdout.write('backgrounded · ' + copy + ' · x\\n'); process.exit(0);
+  }
   process.stdout.write('backgrounded · ' + job + ' · x\\n'); process.exit(0);
 }
 if (args[0] === '--bg') {
@@ -87,11 +103,18 @@ function setup(t) {
     mkdirSync(join(home, '.claude', 'projects', '-x'), { recursive: true });
     writeFileSync(join(home, '.claude', 'projects', '-x', `${id}.jsonl`), entries.map((e) => JSON.stringify(e)).join('\n'));
   };
-  // A running process's own record; this test's pid stands in for it, so it counts as alive.
+  // A running process's own record. A process started for it stands in for the session: a `sleep` left to the
+  // system (not this test's child, which would linger as a zombie once killed), stopped after the test.
+  const sleepers = [];
+  t.after(() => { for (const pid of sleepers) { try { process.kill(pid); } catch { /* gone */ } } });
   const live = (sessionId, extra) => {
+    const pid = Number(spawnSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
+    sleepers.push(pid);
     mkdirSync(join(home, '.claude', 'sessions'), { recursive: true });
-    writeFileSync(join(home, '.claude', 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId, status: 'idle', ...extra }));
+    writeFileSync(join(home, '.claude', 'sessions', 'live.json'), JSON.stringify({ pid, sessionId, status: 'idle', ...extra }));
+    return pid;
   };
+  const running = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   const store = () => JSON.parse(readFileSync(join(dir, 'channels.json'), 'utf8'));
   job('aaaaaaaa', { sessionId: OLD, state: 'done', name: 'Fix the total', cwd: join(projects, 'app') });
   transcript(GONE, [{ type: 'user', cwd: join(projects, 'site'), message: { content: 'hi' } }, { type: 'custom-title', customTitle: 'Old talk' }]);
@@ -99,7 +122,7 @@ function setup(t) {
     { id: 'aaaaaaaa', kind: 'background', sessionId: OLD, state: 'done', cwd: join(projects, 'app') },
     { kind: 'interactive', pid: 7, sessionId: APP, name: 'Docs pass', cwd: join(projects, 'site') },
   ]));
-  return { home, dir, projects, run, ok, list, lines, job, transcript, live, store, env };
+  return { home, dir, projects, run, ok, list, lines, job, transcript, live, running, store, env };
 }
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
@@ -229,11 +252,14 @@ test('read shows a session\'s state and its messages, the last one whole', (t) =
 });
 
 test('send wakes a background session whose turn is over, and refuses one that is working, prompting, or not in the background', (t) => {
-  const { ok, run, lines, live, job } = setup(t);
+  const { ok, run, lines, live, running, job } = setup(t);
   ok(['create', 'general']);
   ok(['file', 'general', 'aaaaaaaa']);
-  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  const pid = live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  // The fake stop, like Claude Code's, returns before the process exits, and resuming before it exits starts a
+  // copy: send continues the session itself only because it waits for the process to exit first.
   assert.match(ok(['send', 'aaaaaaaa', 'Also', 'check', 'the', 'tax']), /Sent to testmac\/aaaaaaaa-1111.*It continues/);
+  assert.equal(running(pid), false);
   const calls = lines('claude-calls.jsonl').slice(-2);
   assert.deepEqual(calls[0].args, ['stop', 'aaaaaaaa']);
   assert.deepEqual(calls[1].args, ['--bg', '--resume', OLD, "From the user via #general's chat: Also check the tax"]);
@@ -244,6 +270,50 @@ test('send wakes a background session whose turn is over, and refuses one that i
   live(OLD, { status: 'waiting', waitingFor: 'permission for Bash' });
   assert.match(run(['send', OLD, 'x']).stderr, /showing a prompt \(permission for Bash\)/);
   assert.match(run(['send', GONE, 'x']).stderr, /isn't a background session/);
+});
+
+test('send to a task whose process doesn\'t exit after stop fails plainly and starts nothing', (t) => {
+  const { home, ok, run, lines, live, running, list } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa']);
+  const pid = live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'stop-hangs'), '');
+  const r = run(['send', OLD, 'Blue.'], '', { CHANNELS_STOP_WAIT_MS: '700' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, new RegExp(`was told to stop, but its process \\(pid ${pid}\\) still runs after 0.7s. The message wasn't sent and nothing was started`));
+  assert.deepEqual(lines('claude-calls.jsonl').map((c) => c.args[0]).slice(-1), ['stop'], 'no --bg --resume');
+  assert.ok(running(pid));
+  assert.equal(list().channels[0].tasks.length, 1);
+});
+
+test('send files a copy Claude Code starts in place of the task, and marks the original superseded by it', (t) => {
+  const { home, ok, run, list, live, job, store } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa', '--name', 'Pick the colour']);
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'resume-copies'), '');
+  const out = ok(['send', OLD, 'Blue.']);
+  const [, copyJob] = /\(job (eeee\d{4})\)/.exec(out) ?? [];
+  const copy = `${copyJob}-0000-4000-8000-000000000000`;
+  assert.match(out, new RegExp(`didn't continue ${HERE}/${OLD}: it started a copy of it, ${HERE}/${copy} \\(job ${copyJob}\\), and the message went to the copy`));
+  assert.match(out, /filed into #general as "Pick the colour" in its place, and the original task is marked superseded/);
+  const tasks = Object.fromEntries(list('--all').channels[0].tasks.map((x) => [x.session_id, x]));
+  assert.deepEqual([tasks[copy].how, tasks[copy].name, tasks[copy].repo, tasks[copy].job, tasks[copy].dismissed], ['copied', 'Pick the colour', 'app', copyJob, false]);
+  assert.deepEqual([tasks[OLD].dismissed, tasks[OLD].dismissed_by, tasks[OLD].superseded_by], [true, 'send', `${HERE}/${copy}`]);
+  assert.equal(store().channels[0].tasks.find((x) => x.session_id === copy).copy_of, `${HERE}/${OLD}`);
+  assert.deepEqual(list().channels[0].tasks.filter((x) => !x.dismissed).map((x) => x.session_id), [copy], 'one task owns the work');
+  // --json says the same, and a copy of the copy replaces it in turn.
+  job(copyJob, { sessionId: copy, state: 'blocked', needs: 'Which shade?', cwd: join(home, 'projects', 'app') });
+  live(copy, { status: 'idle', jobId: copyJob });
+  const r = JSON.parse(ok(['send', copy, '--json', 'And green.']));
+  assert.deepEqual([r.delivered_as, r.filed_in, r.copy.job], ['copy_started', 'general', r.job]);
+  assert.deepEqual(list().channels[0].tasks.filter((x) => !x.dismissed).map((x) => x.id), [r.copy.id]);
+  // A copy of a session that is no channel's task is said plainly, and filed nowhere.
+  job('ffff0001', { sessionId: 'ffffffff-0000-4000-8000-000000000000', state: 'done', cwd: join(home, 'projects', 'app') });
+  const loose = run(['send', 'ffff0001', 'x']);
+  assert.equal(loose.status, 0, loose.stderr);
+  assert.match(loose.stdout, /isn't a task in an open channel, so the copy wasn't filed anywhere/);
+  assert.equal(list('--all').channels[0].tasks.length, 3);
 });
 
 test('the chat prompt carries the description and the commands, and nothing about other machines', async (t) => {
@@ -259,8 +329,8 @@ test('the chat prompt carries the description and the commands, and nothing abou
   assert.doesNotMatch(p, /machine registered|--machine|cost|\bPRs?\b|\bCI\b/i);
 });
 
-test('the listener reports a finished task once, whole, again after more work, and a question; not a dismissed task or a filed one\'s old news', (t) => {
-  const { ok, store, job, transcript, live } = setup(t);
+test('the listener reports a finished task once, whole, again after more work, and a question; not a repeat of its last message, a dismissed task or a filed one\'s old news', (t) => {
+  const { home, ok, store, job, transcript, live } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']); // dddd0001, working
   ok(['file', 'design', 'aaaaaaaa']); // already done when filed: not news
@@ -276,7 +346,10 @@ test('the listener reports a finished task once, whole, again after more work, a
   assert.equal(out.match(/<\/task-report>/g).length, 1);
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/, 'once');
   job('dddd0001', { sessionId: sid, state: 'done', name: 'Draw the logo' }, 5);
-  assert.match(ok(['listen', 'design', '--once']), /\[task report\]/, 'news again after more work');
+  assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/, 'more work, but the same last message: not news');
+  transcript(sid, [{ type: 'user', message: { content: 'Draw the logo' } }, { type: 'assistant', message: { content: [{ type: 'text', text: 'Redrawn, rounder.' }] } }]);
+  job('dddd0001', { sessionId: sid, state: 'done', name: 'Draw the logo' }, 6);
+  assert.match(ok(['listen', 'design', '--once']), /\[task report\][\s\S]*Redrawn, rounder\./, 'news again after more work and a new message');
   // A question: the job ended its turn asking, or the process shows a prompt.
   job('dddd0001', { sessionId: sid, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 6);
   const q = ok(['listen', 'design', '--once']);
@@ -286,10 +359,21 @@ test('the listener reports a finished task once, whole, again after more work, a
   live(sid, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
   job('dddd0001', { sessionId: sid, state: 'working', name: 'Draw the logo' }, 7);
   assert.match(ok(['listen', 'design', '--once']), /What it waits on: permission for Bash\(rm -rf build\)[\s\S]*answer the prompt in the task's view/);
-  assert.deepEqual(store().channels[0].tasks.find((x) => x.job === 'dddd0001').told, { kind: 'needs', work: 7 });
+  const told = store().channels[0].tasks.find((x) => x.job === 'dddd0001').told;
+  assert.deepEqual([told.kind, told.work, told.last], ['needs', 7, told.last]);
+  assert.match(told.last, /^[0-9a-f]{16}$/);
+  // A task asks a question, and is then stopped while it waits (as send does): the report its stop would make
+  // repeats the question the chat already has, so it isn't sent.
+  rmSync(join(home, '.claude', 'sessions'), { recursive: true, force: true });
+  transcript(sid, [{ type: 'user', message: { content: 'Draw the logo' } }, { type: 'assistant', message: { content: [{ type: 'text', text: 'Which colour should it be?' }] } }]);
+  job('dddd0001', { sessionId: sid, state: 'blocked', needs: 'Which colour should it be?', name: 'Draw the logo' }, 8);
+  assert.match(ok(['listen', 'design', '--once']), /\[task question\][\s\S]*Which colour should it be\?/);
+  job('dddd0001', { sessionId: sid, state: 'stopped', name: 'Draw the logo' }, 9);
+  assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/, 'a stop that repeats the question');
+  assert.equal(store().channels[0].tasks.find((x) => x.job === 'dddd0001').told.kind, 'done', 'seen, so it is not looked at again');
   // Dismissed: not reported.
   ok(['dismiss', sid]);
-  job('dddd0001', { sessionId: sid, state: 'done', name: 'Draw the logo' }, 9);
+  job('dddd0001', { sessionId: sid, state: 'done', name: 'Draw the logo' }, 12);
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/);
 });
 
