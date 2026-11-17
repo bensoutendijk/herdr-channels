@@ -8,14 +8,16 @@
 // - the panel ({ panel: true }): "Tasks in #channel". A task is one Claude Code session; clicking
 //   one shows it live in the panel. + starts a fresh session in the projects folder.
 // - the menu ({ menu: channel }) and the dialogs ({ dialog: "new" | "rename" | "instructions" |
-//   "icon" | "archive", channel }), opened as overlays.
+//   "icon" | "routines" | "archive", channel }), opened as overlays.
 //
-// The main area is herdr's shown tab. A channel's chat gets one tab, in a herdr space called
-// "channels", made on first use and reused after. Everything runs on this machine: the
+// The main area is herdr's shown tab. A channel's chat runs in one herdr-core terminal, named
+// chat-<channel id>, which `channels chat <name> --bg` starts (a routine starts the same one when
+// the chat is closed). It is shown as a tab in a herdr space called "channels", made on first use
+// and reused after. Everything runs on this machine: the
 // `channels` command (bin/channels.mjs in the herdr-channels repo) holds the store, and
 // config.js beside this file says where it is.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Switch, RadioGroup, Radio } from "gpui-base";
 import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
 import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window } from "herdr";
@@ -157,6 +159,7 @@ function channels() {
   const at = (c) => { const i = order.indexOf(c.id ?? c.name); return i === -1 ? 1e9 : i; };
   return [...all].sort((a, b) => at(a) - at(b) || `${a.created_at}`.localeCompare(`${b.created_at}`));
 }
+const active = (channel) => (channel?.routines ?? []).some((r) => r.enabled);
 const liveTasks = (channel) => (channel?.tasks ?? []).filter((t) => !t.dismissed).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`));
 const doneTasks = (channel) => (channel?.tasks ?? []).filter((t) => t.dismissed).sort((a, b) => `${b.dismissed_at}`.localeCompare(`${a.dismissed_at}`));
 
@@ -169,20 +172,6 @@ function herdrMachine(task) {
 const shortId = (task) => task.job ?? task.session_id.split("-")[0];
 const holdSpace = (machine) => spaces().find((p) => (p.machine ?? null) === machine && p.name === HOLD) ?? null;
 const tabOf = (space, task) => space?.tabs.find((t) => t.name === shortId(task) || t.name.startsWith(`${shortId(task)} `)) ?? null;
-
-// Shows `argv` as the tab for `task` in its machine's holding space, making the space if needed.
-// A tab whose program has exited (only its shell is left) is replaced, so the command runs again.
-function showTab(machine, task, argv, folder) {
-  const name = `${shortId(task)} ${task.name ?? ""}`.trim();
-  const space = holdSpace(machine);
-  if (!space) return run("space.new", { name: HOLD, machine: machine ?? "", folder, tab: name, argv });
-  run("space.select", { id: space.id });
-  const tab = tabOf(space, task);
-  const dead = tab && panes().some((p) => p.tab === tab.id && p.program?.shell);
-  if (tab && !dead) return run("tab.select", { id: tab.id });
-  run("tab.new", { space: space.id, name, folder, argv });
-  if (dead) run("tab.close", { id: tab.id, confirmed: true });
-}
 
 // A task's terminal: one per session, outside any tab: a herdr-core terminal named "cv4-<id>". It
 // is started the first time the task is opened and found by name after that.
@@ -247,17 +236,69 @@ async function openTask(task) {
   showInPanel(task, address);
 }
 
-// A channel's chat: one long-lived session on this machine. `channels chat <name>` starts it the
-// first time and resumes it after, and listens for its tasks beside it, so its tab only ever runs
-// that one command. The tab is keyed by the channel's id (its name until the store gives it one),
-// so a rename keeps the running chat.
+// A channel's chat: one long-lived session on this machine, in one herdr-core terminal that
+// `channels chat <name> --bg` finds or starts (a routine that fires while the chat is closed starts
+// the same one in the background). Opening the channel shows that terminal: the tab already showing
+// it, else a new tab in the "channels" space made for it with terminal.keep. A chat an earlier
+// version opened as a tab of its own (named "#<channel id>") is shown as before until it ends.
+const CHATS = "channels.chats"; // channel id -> the address of its chat's terminal, as last found
 const chatOf = (c) => ({ machine: localName(), session_id: `#${c.id ?? c.name}`, job: `#${c.id ?? c.name}`, name: "", folder: PROJECTS });
+const chatAddress = (c) => (shared(CHATS) ?? {})[c.id] ?? c.chat_terminal ?? null;
+const paneOf = (address) => (address ? panes().find((p) => p.terminal === address) ?? null : null);
+const spaceOfTab = (tab) => spaces().find((sp) => sp.tabs.some((x) => x.id === tab)) ?? null;
+// An earlier version's chat tab, still running its program.
+function oldChatTab(c) {
+  const tab = tabOf(holdSpace(null), chatOf(c));
+  if (!tab || panes().some((p) => p.tab === tab.id && p.program?.shell)) return null;
+  return tab;
+}
+// Shows the tab that holds this terminal, if one does.
+function selectChat(address) {
+  const pane = paneOf(address);
+  const space = pane && spaceOfTab(pane.tab);
+  if (!space) return false;
+  run("space.select", { id: space.id });
+  run("tab.select", { id: pane.tab });
+  return true;
+}
+// Gives the chat's terminal a tab in the "channels" space. A space made for it starts with a
+// shell tab, closed once the chat's tab is there (the sidebar's timer finishes the job).
+let placing = []; // { address, shell: the tab to close, or "?" until it is known, until }
+function placeChat(address) {
+  const space = holdSpace(null);
+  if (space) run("space.select", { id: space.id });
+  else run("space.new", { name: HOLD, folder: PROJECTS });
+  run("terminal.keep", { terminal: address, place: "tab" });
+  placing.push({ address, shell: space ? null : "?", until: Date.now() + 8000 });
+}
+function settlePlacing() {
+  placing = placing.filter((p) => {
+    const pane = paneOf(p.address);
+    if (!pane) return Date.now() < p.until;
+    if (p.shell === "?") p.shell = holdSpace(null)?.tabs.find((x) => x.id !== pane.tab)?.id ?? null;
+    if (p.shell && p.shell !== pane.tab) run("tab.close", { id: p.shell, confirmed: true });
+    run("tab.select", { id: pane.tab });
+    return false;
+  });
+}
+const finding = new Set(); // channels whose chat terminal is being found or started
 function openChannel(c) {
   // The panel follows the channel: a task left open from another channel goes back to the list.
   const leaving = current()?.name !== c.name;
   setShared(CURRENT, c.name);
   if (leaving && shared(TASK)) showTasks();
-  showTab(null, chatOf(c), ["sh", "-c", 'PATH="$0:$PATH" exec "$@"', PATHS, COMMAND, "chat", c.name], PROJECTS);
+  if (selectChat(chatAddress(c))) return;
+  const old = oldChatTab(c);
+  if (old) { run("space.select", { id: holdSpace(null).id }); run("tab.select", { id: old.id }); return; }
+  if (finding.has(c.id)) return;
+  finding.add(c.id);
+  store('channels chat "$1" --bg --json', [c.name], 40000).then((out) => {
+    const { address } = JSON.parse(out);
+    setShared(CHATS, { ...(shared(CHATS) ?? {}), [c.id]: address });
+    // Only if the user is still on this channel: a slow start mustn't pull them back.
+    if (current()?.name === c.name && !selectChat(address)) placeChat(address);
+  }).catch((err) => fail(`Couldn't open #${c.name}'s chat: ${String(err?.message ?? err)}`))
+    .finally(() => finding.delete(c.id));
 }
 
 const isShown = (task) => shared(TASK) === task.id;
@@ -267,8 +308,11 @@ const isShown = (task) => shared(TASK) === task.id;
 function chatShown(c) {
   const space = spaces().find((p) => p.active);
   if (!space || space.name !== HOLD || (space.machine ?? null) !== null) return false;
-  const tab = tabOf(space, chatOf(c));
-  return Boolean(tab && tab.active);
+  const tab = space.tabs.find((x) => x.active);
+  if (!tab) return false;
+  const pane = paneOf(chatAddress(c));
+  if (pane) return pane.tab === tab.id;
+  return Boolean(oldChatTab(c)?.active);
 }
 
 // The selected channel: the one clicked last, else the one whose task is on screen, else the first.
@@ -278,8 +322,56 @@ function current() {
 }
 
 const ask = (dialog, channel, width, height) => openOverlay({ mod: MOD, kind: "dialog", width, height, props: { dialog, channel } });
-const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], icon: [560, 560], archive: [440, 190] };
+const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], icon: [560, 560], routines: [640, 640], archive: [440, 190] };
 const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog]);
+
+// ---------- routines: helpers for the dialog ----------
+
+// A row drawn collapsed this frame opens on the next: the dialog draws again a moment later.
+const cx_settle = (view) => { view.settleR = true; };
+
+const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEK = [1, 2, 3, 4, 5, 6, 0]; // the order the day buttons show, Monday first
+const PRESETS = [["weekdays", "Weekdays", 86], ["daily", "Daily", 62], ["hourly", "Hourly", 66], ["weekly", "Weekly", 70], ["cron", "Cron", 56]];
+const CATCHUP = [[0, "Don't", 62], [15, "15 min", 66], [60, "1 hour", 66], [240, "4 hours", 72], [1440, "1 day", 58]];
+const pad2 = (n) => `${n}`.padStart(2, "0");
+
+// A routine's stored schedule ("weekdays 09:00", "cron 0 9 * * 1-5") as the dialog's fields.
+function scheduleFields(spec) {
+  const f = { preset: "weekdays", time: "09:00", minute: "00", day: 1, cron: "0 9 * * 1-5" };
+  let m;
+  if ((m = /^(weekdays|daily) (\d\d:\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: m[1], time: m[2] });
+  else if ((m = /^hourly :(\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: "hourly", minute: m[1] });
+  else if ((m = /^weekly ([a-z]{3}) (\d\d:\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: "weekly", day: Math.max(0, DAYS.indexOf(m[1])), time: m[2] });
+  else if ((m = /^cron (.+)$/.exec(spec ?? ""))) Object.assign(f, { preset: "cron", cron: m[1] });
+  return f;
+}
+
+// "Today 09:00", "Tomorrow 09:00", "Fri 16:00", "Nov 20, 16:00".
+function whenText(iso) {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "";
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(d) - day(new Date())) / 86400000);
+  if (diff === 0) return `Today ${hm}`;
+  if (diff === 1) return `Tomorrow ${hm}`;
+  if (diff === -1) return `Yesterday ${hm}`;
+  if (Math.abs(diff) < 6) return `${DAY_LABELS[d.getDay()]} ${hm}`;
+  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()}, ${hm}`;
+}
+
+// A routine's last run in a few words, and the colour to say it in.
+function lastRun(r, t) {
+  const l = r.last;
+  if (!l) return ["never run", t.dim];
+  if (l.status === "missed") return [`missed ${whenText(l.due_at)}`, t.blocked];
+  const at = whenText(l.kind === "manual" ? l.at : l.due_at);
+  const late = l.kind !== "manual" && l.late_min > 2 ? ` · late, ran ${whenText(l.at).replace(/^Today /, "")}` : "";
+  const waiting = l.status === "queued" ? " · waiting for the chat" : "";
+  return [`${l.kind === "manual" ? "run now " : ""}${at}${late}${waiting}`, l.status === "queued" ? t.working : t.muted];
+}
 
 export default class Channels extends View {
   init(_props, cx) {
@@ -350,6 +442,7 @@ export default class Channels extends View {
     setShared(BUSY, false);
     cx.timer.every(40, (cx) => {
       if (this.settle) { this.settle = false; cx.notify(); }
+      if (placing.length) settlePlacing();
       this.drain(cx);
     });
     this.refresh(cx);
@@ -505,7 +598,7 @@ export default class Channels extends View {
     const t = theme();
     const data = shared(DATA);
     const here = current();
-    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: 200, height: 156, props: { menu: c.name } });
+    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: 200, height: 190, props: { menu: c.name } });
     const list = channels();
     const drag = this.drag?.moved ? this.drag : null;
     const fresh = new Set(this.knownChannels ? list.filter((c) => !this.knownChannels.has(c.name)).map((c) => c.name) : []);
@@ -545,6 +638,10 @@ export default class Channels extends View {
           .on_mouse_down("right", () => menu(c))
           .child(div().w(20).flex_none().text_size(15).child(iconOf(c)))
           .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(selected || lifted ? t.foreground : t.muted).child(c.name))
+          // A small clock while the channel has a routine switched on.
+          .child(div().id(`ch-clock-${c.name}`).flex_none().w(active(c) ? 14 : 0).h(14).overflow_hidden().opacity(active(c) ? 1 : 0)
+            .transition("opacity", 180).transition("width", 180)
+            .child(svg(ICON("clock")).size(13).text_color(selected ? t.muted : t.dim)))
           .when(!drag && (this.hover === key || selected), (el) => el.child(this.tool(`ch-more-${c.name}`, "···", () => menu(c), t))));
     };
     // The held row is drawn last, so it passes over the others.
@@ -796,6 +893,7 @@ export default class Channels extends View {
     return v_flex().size_full().py(4).bg(t.popover)
       .child(item("rename", "square-pen", "Rename", "rename"))
       .child(item("instructions", "file-text", "Instructions", "instructions"))
+      .child(item("routines", "clock", "Routines", "routines"))
       .child(item("icon", "layers", "Change icon", "icon"))
       .child(div().mx(8).my(4).h(1).bg(t.border))
       .child(item("archive", "archive", "Archive", "archive"));
@@ -821,6 +919,17 @@ export default class Channels extends View {
       this.query = "";
       this.input = InputState.new({ placeholder: "Search emoji, or type one", value: "" });
       this.input.on("change", (_e, cx) => { this.query = `${this.input.value() ?? ""}`.trim().toLowerCase(); cx.notify(); });
+    } else if (this.kind === "routines") {
+      this.view = "list"; // or "edit"
+      this.form = null; // the routine being edited or made
+      this.entered = true; // false for a frame when the view changes, so it slides in
+      this.confirm = null; // the routine whose Delete is waiting for a second click
+      this.sentAt = {}; // routine id -> when Run now was pressed, for the "Sent" note
+      this.leavingR = new Set(); // routines collapsing out of the list
+      this.knownR = null; // routines already drawn: a new one grows in
+      cx.timer.every(500, (cx) => { if (Object.values(this.sentAt).some((at) => Date.now() - at < 3500)) cx.notify(); });
+      cx.timer.every(30, (cx) => { if (this.settleR) { this.settleR = false; cx.notify(); } });
+      this.handle.focus();
     } else if (this.kind === "instructions") {
       this.text = TextareaState.new({ placeholder: "What this channel is for and how you want work done here.", value: "" });
       cx.spawn(async (cx) => {
@@ -891,6 +1000,7 @@ export default class Channels extends View {
   }
 
   render_dialog() {
+    if (this.kind === "routines") return this.render_routines();
     const t = theme();
     const p = props() ?? {};
     const kind = this.kind;
@@ -951,5 +1061,285 @@ export default class Channels extends View {
       .child(h_flex().gap(8).justify_end()
         .child(button("dg-cancel", "Cancel", false, () => this.close()))
         .when(kind !== "icon", (el) => el.child(button("dg-go", go, true, (_e, cx) => this.save(cx)))));
+  }
+
+  // ---------- the Routines dialog ----------
+  //
+  // One overlay with two views: the channel's routines (on/off, Run now, edit, delete, next and
+  // last run), and the editor for one (name, prompt, schedule preset or cron line, catch-up
+  // window, on/off). Changes show at once and reach the store behind them, like every dialog here.
+
+  channelNow() { return channels().find((c) => c.name === props().channel) ?? null; }
+
+  slideTo(view, cx) {
+    this.view = view;
+    this.entered = false;
+    this.confirm = null;
+    cx.timer.after(20, (cx) => { this.entered = true; cx.notify(); });
+    if (view === "list") this.handle.focus();
+    cx.notify();
+  }
+
+  openEditor(r, cx) {
+    const f = scheduleFields(r?.schedule ?? "weekdays 09:00");
+    const input = (value, placeholder) => {
+      const st = InputState.new({ placeholder, value });
+      st.on("change", (_e, cx) => this.previewSoon(cx));
+      st.on("submit", (_e, cx) => this.saveRoutine(cx));
+      return st;
+    };
+    this.form = {
+      id: r?.id ?? null, was: r?.name ?? null, preset: f.preset, day: f.day, catchup: r?.catchup_min ?? 60, enabled: r ? r.enabled : true,
+      name: input(r?.name ?? "", "morning-plan"), time: input(f.time, "09:00"), minute: input(f.minute, "00"), cron: input(f.cron, "0 9 * * 1-5"),
+      prompt: TextareaState.new({ placeholder: "What the chat is asked each time, e.g. Ask me for my plan for today.", value: r?.prompt ?? "" }),
+      preview: null, previewFor: null, error: null,
+    };
+    this.slideTo("edit", cx);
+    cx.timer.after(60, () => (r ? this.form?.prompt.focus() : this.form?.name.focus()));
+    this.previewSoon(cx, 0);
+  }
+
+  specOf(f) {
+    const v = (st) => `${st.value() ?? ""}`.trim();
+    if (f.preset === "hourly") return `hourly :${v(f.minute).replace(/^:/, "") || "00"}`;
+    if (f.preset === "weekly") return `weekly ${DAYS[f.day]} ${v(f.time)}`;
+    if (f.preset === "cron") return `cron ${v(f.cron)}`;
+    return `${f.preset} ${v(f.time)}`;
+  }
+
+  // The schedule in words and its next runs, from `channels routine preview`, a moment after the
+  // last change: the command is the one judge of what a schedule means.
+  previewSoon(cx, ms = 220) {
+    const f = this.form;
+    if (!f) return;
+    const spec = this.specOf(f);
+    f.want = spec;
+    cx.timer.after(ms, (cx) => {
+      if (this.form !== f || f.want !== spec || f.previewFor === spec) return;
+      store('channels routine preview "$1" --json', [spec]).then((out) => {
+        if (this.form !== f || f.want !== spec) return;
+        f.preview = JSON.parse(out);
+        f.previewFor = spec;
+        cx.notify();
+      }).catch((err) => { f.preview = { error: String(err?.message ?? err) }; cx.notify(); });
+    });
+    cx.notify();
+  }
+
+  saveRoutine(cx) {
+    const f = this.form;
+    const c = this.channelNow();
+    if (!f || !c) return;
+    const name = `${f.name.value() ?? ""}`.trim().toLowerCase();
+    const prompt = `${f.prompt.value() ?? ""}`.trim();
+    const spec = this.specOf(f);
+    const say = (error) => { f.error = error; cx.notify(); };
+    if (!NAME.test(name)) return say("Name it with lowercase letters, digits, - and _, like morning-plan.");
+    if ((c.routines ?? []).some((r) => r.name === name && r.id !== f.id)) return say(`#${c.name} already has a routine called ${name}.`);
+    if (!prompt) return say("Write the prompt: what the chat is asked each time.");
+    if (f.previewFor === spec && f.preview?.error) return say(f.preview.error);
+    const shown = { name, prompt, schedule: f.preview?.spec ?? spec, label: f.previewFor === spec ? f.preview?.label ?? spec : spec, catchup_min: f.catchup, enabled: f.enabled, next_at: f.enabled ? f.preview?.next?.[0] ?? null : null };
+    const args = [c.name, f.was ?? name, spec, String(f.catchup), prompt, name];
+    if (f.id) {
+      submit((all) => { for (const ch of all) if (ch.name === c.name) for (const r of ch.routines ?? []) if (r.id === f.id) Object.assign(r, shown); },
+        `channels routine edit "$1" "$2" --schedule "$3" --catchup "$4" --prompt "$5" --rename "$6" && channels routine ${f.enabled ? "on" : "off"} "$1" "$6"`, args, `save the routine ${name}`);
+    } else {
+      submit((all) => { for (const ch of all) if (ch.name === c.name) (ch.routines ??= []).push({ id: `new-${name}`, last: null, ...shown }); },
+        `channels routine add "$1" "$6" --schedule "$3" --catchup "$4" --prompt "$5"${f.enabled ? "" : " --off"}`, args, `add the routine ${name}`);
+    }
+    this.form = null;
+    this.slideTo("list", cx);
+  }
+
+  setRoutine(r, change, script, what) {
+    const c = this.channelNow();
+    submit((all) => { for (const ch of all) if (ch.name === c.name) for (const x of ch.routines ?? []) if (x.id === r.id) Object.assign(x, change); }, script, [c.name, r.name], what);
+  }
+
+  toggleRoutine(r, on) {
+    this.setRoutine(r, { enabled: on, next_at: on ? r.next_at : null }, `channels routine ${on ? "on" : "off"} "$1" "$2"`, `switch ${r.name} ${on ? "on" : "off"}`);
+  }
+
+  runNow(r, cx) {
+    this.sentAt[r.id] = Date.now();
+    this.setRoutine(r, { last: { kind: "manual", status: "queued", at: new Date().toISOString(), late_min: 0 } }, 'channels routine run "$1" "$2"', `run ${r.name}`);
+    cx.notify();
+  }
+
+  removeRoutine(r, cx) {
+    if (this.confirm !== r.id) { this.confirm = r.id; return cx.notify(); }
+    this.confirm = null;
+    this.leavingR.add(r.id);
+    cx.notify();
+    cx.timer.after(190, (cx) => {
+      const c = this.channelNow();
+      submit((all) => { for (const ch of all) if (ch.name === c.name) ch.routines = (ch.routines ?? []).filter((x) => x.id !== r.id); },
+        'channels routine rm "$1" "$2"', [c.name, r.name], `delete ${r.name}`);
+      this.leavingR.delete(r.id);
+      if (this.form?.id === r.id) { this.form = null; this.slideTo("list", cx); }
+      cx.notify();
+    });
+  }
+
+  // A switch drawn the macOS way: the track fills with the accent colour and the knob springs across.
+  switchFor(id, on, change, t) {
+    return Switch.new(id).checked(on).on_change((v, cx) => { change(v, cx); cx.notify(); }).accessibility_label(on ? "On" : "Off")
+      .relative().flex_none().w(34).h(20).rounded(10).bg(t.raised).cursor_pointer()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(div().absolute().top(0).left(0).w(34).h(20).rounded(10).bg(t.accent).opacity(on ? 1 : 0).transition("opacity", 160))
+      .child(div().absolute().top(2).left(on ? 16 : 2).w(16).h(16).rounded(8).bg("#ffffff").shadow_sm().spring("left", { response: 220, damping: 0.78 }));
+  }
+
+  // A row of choices with one picked: a highlight that glides to the picked one.
+  segmented(id, options, value, pick, t) {
+    const at = Math.max(0, options.findIndex((o) => o[0] === value));
+    const left = options.slice(0, at).reduce((sum, o) => sum + o[2] + 2, 0);
+    return RadioGroup.new(id).relative().flex().flex_row().flex_none().self_start().gap(2).p(3).rounded(10).bg(t.background)
+      .child(div().absolute().top(3).h(28).left(3 + left).w(options[at]?.[2] ?? 0).rounded(7).bg(t.raised).shadow_sm()
+        .spring("left", { response: 240, damping: 0.86 }).transition("width", 180))
+      .children(options.map(([v, label, w]) => Radio.new(`${id}-${v}`).checked(v === value).on_change((_on, cx) => { pick(v, cx); cx.notify(); })
+        .relative().w(w).h(28).flex().items_center().justify_center().rounded(7).text_size(13).cursor_pointer()
+        .text_color(v === value ? t.foreground : t.muted).hover((st) => st.text_color(t.foreground)).child(label)));
+  }
+
+  routineRow(r, t, fresh) {
+    const key = `rt:${r.id}`;
+    const hover = this.hover === key;
+    const confirming = this.confirm === r.id;
+    const closed = this.leavingR.has(r.id) || fresh;
+    const sent = Date.now() - (this.sentAt[r.id] ?? 0) < 3000;
+    const [last, lastColor] = lastRun(r, t);
+    const meta = h_flex().gap(14).text_size(12).text_color(t.dim)
+      .child(h_flex().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off")))
+      .child(h_flex().gap(4).min_w(0).child("Last").child(div().truncate().text_color(lastColor).child(sent ? "sent to the chat just now" : last)));
+    return h_flex().id(`rt-${r.id}`).flex_none().overflow_hidden().h(closed ? 0 : 78).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
+      .child(h_flex().id(`rt-in-${r.id}`).flex_1().min_w(0).h(74).px(12).gap(12).items_center().rounded(10)
+        .when(hover || confirming, (el) => el.bg(t.raised))
+        .on_hover(this.hovering(key))
+        .child(div().w(30).h(30).flex_none().rounded(8).bg(hover || confirming ? t.background : t.raised).flex().items_center().justify_center()
+          .child(svg(ICON("clock")).size(15).text_color(r.enabled ? t.accent : t.dim)))
+        .child(v_flex().flex_1().min_w(0).gap(3)
+          .child(h_flex().gap(8).items_baseline().min_w(0)
+            .child(div().flex_none().text_size(14).font_medium().text_color(r.enabled ? t.foreground : t.muted).child(r.name))
+            .child(div().truncate().text_size(12.5).text_color(r.error ? t.blocked : t.muted).child(r.error ?? r.label ?? r.schedule)))
+          .child(div().truncate().text_size(12.5).text_color(t.dim).child(r.prompt))
+          .child(meta))
+        .when(confirming, (el) => el
+          .child(div().text_size(12.5).text_color(t.muted).child("Delete it?"))
+          .child(this.smallButton(`rt-no-${r.id}`, "Cancel", false, (_e, cx) => { this.confirm = null; cx.notify(); }, t))
+          .child(this.smallButton(`rt-yes-${r.id}`, "Delete", "danger", (_e, cx) => this.removeRoutine(r, cx), t)))
+        .when(!confirming, (el) => el
+          // The row's actions show on hover, and keep their place either way so nothing moves.
+          .child(h_flex().gap(2).items_center().opacity(hover ? 1 : 0).transition("opacity", 120)
+            .child(this.smallButton(`rt-run-${r.id}`, h_flex().gap(5).items_center().child(svg(ICON("play")).size(11)).child("Run now"), false, (_e, cx) => this.runNow(r, cx), t))
+            .child(this.tool(`rt-edit-${r.id}`, svg(ICON("square-pen")).size(14), (_e, cx) => this.openEditor(r, cx), t))
+            .child(this.tool(`rt-del-${r.id}`, svg(ICON("trash-2")).size(14), (_e, cx) => this.removeRoutine(r, cx), t)))
+          .child(this.switchFor(`rt-on-${r.id}`, r.enabled, (on) => this.toggleRoutine(r, on), t))));
+  }
+
+  smallButton(id, label, kind, action, t) {
+    return h_flex().id(id).h(26).px(9).items_center().rounded(6).text_size(12.5).font_medium().cursor_pointer()
+      .bg(kind === "danger" ? t.blocked : t.selected).text_color(kind === "danger" ? "#ffffff" : t.foreground)
+      .hover((st) => st.opacity(0.88)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(action).child(label);
+  }
+
+  render_routines() {
+    const t = theme();
+    const c = this.channelNow();
+    const p = props() ?? {};
+    const failed = shared(FAIL);
+    const button = (id, text, primary, action) => h_flex().id(id).h(34).px(14).gap(6).items_center().rounded(9)
+      .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground)
+      .text_size(13.5).font_medium().cursor_pointer().hover((st) => st.opacity(0.88)).on_click(action).child(text);
+    const head = (title, back) => h_flex().pb(back ? 16 : 6).gap(6).items_center()
+      .when(Boolean(back), (el) => el.child(this.tool("rt-back", svg(ICON("chevron-left")).size(16), back, t)))
+      .child(div().flex_1().text_size(16).font_semibold().child(title));
+
+    let body;
+    if (this.view === "edit" && this.form) {
+      const f = this.form;
+      const label = (text) => div().pt(16).pb(8).text_size(13.5).font_medium().child(text);
+      const field = (el, w) => el.px(12).rounded(9).border_1().border_color(t.border).bg(t.background).text_size(14).text_color(t.foreground).when(Boolean(w), (e) => e.w(w));
+      const spec = this.specOf(f);
+      const pv = f.previewFor === spec ? f.preview : null;
+      const scheduleLine = {
+        weekdays: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Monday to Friday at")).child(field(Input.new(f.time).h(30), 84)),
+        daily: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Every day at")).child(field(Input.new(f.time).h(30), 84)),
+        hourly: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Every hour at minute")).child(field(Input.new(f.minute).h(30), 64)),
+        weekly: () => h_flex().gap(10).items_center()
+          .child(RadioGroup.new("rt-days").flex().flex_row().gap(4).children(WEEK.map((d) => Radio.new(`rt-day-${d}`).checked(f.day === d)
+            .on_change((_on, cx) => { f.day = d; this.previewSoon(cx); }).w(40).h(30).flex().items_center().justify_center().rounded(8).text_size(12.5).cursor_pointer()
+            .bg(f.day === d ? t.accent : t.raised).text_color(f.day === d ? t.accent_foreground : t.muted).when(f.day !== d, (el) => el.hover((st) => st.text_color(t.foreground)))
+            .child(DAY_LABELS[d]))))
+          .child(div().text_size(13).text_color(t.muted).child("at")).child(field(Input.new(f.time).h(30), 84)),
+        cron: () => v_flex().gap(6).flex_1()
+          .child(field(Input.new(f.cron).h(34)).border_color(pv?.error ? t.blocked : t.border))
+          .child(h_flex().gap(18).pl(12).text_size(11.5).text_color(t.dim).children(["minute", "hour", "day", "month", "weekday"].map((x) => div().child(x)))),
+      }[f.preset]();
+      const catchups = CATCHUP.some((o) => o[0] === f.catchup) ? CATCHUP : [...CATCHUP, [f.catchup, f.catchup % 60 ? `${f.catchup} min` : `${f.catchup / 60} h`, 64]];
+      const next = pv?.error ? null : pv?.next ?? null;
+      body = v_flex().flex_1().min_h(0)
+        .child(head(f.id ? "Edit routine" : "New routine", (_e, cx) => { this.form = null; this.slideTo("list", cx); })
+          .child(div().text_size(13).text_color(t.muted).child(f.enabled ? "On" : "Off"))
+          .child(this.switchFor("rt-enabled", f.enabled, (on) => { f.enabled = on; }, t)))
+        .child(div().pb(8).text_size(13.5).font_medium().child("Name"))
+        .child(field(Input.new(f.name).h(38)))
+        .child(label("Prompt"))
+        .child(field(Textarea.new(f.prompt).h(92).py(10)))
+        .child(label("Schedule"))
+        .child(this.segmented("rt-preset", PRESETS, f.preset, (v, cx) => { f.preset = v; this.previewSoon(cx, 0); }, t))
+        .child(h_flex().pt(10).min_h(40).child(scheduleLine))
+        .when(f.preset === "cron" && Boolean(pv?.error), (el) => el.child(div().pt(6).text_size(12.5).text_color(t.blocked).child(pv.error)))
+        .when(f.preset !== "cron" && Boolean(pv?.error), (el) => el.child(div().pt(6).text_size(12.5).text_color(t.blocked).child(pv.error)))
+        .child(label("If the Mac was asleep, still run it within"))
+        .child(this.segmented("rt-catchup", catchups, f.catchup, (v) => { f.catchup = v; }, t))
+        .child(div().flex_1())
+        .child(h_flex().pb(12).gap(8).items_center().text_size(12.5).text_color(f.error ? t.blocked : t.dim)
+          .child(svg(ICON("clock")).size(13).text_color(t.dim))
+          .child(div().truncate().child(f.error ?? (pv?.error ? "Fix the schedule to see when it runs next."
+            : !next ? "Working out when it runs…"
+            : `${pv.label}. ${f.enabled ? `Next ${whenText(next[0])}${next[1] ? `, then ${whenText(next[1])}` : ""}.` : "Off: it won't run until you switch it on."} Times are this Mac's.`))))
+        .child(h_flex().gap(8).items_center()
+          .when(Boolean(f.id), (el) => el.child(h_flex().id("rt-delete").h(34).px(12).items_center().rounded(9).text_size(13.5).font_medium().cursor_pointer()
+            .text_color(t.blocked).hover((st) => st.bg(t.raised))
+            .on_click((_e, cx) => { const r = (c?.routines ?? []).find((x) => x.id === f.id); if (r) { this.confirm = r.id; this.removeRoutine(r, cx); } })
+            .child("Delete")))
+          .child(div().flex_1())
+          .child(button("rt-cancel", "Cancel", false, (_e, cx) => { this.form = null; this.slideTo("list", cx); }))
+          .child(button("rt-save", f.id ? "Save" : "Create", true, (_e, cx) => this.saveRoutine(cx))));
+    } else {
+      const list = c?.routines ?? [];
+      const fresh = new Set(this.knownR ? list.filter((r) => !this.knownR.has(r.id)).map((r) => r.id) : []);
+      this.knownR = new Set(list.map((r) => r.id));
+      if (fresh.size) cx_settle(this);
+      body = v_flex().flex_1().min_h(0)
+        .child(head("Routines", null).child(this.tool("dg-x", svg(ICON("x")).size(16), () => this.close(), t)))
+        .child(h_flex().pb(14).gap(8).items_center().text_size(14).text_color(t.muted).child(div().text_size(15).child(iconOf(c))).child(p.channel))
+        .child(v_flex().id("rt-list").flex_1().min_h(0).overflow_y_scrollbar().gap(2)
+          .children(list.map((r) => this.routineRow(r, t, fresh.has(r.id))))
+          .when(list.length === 0, (el) => el.child(v_flex().pt(48).gap(6).items_center()
+            .child(svg(ICON("clock")).size(22).text_color(t.dim))
+            .child(div().pt(6).text_size(14).text_color(t.muted).child("No routines yet"))
+            .child(div().text_size(12.5).text_color(t.dim).child("A routine types a prompt into this channel's chat on a schedule.")))))
+        .child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
+          .child("Each routine types its prompt into this channel's chat on schedule, starting the chat if it isn't open. Times are this Mac's local time."))
+        .child(h_flex().gap(8).items_center()
+          .child(button("rt-new", h_flex().gap(6).items_center().child(svg(ICON("plus")).size(14)).child("New routine"), false, (_e, cx) => this.openEditor(null, cx)))
+          .child(div().flex_1())
+          .child(button("rt-done", "Done", true, () => this.close())));
+    }
+    return v_flex().id("ch-dialog").track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        if (e.key === "escape") { if (this.view === "edit") { this.form = null; this.slideTo("list", cx); } else this.close(); }
+        else if (e.key === "enter" && this.view === "edit" && (e.modifiers?.platform || e.modifiers?.control)) this.saveRoutine(cx);
+        else return;
+        cx.stop_propagation();
+      })
+      .size_full().min_h(0).p(20).bg(t.popover).text_color(t.foreground)
+      .opacity(this.arrived ? 1 : 0).transition("opacity", 130)
+      .child(v_flex().size_full().min_h(0).relative().left(this.entered ? 0 : (this.view === "edit" ? 14 : -14)).opacity(this.entered ? 1 : 0)
+        .transition("left", 200).transition("opacity", 160)
+        .child(body)
+        .when(Boolean(failed) && Date.now() - failed.at < 12000, (el) => el.child(div().pt(8).text_size(12.5).text_color(t.blocked).child(failed?.message ?? ""))));
   }
 }
