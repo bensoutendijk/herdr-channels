@@ -1,0 +1,19 @@
+# Every PR and every push to main runs the tests, on Linux and on macOS (the machine this runs on).
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --check bin/channels.mjs && node --check install.mjs
+      - run: node --test test/*.test.mjs

@@ -1,0 +1,107 @@
+{
+  "id": "root",
+  "type": "row",
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "children": [
+        {
+          "id": "sidebar-head",
+          "type": "block",
+          "content": {
+            "mod": "channels",
+            "props": {
+              "head": true
+            }
+          },
+          "size": {
+            "px": 52
+          },
+          "window_drag": true
+        },
+        {
+          "id": "sidebar-list",
+          "type": "block",
+          "content": {
+            "mod": "channels"
+          }
+        }
+      ],
+      "size": {
+        "px": 280
+      },
+      "min": 180,
+      "max": 480,
+      "background": "chrome",
+      "resizable": false
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "children": [
+        {
+          "id": "bar",
+          "type": "block",
+          "content": {
+            "mod": "channels",
+            "props": {
+              "bar": true
+            }
+          },
+          "size": {
+            "px": 52
+          },
+          "window_drag": true
+        },
+        {
+          "id": "main",
+          "type": "block",
+          "content": {
+            "tab": "active",
+            "pane": {
+              "gap": 0
+            }
+          }
+        }
+      ],
+      "resizable": false
+    },
+    {
+      "id": "panel",
+      "type": "stack",
+      "children": [
+        {
+          "id": "tasks",
+          "type": "block",
+          "content": {
+            "mod": "channels",
+            "props": {
+              "panel": true
+            }
+          }
+        }
+      ],
+      "active": "tasks",
+      "size": {
+        "px": 560
+      },
+      "min": 300,
+      "max": 1100
+    }
+  ],
+  "background": "canvas",
+  "terminal_padding": [
+    14,
+    16
+  ],
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "titlebar": "none",
+  "traffic_lights": [
+    16,
+    19
+  ]
+}
