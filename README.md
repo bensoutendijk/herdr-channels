@@ -15,7 +15,7 @@ What's here:
 - `bin/channels.mjs`: the `channels` command, one Node script with no dependencies. The mod and
   the chats use it.
 - `install.mjs`: puts both in place.
-- `test/`: the command's and the install's tests (`node --test test/`).
+- `test/`: the command's and the install's tests (`node --test test/*.test.mjs`).
 
 ## Requirements
 
