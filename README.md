@@ -12,6 +12,8 @@ hears about it with your next message; it is interrupted only when it asked to b
 Everything is local: the channel store is a folder on disk, tasks run under your own `claude`, and
 the herdr mod runs every command on the same machine. No server is involved.
 
+![The channels layout in Herdr: the channel list on the left, the #website channel's Claude Code chat in the middle, and the tasks panel on the right with one task that needs input, one working and one ready for review](preview.png)
+
 ## Contents
 
 | Path | Purpose |
@@ -22,6 +24,7 @@ the herdr mod runs every command on the same machine. No server is involved.
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
 | `install.mjs` | Installer for the command, mod and layout |
 | `test/` | Tests for the command and the installer |
+| `preview.png`, `docs/` | Screenshots of the layout, taken in a sandbox with demo channels |
 
 ## Requirements
 
@@ -130,6 +133,9 @@ adds the routines timer to an installation that doesn't have it yet.
   `···` menu to rename it, edit its instructions (the description its chat reads at startup), set
   up its routines, change its icon or archive it. Drag channels to reorder them. A small clock next
   to a channel's name means it has a routine switched on.
+
+  <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Routines, Change icon and Archive">
+
 - **Chat.** Selecting a channel opens its chat in the main area. Ask the chat to start work and it
   creates a task with `channels start`, writing a brief that the task can follow on its own.
 - **Tasks panel.** The button at the top right toggles the panel. It groups the channel's tasks into
@@ -137,6 +143,8 @@ adds the routines timer to an installation that doesn't have it yet.
   seen (it finished or asked something since you last opened it). Click a task to open it live. Press the left arrow
   on an empty prompt to return to the list. **+** starts a new session in the projects folder. The
   check mark resolves a task: it is hidden from the panel, and the session is not stopped or deleted.
+
+  <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: the task's Claude Code session asks which homepage headline to use, with three options to choose from">
 
 ### Task events
 
@@ -193,6 +201,8 @@ window and an on/off switch. The store keeps each routine with a record of its l
 routines with their next and last runs. You can add, edit or delete a routine, switch it on or off,
 and **Run now** sends its prompt at once without changing the schedule. You can also ask the chat
 ("every weekday at 9, ask me for my plan"): it sets the routine up with `channels routine add`.
+
+<img src="docs/routines.png" width="480" alt="The Routines dialog for the #website channel, listing one routine, morning-check, that runs on weekdays at 09:00, with its prompt, its next run and an on/off switch">
 
 **Schedules** use the Mac's local time:
 
