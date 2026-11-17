@@ -11,7 +11,7 @@
 //   channels start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] <brief | ->
 //   channels file <channel> <session> [--name <name>] [--folder <path>]
 //   channels read <session> [--limit <n>] [--json]   a session's state and latest messages
-//   channels send <session> <text | ->        a message to a session
+//   channels send <session> <text | ->        a message to a session; continues it, or files the copy Claude Code starts
 //   channels dismiss <session> [--by <who>]
 //   channels listen <channel> [--once]        what the chat runs beside itself; by hand, for a look at what it would say
 //
@@ -56,6 +56,8 @@ export const channelsDir = (home = homedir()) => (process.env.CHANNELS_DIR ? res
 export const projectsDir = (home = homedir()) => (process.env.CHANNELS_PROJECTS ? resolve(expand(process.env.CHANNELS_PROJECTS, home)) : join(home, 'projects'));
 
 export const LISTEN = { pollMs: 3000, readyMs: 30_000, sendTimeoutMs: 10 * 60_000 };
+// How long send waits for a stopped task's process to exit before it resumes the session (CHANNELS_STOP_WAIT_MS).
+const stopWaitMs = () => (Number(process.env.CHANNELS_STOP_WAIT_MS) > 0 ? Number(process.env.CHANNELS_STOP_WAIT_MS) : 30_000);
 
 export class UsageError extends Error {}
 const fail = (msg) => { throw new UsageError(msg); };
@@ -393,12 +395,20 @@ function liveNames(live) {
 function showTask(home, t, names) {
   const job = t.machine === LOCAL ? jobState(home, t.job) : null;
   const sessionId = t.session_id ?? job?.sessionId ?? null;
+  // A copy Claude Code started in a task's place keeps the task's name, unless the copy was renamed by someone:
+  // Claude Code names the copy from the message it was sent.
+  if (t.how === 'copied' && t.name && job?.nameSource !== 'user') return taskRow(t, sessionId, t.name);
   let name = job?.name || '';
   if (!name && t.machine === LOCAL && sessionId) name = names.get(sessionId) || (t.dismissed_at ? '' : transcriptTitle(home, sessionId));
+  return taskRow(t, sessionId, name || t.name || '');
+}
+
+function taskRow(t, sessionId, name) {
   return {
     id: `${t.machine}/${sessionId ?? `job:${t.job}`}`, machine: t.machine, session_id: sessionId, job: t.job ?? null,
-    name: name || t.name || '', repo: t.repo ?? null, folder: t.folder ?? null, added_at: t.added_at, how: t.how,
+    name, repo: t.repo ?? null, folder: t.folder ?? null, added_at: t.added_at, how: t.how,
     dismissed: Boolean(t.dismissed_at), dismissed_at: t.dismissed_at ?? null, dismissed_by: t.dismissed_by ?? null,
+    superseded_by: t.superseded_by ?? null,
   };
 }
 
@@ -547,7 +557,39 @@ function looked(home, t, jobs, live) {
   const kind = st.state === 'done' || st.state === 'failed' ? 'done' : st.state === 'waiting_on_user' || st.state === 'blocked' ? 'needs' : null;
   let work = job?.work ?? 0;
   if (!job && sid) { const f = findTranscript(home, sid); try { work = f ? statSync(f).size : 0; } catch { work = 0; } }
-  return { sid, job, live: l, st, kind, mark: { kind, work } };
+  return { sid, job, live: l, st, kind, transcript: null, mark: { kind, work } };
+}
+
+// Reads the session's transcript for what looked saw, and adds its last message's fingerprint to the mark. Only
+// done when there is something to say, as a transcript can be large.
+function withLast(home, now) {
+  now.transcript = now.sid ? readTranscript(home, now.sid, now.job?.transcript) : null;
+  now.mark.last = lastMark(now.transcript?.last?.text);
+  return now;
+}
+
+// A short fingerprint of a task's last message, kept with what it was last reported as: a report that would repeat
+// the message the chat already has isn't sent.
+const lastMark = (text) => (text ? createHash('sha256').update(text).digest('hex').slice(0, 16) : null);
+
+// Files a session into a channel as a task. Where it stands now isn't news to the chat: only what it does after.
+// With `supersedes`, the task it replaces in that channel is marked superseded by it and resolved, so one task owns
+// the work.
+function fileTask({ dir, deps, name, task, how, supersedes = null }) {
+  const now = looked(deps.home, task, readJobs(deps.home), readLive(deps.home));
+  if (now.kind) withLast(deps.home, now);
+  const at = new Date().toISOString();
+  return updateStore(dir, (store) => {
+    if (supersedes) {
+      const old = channelOf(store, name).tasks.find((x) => sameSession(x, supersedes.machine, supersedes.id));
+      if (old) {
+        old.superseded_by = `${task.machine}/${task.session_id ?? `job:${task.job}`}`;
+        old.dismissed_at ??= at;
+        old.dismissed_by ??= 'send';
+      }
+    }
+    return addTask(store, name, { ...task, added_at: at, how, dismissed_at: null, dismissed_by: null, told: now.kind ? now.mark : null });
+  });
 }
 
 async function file({ dir, deps, name, ref, title, folder }) {
@@ -555,9 +597,7 @@ async function file({ dir, deps, name, ref, title, folder }) {
   const { machine, id } = parseSessionRef(ref);
   const s = await findLocalSession({ deps, id });
   const task = { machine, session_id: s.session_id, job: s.job, name: title || s.name, repo: projectOf(deps.projects, folder || s.cwd), folder: folder || s.cwd };
-  // Where it stands now isn't news to the chat: only what it does after being filed is.
-  const now = looked(deps.home, task, readJobs(deps.home), readLive(deps.home));
-  return updateStore(dir, (store) => addTask(store, name, { ...task, added_at: new Date().toISOString(), how: 'filed', dismissed_at: null, dismissed_by: null, told: now.kind ? now.mark : null }));
+  return fileTask({ dir, deps, name, task, how: 'filed' });
 }
 
 function dismiss({ dir, ref, by }) {
@@ -627,14 +667,32 @@ function printSession({ summary: s, messages, more }) {
   if (more) console.log('(older messages: --limit up to 40)');
 }
 
-// The channel a session is a task in, for the line its message opens with.
-function taskChannel(dir, sessionId) {
-  return readStore(dir).channels.find((c) => c.tasks.some((t) => t.machine === LOCAL && t.session_id && sessionId.startsWith(t.session_id)))?.name ?? null;
+// The channel a session is a task in, and that task: the line its message opens with names the channel, and a
+// copy Claude Code starts in its place is filed there.
+function taskOf(dir, sessionId) {
+  for (const c of readStore(dir).channels) {
+    const t = c.tasks.find((x) => x.machine === LOCAL && x.session_id && sessionId.startsWith(x.session_id));
+    if (t) return { channel: c.name, archived: Boolean(c.archived_at), task: t };
+  }
+  return null;
+}
+
+// Waits until a process has exited: true, or false when it still runs after `ms`.
+async function exited(deps, pid, ms) {
+  const until = Date.now() + ms;
+  while (alive(pid)) {
+    if (Date.now() > until) return false;
+    await deps.sleep(200);
+  }
+  return true;
 }
 
 // A message to a background session. One whose turn is over (done, or ended asking something) is woken with it:
-// its process is stopped and the same session resumes in the background with the message as its next turn. A
-// session still working, or showing a dialog, isn't interrupted; one that isn't a background job can't be reached.
+// its process is stopped, and once that process has exited the same session resumes in the background with the
+// message as its next turn (`claude --bg --resume` on a session whose process still runs starts a copy instead).
+// If Claude Code starts a copy anyway, the copy is filed into the original's channel and the original is marked
+// superseded by it. A session still working, or showing a dialog, isn't interrupted; one that isn't a background
+// job can't be reached.
 async function send({ dir, deps, ref, text }) {
   if (!text.trim()) fail('A message needs some text.');
   const { s, job, live, st } = await sessionFacts(deps, ref);
@@ -642,17 +700,44 @@ async function send({ dir, deps, ref, text }) {
   if (live && (st.state === 'working' || st.state === 'waiting_on_job')) fail(`${LOCAL}/${s.session_id} is working. Send it after it finishes; or type into it in its view in the panel.`);
   if (st.state === 'waiting_on_user') fail(`${LOCAL}/${s.session_id} is showing a prompt (${live?.waitingFor || 'a dialog'}): answer it in its view in the panel.`);
   const jobId = job?.job ?? s.job;
-  const channel = taskChannel(dir, s.session_id);
+  const filed = taskOf(dir, s.session_id);
+  const channel = filed?.channel ?? null;
   const body = `${channel ? `From the user via #${channel}'s chat: ` : 'From the user via a channel chat: '}${text}`;
   if (live) {
     const stop = await deps.run(deps.claude, ['stop', jobId], { cwd: deps.home, env: cleanEnv(), timeout: 60_000 });
     if (stop.code !== 0) fail(`Couldn't stop ${jobId} to wake it: ${cut(oneLine(stop.err || stop.out || 'no output'), 240)}`);
+    const ms = stopWaitMs();
+    if (!(await exited(deps, live.pid, ms))) {
+      fail(`${LOCAL}/${s.session_id} was told to stop, but its process (pid ${live.pid}) still runs after ${Math.round(ms / 100) / 10}s. The message wasn't sent and nothing was started, since resuming it now would start a copy. Send it again in a moment.`);
+    }
   }
   const r = await deps.run(deps.claude, ['--bg', '--resume', s.session_id, body], { cwd: job?.cwd || s.cwd || deps.projects, env: cleanEnv(), timeout: 90_000 });
   const woke = (/backgrounded · (\S+)/.exec(`${r.out}${r.err}`) || [])[1];
   if (!woke) fail(`The session didn't resume: ${cut(oneLine(r.err || r.out || 'no output'), 240)}`);
-  if (woke !== jobId) return { id: s.session_id, machine: LOCAL, delivered_as: 'copy_started', job: woke, note: `Claude Code started a copy (${woke}) instead of continuing it.` };
-  return { id: s.session_id, machine: LOCAL, delivered_as: 'resumed', job: woke, note: 'It continues with this as its next message.' };
+  if (woke === jobId) return { id: s.session_id, machine: LOCAL, delivered_as: 'resumed', job: woke, note: 'It continues with this as its next message.' };
+  // A copy: a new session with the same history and the message as its next turn. Its session id is written a
+  // moment after it starts.
+  let copyId = null;
+  for (let k = 0; k < 30 && !copyId; k++) {
+    copyId = jobState(deps.home, woke)?.sessionId ?? null;
+    if (!copyId) await deps.sleep(300);
+  }
+  const copyRef = `${LOCAL}/${copyId ?? `job:${woke}`}`;
+  const out = { id: s.session_id, machine: LOCAL, delivered_as: 'copy_started', job: woke, copy: { id: copyRef, session_id: copyId, job: woke }, filed_in: null };
+  const head = `Claude Code didn't continue ${LOCAL}/${s.session_id}: it started a copy of it, ${copyRef} (job ${woke}), and the message went to the copy.`;
+  if (!filed || filed.archived) return { ...out, note: `${head} The original isn't a task in an open channel, so the copy wasn't filed anywhere.` };
+  const was = filed.task;
+  const task = {
+    machine: LOCAL, session_id: copyId, job: woke, name: was.name || s.name || '', repo: was.repo ?? projectOf(deps.projects, job?.cwd || s.cwd),
+    folder: was.folder ?? job?.cwd ?? s.cwd ?? null, copy_of: `${LOCAL}/${s.session_id}`,
+  };
+  try {
+    fileTask({ dir, deps, name: channel, task, how: 'copied', supersedes: { machine: LOCAL, id: was.session_id ?? was.job } });
+  } catch (err) {
+    if (!(err instanceof UsageError)) throw err;
+    return { ...out, note: `${head} Filing the copy into #${channel} failed: ${err.message}` };
+  }
+  return { ...out, filed_in: channel, note: `${head} The copy is filed into #${channel} as "${task.name}" in its place, and the original task is marked superseded by it and resolved.` };
 }
 
 // ---------- the channel's chat ----------
@@ -728,19 +813,25 @@ export async function listenTick({ dir, home, channelId, deliver }) {
     const now = looked(home, t, jobs, live);
     if (!now.kind || !now.sid) continue;
     if (t.told && t.told.kind === now.mark.kind && t.told.work === now.mark.work) continue;
+    withLast(home, now);
+    const mark = () => updateStore(dir, (s) => {
+      const ch = s.channels.find((x) => x.id === channelId);
+      const task = ch?.tasks.find((x) => sameSession(x, t.machine, t.session_id ?? t.job));
+      if (task) task.told = now.mark;
+    });
+    // A report whose last message is the one the chat was last given for this task, as a report or a question, says
+    // nothing new (a task stopped while it waited on the user, say): it's marked as seen, not sent.
+    if (now.kind === 'done' && now.mark.last && t.told?.last === now.mark.last) { mark(); continue; }
     const ref = `${LOCAL}/${now.sid}`;
-    const transcript = readTranscript(home, now.sid, now.job?.transcript);
-    const name = now.job?.name || now.live?.name || t.name || transcript?.title || '';
+    const transcript = now.transcript;
+    const keep = t.how === 'copied' && t.name && jobState(home, t.job)?.nameSource !== 'user'; // as list names it
+    const name = (keep ? t.name : now.job?.name || now.live?.name || t.name || transcript?.title) || '';
     const at = now.job?.updatedAt || new Date().toISOString();
     const text = now.kind === 'done'
       ? reportText({ channel: c.name, ref, name, at, doing: now.st.doing, last: transcript?.last?.text, result: now.job?.result })
       : questionText({ channel: c.name, ref, name, at, waiting: now.st.state === 'waiting_on_user' ? now.live?.waitingFor || 'a prompt' : now.st.doing, prompt: now.st.state === 'waiting_on_user', last: transcript?.last?.text });
     if (!(await deliver(text))) break; // the chat can't take it now: the next look tries again, in order
-    updateStore(dir, (s) => {
-      const ch = s.channels.find((x) => x.id === channelId);
-      const task = ch?.tasks.find((x) => sameSession(x, t.machine, t.session_id ?? t.job));
-      if (task) task.told = now.mark;
-    });
+    mark();
     sent.push(text);
   }
   return sent;
@@ -939,7 +1030,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       const text = pos.length === 2 && pos[1] === '-' ? readStdin() : pos.slice(1).join(' ');
       const r = await send({ dir, deps, ref: pos[0], text });
       if (opts.json) console.log(JSON.stringify(r));
-      else console.log(`${r.delivered_as === 'copy_started' ? 'Started a copy of' : 'Sent to'} ${r.machine}/${r.id}. ${r.note}`);
+      else console.log(r.delivered_as === 'copy_started' ? r.note : `Sent to ${r.machine}/${r.id}. ${r.note}`);
       return 0;
     }
     if (sub === 'archive') {

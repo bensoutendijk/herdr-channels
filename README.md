@@ -139,7 +139,9 @@ tasks (`~/.claude/jobs` and `~/.claude/sessions`).
 
 Messages are pasted into the chat's herdr terminal with `hc send`, which waits until you stop typing.
 The store records what has been reported for each task. Each event is reported once, and events
-that happen while the chat is closed are delivered when it next opens.
+that happen while the chat is closed are delivered when it next opens. A `[task report]` whose final
+message is the one the chat was last sent for that task (for example, a task stopped while it waited
+on a question) is not sent.
 
 To see what the listener would report right now, run `channels listen <channel> --once`.
 
@@ -163,7 +165,11 @@ channels listen <channel> --once
 ```
 
 `channels send` can only reach a background task that has finished its turn. It stops the idle
-session and resumes the same session with the message. Sending to a task that is still working, or
+session, waits for its process to exit, and resumes the same session with the message. If the
+process is still running after 30 seconds (`CHANNELS_STOP_WAIT_MS`), the command fails and starts
+nothing. If Claude Code starts a copy of the session instead of continuing it, `send` says so, gives
+the copy's session id, and files the copy into the original task's channel in its place; the original
+task is marked as superseded by the copy and resolved. Sending to a task that is still working, or
 is showing a permission prompt, fails; answer prompts in the task's view instead.
 
 ### Environment variables
@@ -176,6 +182,7 @@ is showing a permission prompt, fails; answer prompts in the task's view instead
 | `CHANNELS_PERMISSION_MODE` | `auto` | Permission mode for `start`; empty uses Claude Code's default |
 | `CHANNELS_CLAUDE` | `claude` | The Claude Code executable |
 | `CHANNELS_HC` | `hc` | The herdr-core executable |
+| `CHANNELS_STOP_WAIT_MS` | `30000` | How long `send` waits for a stopped task's process to exit |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values
 given to the installer.
