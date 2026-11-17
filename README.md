@@ -24,8 +24,9 @@ the herdr mod runs every command on the same machine. No server is involved.
 ## Requirements
 
 - macOS
-- [herdr](https://herdr.dev), opened at least once (this creates `~/.config/herdr-app` and installs
-  `hc`, the herdr-core CLI)
+- The [Herdr desktop app](https://herdr.dev/download) (Herdr.app, Apple silicon), opened at least
+  once (this creates `~/.config/herdr-app` and installs `hc`, the herdr-core CLI). The separate
+  `herdr` terminal app (TUI) can't load mods, so it isn't enough on its own.
 - Node.js 20 or later (`brew install node`)
 - [Claude Code](https://claude.com/claude-code), signed in
 - `python3` and `git`, both included with the Xcode Command Line Tools
@@ -52,7 +53,14 @@ the herdr mod runs every command on the same machine. No server is involved.
    cd ~/projects && claude
    ```
 
-4. Open herdr once so that its configuration folder exists.
+4. Install the Herdr desktop app, then open it once so that its configuration folder and `hc`
+   exist. It updates itself after this:
+
+   ```sh
+   curl -fsSL https://releases.herdr.dev/app/install.sh | sh
+   ```
+
+   Or download [Herdr.dmg](https://releases.herdr.dev/app/Herdr.dmg) and drag it to Applications.
 
 5. Run the installer:
 
