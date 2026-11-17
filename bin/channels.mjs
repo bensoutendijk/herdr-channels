@@ -925,7 +925,7 @@ export async function listenTick({ dir, home, channelId, deliver }) {
     const ref = `${LOCAL}/${now.sid}`;
     const transcript = now.transcript;
     const prompt = now.st.state === 'waiting_on_user';
-    const waiting = now.kind === 'needs' ? (prompt ? now.live?.waitingFor || 'a prompt' : now.st.doing) : null;
+    const waiting = now.kind === 'needs' ? (prompt ? (now.job?.state === 'working' && now.job.needs) || now.live?.waitingFor || 'a prompt' : now.st.doing) : null;
     now.mark.key = eventKey(now.kind, now.mark.last ?? lastMark(now.job?.result), waiting);
     const repeat = isRepeat(t.told, now.kind, now.mark);
     const reg = !repeat && wakes(t.wake, now.kind) ? t.wake : null;
