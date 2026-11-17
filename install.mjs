@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Installs herdr-channels on this Mac, from this clone:
-//   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--no-switch] [--dry-run]
+//   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--no-timer] [--no-switch] [--dry-run]
+//   node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--label <label>]
 //
 // 1. Writes `channels` into --bin (default ~/.local/bin): a small sh script that runs bin/channels.mjs in this
 //    clone with the node running this install, with the store and projects folder it was given. Keep the clone
@@ -11,6 +12,12 @@
 //    earlier install of this repo (marked by .herdr-channels.json in the mod folder) is updated in place.
 // 3. Writes the mod's config.js: the command, the folders for PATH, the projects folder and the --by name.
 // 4. Selects the layout: through the running herdr window, or, when none runs, for its next start.
+// 5. Adds the routines timer: a launchd user agent (~/Library/LaunchAgents/<label>.plist, label
+//    dev.herdr-channels.tick unless --label says otherwise) that runs `channels tick` every minute and once when the
+//    Mac wakes. --no-timer leaves it out; it is macOS only.
+// --uninstall takes out what an install put in: the timer, the command and the mod and layout this repo installed
+// (a mod folder marked with .herdr-channels.json, and its layout). It never touches anything it didn't install, nor
+// the channel store or any Claude Code session.
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -23,15 +30,18 @@ const MOD_MARK = '.herdr-channels.json';
 // What herdr writes into a mod folder itself: never copied, and left alone in an installed copy.
 const GENERATED = new Set(['gpui-kit.d.ts', 'jsconfig.json', MOD_MARK, 'config.js']);
 
-const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--no-switch] [--dry-run]';
+const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--label <label>]';
+export const LABEL = 'dev.herdr-channels.tick';
 
 export function parse(argv, env = process.env, home = homedir()) {
-  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false };
-  const valued = { '--app-home': 'appHome', '--bin': 'bin', '--store': 'store', '--projects': 'projects', '--by': 'by' };
+  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL };
+  const valued = { '--app-home': 'appHome', '--bin': 'bin', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--no-switch') o.switch = false;
     else if (a === '--dry-run') o.dryRun = true;
+    else if (a === '--no-timer') o.timer = false;
+    else if (a === '--uninstall') o.uninstall = true;
     else if (a === '-h' || a === '--help') { console.log(usage); process.exit(0); }
     else if (valued[a]) {
       if (i + 1 >= argv.length) throw new Error(`${a} needs a value.\n${usage}`);
@@ -41,6 +51,7 @@ export function parse(argv, env = process.env, home = homedir()) {
   const expand = (p) => resolve(p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
   for (const k of ['appHome', 'bin', 'store', 'projects']) o[k] = expand(o[k]);
   if (!/^[a-z][a-z0-9_-]{0,31}$/.test(o.by)) throw new Error('--by is one short lowercase word, such as your first name.');
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(o.label)) throw new Error('--label is a launchd label: letters, digits, dots and dashes, e.g. dev.herdr-channels.tick.');
   return o;
 }
 
@@ -122,7 +133,77 @@ function selectLayout(appHome, layout, home) {
   return 'set for the next herdr start';
 }
 
-export function install(o, { home = homedir(), env = process.env, log = console.log } = {}) {
+// ---------- the routines timer ----------
+
+const xml = (t) => `${t}`.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// The launchd agent: `channels tick` every 60 seconds, and at load. launchd runs a timer missed while the Mac slept
+// once when it wakes, which is when missed routines are caught up. HOME is set so the tick finds the same home
+// (Claude Code's records, herdr-core) as the install did.
+export function plistText({ label, wrapper, home, log }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by herdr-channels' install.mjs: runs the channels routines. \`node install.mjs --uninstall\` removes it. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${xml(label)}</string>
+  <key>ProgramArguments</key>
+  <array><string>${xml(wrapper)}</string><string>tick</string></array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict><key>HOME</key><string>${xml(home)}</string></dict>
+  <key>StandardOutPath</key><string>${xml(log)}</string>
+  <key>StandardErrorPath</key><string>${xml(log)}</string>
+</dict>
+</plist>
+`;
+}
+
+export const plistPath = (home, label) => join(home, 'Library', 'LaunchAgents', `${label}.plist`);
+const uid = () => (typeof process.getuid === 'function' ? process.getuid() : 0);
+const launchctl = (args) => spawnSync('launchctl', args, { encoding: 'utf8', timeout: 20_000 });
+
+// Writes the agent's plist and (re)loads it. Answers what happened, for the summary.
+export function installTimer({ label, wrapper, store, home, platform = process.platform, run = launchctl }) {
+  if (platform !== 'darwin') return { plist: null, state: 'not added: launchd is macOS only, so routines run only when `channels tick` is run' };
+  const plist = plistPath(home, label);
+  mkdirSync(dirname(plist), { recursive: true });
+  mkdirSync(store, { recursive: true });
+  writeAtomic(plist, plistText({ label, wrapper, home, log: join(store, 'launchd.log') }));
+  run(['bootout', `gui/${uid()}/${label}`]);
+  const r = run(['bootstrap', `gui/${uid()}`, plist]);
+  return { plist, state: r.status === 0 ? `loaded as ${label}, every minute` : `written, but launchctl couldn't load it: ${`${r.stderr || r.stdout || ''}`.trim()}` };
+}
+
+export function uninstall(o, { home = homedir(), platform = process.platform, run = launchctl, log = console.log } = {}) {
+  const gone = [];
+  if (platform === 'darwin') {
+    run(['bootout', `gui/${uid()}/${o.label}`]);
+    const plist = plistPath(home, o.label);
+    if (existsSync(plist)) {
+      if (!readFileSync(plist, 'utf8').includes("herdr-channels' install.mjs")) log(`${plist} isn't from this install; it's left alone.`);
+      else { rmSync(plist, { force: true }); gone.push(plist); }
+    }
+  }
+  const wrapper = join(o.bin, 'channels');
+  if (existsSync(wrapper)) {
+    if (readFileSync(wrapper, 'utf8').includes(MARK)) { rmSync(wrapper, { force: true }); gone.push(wrapper); } else log(`${wrapper} isn't from this install; it's left alone.`);
+  }
+  let mods = [];
+  try { mods = readdirSync(join(o.appHome, 'mods')); } catch { /* none */ }
+  for (const name of mods) {
+    let mine = null;
+    try { mine = JSON.parse(readFileSync(join(o.appHome, 'mods', name, MOD_MARK), 'utf8')); } catch { continue; }
+    const layout = join(o.appHome, 'layouts', `${mine.layout || name}.json`);
+    if (existsSync(layout)) { rmSync(layout, { force: true }); gone.push(layout); }
+    rmSync(join(o.appHome, 'mods', name), { recursive: true, force: true });
+    gone.push(join(o.appHome, 'mods', name));
+  }
+  return gone;
+}
+
+export function install(o, { home = homedir(), env = process.env, log = console.log, platform = process.platform, run = launchctl } = {}) {
   // The node on PATH when it is this one (Homebrew's /opt/homebrew/bin/node outlives an upgrade; the folder it
   // points into doesn't), else this one.
   const onPath = findProgram('node', { env, home });
@@ -160,12 +241,19 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   writeAtomic(layoutFile, `${JSON.stringify(layout, null, 2)}\n`);
   mkdirSync(o.projects, { recursive: true });
   const selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
-  return { wrapper, modDir, layoutFile, name, update, config, found, selected };
+  const timer = o.timer ? installTimer({ label: o.label, wrapper, store: o.store, home, platform, run }) : { plist: null, state: 'not added (--no-timer)' };
+  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const o = parse(process.argv.slice(2));
+    if (o.uninstall) {
+      const gone = uninstall(o);
+      console.log(gone.length ? `Removed:\n${gone.map((g) => `  ${g}`).join('\n')}` : 'Nothing from this install was found.');
+      console.log(`The channel store and Claude Code's sessions are left in place.`);
+      process.exit(0);
+    }
     const r = install(o);
     const missing = Object.entries(r.found).filter(([, p]) => !p).map(([n]) => n);
     console.log(`${o.dryRun ? 'Would install' : 'Installed'} herdr-channels from ${REPO}:`);
@@ -175,6 +263,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`  store    ${o.store}`);
     console.log(`  projects ${o.projects}`);
     if (r.selected) console.log(`  The ${r.name} layout is ${r.selected}.`);
+    if (r.timer) console.log(`  timer    ${r.timer.plist ? `${r.timer.plist}: ` : ''}${r.timer.state}`);
     if (missing.length) console.log(`\nNot found: ${missing.join(', ')}. Install ${missing.includes('hc') ? 'the herdr app (it brings hc), ' : ''}${missing.filter((m) => m !== 'hc').join(' and ') || ''} and run this again.`);
     if (!`${process.env.PATH}`.split(delimiter).includes(o.bin)) console.log(`\n${o.bin} isn't on your PATH. Add it to use \`channels\` in a terminal; the mod and chats find it without that.`);
     console.log(`\nClaude Code starts background sessions only in a folder you trust: run \`claude\` once in ${o.projects} and accept, if you haven't.`);

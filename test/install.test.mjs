@@ -19,7 +19,8 @@ function setup(t) {
   mkdirSync(join(appHome, 'layouts'), { recursive: true });
   const env = { ...process.env, HOME: home, HERDR_APP_HOME: '', PATH: `/usr/bin:/bin` };
   const install = (...args) => {
-    const r = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env, cwd: home });
+    // --no-timer: a test never loads a launchd agent. The timer is tested below with a stand-in for launchctl.
+    const r = spawnSync(process.execPath, [script, '--no-timer', ...args], { encoding: 'utf8', env, cwd: home });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     return r.stdout;
   };
@@ -99,4 +100,49 @@ test('the repo names no person, home folder or host of its own', () => {
     for (const w of words) if (w.test(text)) hits.push(`${f}: ${w}`);
   }
   assert.deepEqual(hits, []);
+});
+
+test('the routines timer: a launchd agent that runs `channels tick` every minute with this home; reinstalling reloads it', async (t) => {
+  const { home } = setup(t);
+  const { installTimer, plistPath, LABEL } = await import('../install.mjs');
+  const calls = [];
+  const run = (args) => { calls.push(args); return { status: 0, stdout: '', stderr: '' }; };
+  const store = join(home, 'store');
+  const r = installTimer({ label: 'dev.herdr-channels.test.abc', wrapper: join(home, 'bin', 'channels'), store, home, platform: 'darwin', run });
+  assert.equal(r.plist, plistPath(home, 'dev.herdr-channels.test.abc'));
+  assert.match(r.state, /loaded as dev.herdr-channels.test.abc/);
+  const plist = readFileSync(r.plist, 'utf8');
+  for (const s of ['<key>Label</key><string>dev.herdr-channels.test.abc</string>', `<string>${join(home, 'bin', 'channels')}</string><string>tick</string>`,
+    '<key>StartInterval</key><integer>60</integer>', '<key>RunAtLoad</key><true/>', `<key>HOME</key><string>${home}</string>`, `<string>${join(store, 'launchd.log')}</string>`]) assert.ok(plist.includes(s), s);
+  assert.deepEqual(calls.map((c) => c[0]), ['bootout', 'bootstrap']);
+  assert.equal(calls[1][2], r.plist);
+  assert.equal(LABEL, 'dev.herdr-channels.tick');
+  // Not on macOS: nothing is written.
+  assert.equal(installTimer({ label: 'x', wrapper: 'w', store, home, platform: 'linux', run }).plist, null);
+});
+
+test('--uninstall removes the timer, the command and this repo\'s mod and layout, and leaves everything else', async (t) => {
+  const { home, appHome, install } = setup(t);
+  const { installTimer, uninstall, parse, plistPath } = await import('../install.mjs');
+  // Someone else's mod and layout, installed before: this repo's copy goes in as channels-2.
+  mkdirSync(join(appHome, 'mods', 'channels'));
+  writeFileSync(join(appHome, 'mods', 'channels', 'main.js'), '// someone else\'s');
+  writeFileSync(join(appHome, 'layouts', 'channels.json'), '{}');
+  install();
+  const o = parse(['--label', 'dev.herdr-channels.test.abc'], { HERDR_APP_HOME: '' }, home);
+  const calls = [];
+  const run = (args) => { calls.push(args); return { status: 0 }; };
+  installTimer({ label: o.label, wrapper: join(o.bin, 'channels'), store: o.store, home, platform: 'darwin', run });
+  writeFileSync(join(home, 'Library', 'LaunchAgents', 'com.someone.else.plist'), 'theirs');
+  const gone = uninstall(o, { home, platform: 'darwin', run, log: () => {} });
+  assert.deepEqual(calls.at(-1), ['bootout', `gui/${process.getuid()}/dev.herdr-channels.test.abc`]);
+  assert.equal(existsSync(plistPath(home, o.label)), false);
+  assert.equal(existsSync(join(home, '.local', 'bin', 'channels')), false);
+  assert.equal(existsSync(join(appHome, 'mods', 'channels-2')), false);
+  assert.equal(existsSync(join(appHome, 'layouts', 'channels-2.json')), false);
+  assert.equal(gone.length, 4);
+  // Left alone: someone else's mod, layout and agent, and the store.
+  assert.ok(existsSync(join(appHome, 'mods', 'channels', 'main.js')));
+  assert.ok(existsSync(join(appHome, 'layouts', 'channels.json')));
+  assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.someone.else.plist')));
 });

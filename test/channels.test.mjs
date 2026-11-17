@@ -136,7 +136,7 @@ test('create makes a channel and its description file; describe shows and sets i
   assert.match(ok(['create', '#Design', '--icon', '🎨']), /Created #design/);
   const [c] = list().channels;
   assert.match(c.id, /^ch_[0-9a-f]{12}$/);
-  assert.deepEqual({ ...c, id: 'x', created_at: typeof c.created_at }, { id: 'x', name: 'design', position: 1, icon: '🎨', created_at: 'string', archived_at: null, description_path: join(dir, 'design.md'), chat: null, tasks: [] });
+  assert.deepEqual({ ...c, id: 'x', created_at: typeof c.created_at }, { id: 'x', name: 'design', position: 1, icon: '🎨', created_at: 'string', archived_at: null, description_path: join(dir, 'design.md'), chat: null, chat_terminal: null, routines: [], queued: 0, tasks: [] });
   assert.equal(readFileSync(join(dir, 'design.md'), 'utf8'), '');
   ok(['describe', 'design', '--set', '# design\nThe look.']);
   assert.equal(ok(['describe', 'design']), '# design\nThe look.\n');
