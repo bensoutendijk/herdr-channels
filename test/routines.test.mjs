@@ -213,16 +213,16 @@ test('a tick fires a due routine once into a running chat, marked as a routine; 
   assert.deepEqual((await tickAt(nine + 90_000)).runs, [], 'the same run never fires twice');
   assert.equal(lines('hc-runs.jsonl').length, 0, 'a running chat isn\'t started again');
   const s = store().channels[0];
-  assert.equal(s.inbox.length, 1);
-  assert.match(s.inbox[0].text, /^\[routine morning-plan, scheduled 09:00\] #general\n/);
-  assert.match(s.inbox[0].text, /<routine-prompt>\nAsk me for my plan.\n<\/routine-prompt>/);
-  assert.doesNotMatch(s.inbox[0].text, /running/);
+  assert.equal(s.queue.length, 1);
+  assert.match(s.queue[0].text, /^\[routine morning-plan, scheduled 09:00\] #general\n/);
+  assert.match(s.queue[0].text, /<routine-prompt>\nAsk me for my plan.\n<\/routine-prompt>/);
+  assert.doesNotMatch(s.queue[0].text, /running/);
   assert.deepEqual([s.routines[0].last.status, s.routines[0].last.kind, s.routines[0].done], ['queued', 'scheduled', new Date(nine).toISOString()]);
   // The listener's look types it into the chat's terminal and marks it delivered.
   const out = run(['listen', 'general', '--once']).stdout;
   assert.match(out, /\[routine morning-plan, scheduled 09:00\]/);
   const after = store().channels[0];
-  assert.deepEqual([after.inbox.length, after.routines[0].last.status], [0, 'delivered']);
+  assert.deepEqual([after.queue.length, after.routines[0].last.status], [0, 'delivered']);
 });
 
 test('ticks at the same moment never fire a routine twice', async (t) => {
@@ -234,7 +234,7 @@ test('ticks at the same moment never fire a routine twice', async (t) => {
   const results = await Promise.all(Array.from({ length: 8 }, () => tickAt(now)));
   const fired = results.flatMap((r) => r.runs ?? []).filter((x) => x.action === 'fire').map((x) => x.routine).sort();
   assert.deepEqual(fired, ['a', 'b']);
-  assert.deepEqual(store().channels[0].inbox.map((m) => m.name).sort(), ['a', 'b']);
+  assert.deepEqual(store().channels[0].queue.map((m) => m.name).sort(), ['a', 'b']);
 });
 
 test('a run the Mac slept through fires late inside the catch-up window and says so; outside it, it is recorded as missed', async (t) => {
@@ -248,9 +248,9 @@ test('a run the Mac slept through fires late inside the catch-up window and says
   const r = await tickAt(wake);
   assert.deepEqual(r.runs.map((x) => [x.routine, x.action, x.late_min]).sort(), [['narrow', 'missed', 100], ['wide', 'fire', 100]]);
   const c = store().channels[0];
-  assert.equal(c.inbox.length, 1, 'missed runs never stack');
-  assert.match(c.inbox[0].text, /^\[routine wide, scheduled 09:00, running 10:40\] #general/);
-  assert.match(c.inbox[0].text, /It is late: it was due at 09:00 and runs at 10:40/);
+  assert.equal(c.queue.length, 1, 'missed runs never stack');
+  assert.match(c.queue[0].text, /^\[routine wide, scheduled 09:00, running 10:40\] #general/);
+  assert.match(c.queue[0].text, /It is late: it was due at 09:00 and runs at 10:40/);
   const narrow = c.routines.find((x) => x.name === 'narrow');
   assert.deepEqual([narrow.last.status, narrow.last.late_min], ['missed', 100]);
   assert.deepEqual((await tickAt(wake + MIN)).runs, [], 'a missed run is recorded once, and not retried');
@@ -301,7 +301,7 @@ test('a chat opened by an earlier version (no record, no inbox in its listener) 
   assert.equal(sent.terminal, 't5');
   assert.match(sent.text, /^\[routine morning-plan, scheduled 09:00\]/);
   const c = store().channels[0];
-  assert.deepEqual([c.inbox.length, c.routines[0].last.status], [0, 'delivered']);
+  assert.deepEqual([c.queue.length, c.routines[0].last.status], [0, 'delivered']);
 });
 
 test('routine preview says a schedule in words with its next runs, or what is wrong with it', (t) => {
@@ -320,7 +320,7 @@ test('run now sends the prompt at once, marked as run now, and leaves the schedu
   ok(['routine', 'add', 'general', 'morning-plan', '--schedule', 'daily 09:00', 'Ask me for my plan.']);
   assert.match(ok(['routine', 'run', 'general', 'morning-plan']), /started in the background \(terminal t10\)/);
   const c = store().channels[0];
-  assert.match(c.inbox[0].text, /^\[routine morning-plan, run now\] #general/);
+  assert.match(c.queue[0].text, /^\[routine morning-plan, run now\] #general/);
   assert.deepEqual([c.routines[0].last.kind, c.routines[0].last.status, c.routines[0].done], ['manual', 'queued', null]);
   assert.equal(lines('hc-runs.jsonl').length, 1);
 });

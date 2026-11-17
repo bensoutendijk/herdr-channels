@@ -727,6 +727,8 @@ export default class Channels extends View {
 
   open(task, cx) {
     this.keys.want = false;
+    // Opening a task is seeing its events: its unread dot goes, and the store follows.
+    if (task.unread) submit((all) => eachTask(all, task.id, (x) => { x.unread = null; }), 'channels seen "$1"', [task.id], `mark ${task.name || "the task"} seen`);
     cx.spawn(async (cx) => {
       try { await openTask(task); this.failed = null; } catch (err) { this.failed = String(err?.message ?? err); }
       cx.notify();
@@ -808,12 +810,15 @@ export default class Channels extends View {
       const reachable = herdrMachine(task) !== undefined;
       const closed = this.leaving.has(task.id) || fresh.has(task.id);
       const canResolve = kind !== "resolved" && filed.has(task.id);
+      const unread = kind !== "resolved" && Boolean(task.unread) && !isShown(task);
       return h_flex().id(`tk-${task.id}`).mx(8).px(8).gap(12).items_center().rounded(8).overflow_hidden().flex_none()
         .h(closed ? 0 : TASK_H).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
         .when(reachable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(task, cx)))
         .on_hover(this.hovering(key))
         .child(div().w(28).h(28).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().child(mark[kind]()))
-        .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(reachable ? t.foreground : t.dim).child(task.name || shortId(task)))
+        .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(reachable ? t.foreground : t.dim).when(unread, (el) => el.font_medium()).child(task.name || shortId(task)))
+        // A task with an event not seen yet (it finished, or asked something, since it was last opened) has a dot.
+        .when(unread, (el) => el.child(div().id(`tk-new-${task.id}`).w(8).h(8).flex_none().rounded(4).bg(t.accent)))
         .child(div().flex_none().text_size(12).text_color(t.dim).child(ago(kind === "resolved" ? task.dismissed_at : task.added_at)))
         // The resolve button keeps its place whether or not it shows, so hovering moves nothing.
         .child(div().w(24).flex_none().opacity(canResolve && this.hover === key ? 1 : 0).transition("opacity", 120)

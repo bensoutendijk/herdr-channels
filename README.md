@@ -6,7 +6,8 @@ entirely on your machine.
 A channel groups the work on one topic. Each channel has an icon, a description, a long-lived
 Claude Code chat, a list of tasks, and routines: prompts its chat receives on a schedule. A task is a Claude Code background session (`claude --bg`)
 that you can open live in the tasks panel next to the chat. The chat can start tasks, read them and
-send them messages, and it is notified automatically when a task finishes or asks a question.
+send them messages. When a task finishes or asks a question, the tasks panel shows it, and the chat
+hears about it with your next message; it is interrupted only when it asked to be.
 
 Everything is local: the channel store is a folder on disk, tasks run under your own `claude`, and
 the herdr mod runs every command on the same machine. No server is involved.
@@ -132,28 +133,55 @@ adds the routines timer to an installation that doesn't have it yet.
 - **Chat.** Selecting a channel opens its chat in the main area. Ask the chat to start work and it
   creates a task with `channels start`, writing a brief that the task can follow on its own.
 - **Tasks panel.** The button at the top right toggles the panel. It groups the channel's tasks into
-  *Needs input*, *Working* and *Ready for review*. Click a task to open it live. Press the left arrow
+  *Needs input*, *Working* and *Ready for review*. A dot marks a task with an event you haven't
+  seen (it finished or asked something since you last opened it). Click a task to open it live. Press the left arrow
   on an empty prompt to return to the list. **+** starts a new session in the projects folder. The
   check mark resolves a task: it is hidden from the panel, and the session is not stopped or deleted.
 
-### Task notifications
+### Task events
 
 The chat's tab runs `channels chat <channel>`. This starts the chat's Claude Code session and a small
 listener alongside it. Every 3 seconds the listener reads Claude Code's records of the channel's
-tasks (`~/.claude/jobs` and `~/.claude/sessions`).
+tasks (`~/.claude/jobs` and `~/.claude/sessions`). A task finishing, or stopping to ask a question
+or show a permission prompt, is an *event*. Each event is delivered at one of three levels:
 
-- When a task finishes, the listener sends the chat a `[task report]` message containing the task's
-  final message in full.
-- When a task stops to ask a question or is waiting on a permission prompt, it sends a
-  `[task question]` message.
+| Level | When | What happens |
+|---|---|---|
+| **panel** | Every event | The task gets a dot in the tasks panel until you open it there. |
+| **ride-along** | The default, for finishes and questions | Nothing happens in the chat. The event waits in the store and is attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
+| **wake** | Only when a registration exists for that task | The listener pastes a `[task report]` (with the task's final message in full) or a `[task question]` into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. |
 
-Messages are pasted into the chat's herdr terminal with `hc send`, which waits until you stop typing.
-The store records what has been reported for each task. Each event is reported once, and events
-that happen while the chat is closed are delivered when it next opens. A `[task report]` whose final
-message is the one the chat was last sent for that task (for example, a task stopped while it waited
-on a question) is not sent.
+Ride-along uses a Claude Code `UserPromptSubmit` hook. `channels chat` passes it to the chat with
+`--settings`, so it applies to that session only and your own settings files are not touched. The
+hook runs `channels pending <channel> --hook`, which prints the waiting events as additional
+context and marks them delivered. A task's newer event replaces its older one while it waits.
 
-To see what the listener would report right now, run `channels listen <channel> --once`.
+A registration asks for the chat to be woken by a task's next matching event:
+
+```
+channels watch <session> --wake-on finish|question|any [--why <text>]
+channels start <channel> --wake-on finish|question|any <brief | ->
+channels send <session> --wake-on finish|question|any <text | ->
+```
+
+`finish` matches a task finishing, `question` a question or permission prompt, and `any` either.
+A registration is used up when it fires; `--wake-on none` cancels one. `--why` is shown in the
+wake message (for example, the words the user used to ask to be told). The chat registers when it
+is waiting on a task's answer in order to report back, or when you ask it to tell you about a task.
+A message `send` delivers to a copy of the task carries the registration to the copy.
+
+An event identical to the last one recorded for its task is dropped at every level: no dot, no
+ride-along, no wake, and a registration keeps waiting. That covers a task that did more work but
+ended with the same final message, the same question asked again, and a task stopped while it
+waited on a question (as `send` does). The store records what each task was last seen as, so
+events that happen while the chat is closed are delivered when it next opens, and none arrives twice.
+
+Anything typed into the chat starts a turn, so a prompt that another tool types into it on a
+schedule is a wake by nature, and the waiting events ride along with it too.
+
+To see what the listener would do right now, run `channels listen <channel> --once` (it records what
+it does). `channels pending <channel>` shows what waits for the chat's next message without taking
+it, and `channels seen <session>` clears a task's dot.
 
 ## Routines
 
@@ -178,9 +206,10 @@ and **Run now** sends its prompt at once without changing the schedule. You can 
 
 Times may also be written `9`, `9:30` or `9am`.
 
-**When a routine fires**, its prompt is typed into the channel's chat the same way task reports are
-(`hc send`, which waits while you are typing), as a message that starts with
-`[routine <name>, scheduled 09:00]`. The chat then decides what to do.
+**When a routine fires**, its prompt is typed into the channel's chat by the chat's listener, the
+way a task report the chat registered for is (`hc send`, which waits while you are typing), as a
+message that starts with `[routine <name>, scheduled 09:00]`. It wakes the chat: it doesn't wait for
+your next message. The chat then decides what to do.
 
 **If the chat isn't running**, the routine starts it in the background: the same chat session, so
 its history is kept, in a herdr-core terminal named `chat-<channel id>`. Selecting the channel in
@@ -218,12 +247,15 @@ channels rename <channel> <new-name>
 channels icon <channel> <text>
 channels describe <name> [--set <text> | --set -]
 channels chat <channel>
-channels start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] <brief | ->
+channels start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief | ->
 channels file <channel> <session> [--name <name>] [--folder <path>]
 channels read <session> [--limit <n>] [--json]
-channels send <session> <text | ->
+channels send <session> [--wake-on <on>] <text | ->
+channels watch <session> --wake-on finish|question|any|none [--why <text>]
+channels seen <session>
 channels dismiss <session> [--by <who>]
 channels listen <channel> --once
+channels pending <channel> [--hook]
 channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]
 channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->
