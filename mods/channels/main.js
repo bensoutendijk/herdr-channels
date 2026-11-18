@@ -21,6 +21,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Switch, Rad
 import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
 import { chatAlive, afterEnd, lastLine } from "./chats.js";
+import { remember, restore, keyOf } from "./panels.js";
 import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window } from "herdr";
 
 // The settings, from config.js (install.mjs writes it). MOD and LAYOUT are this mod's folder and
@@ -42,6 +43,10 @@ const TASK_TERM = "channels.taskterm"; // and the address of the terminal showin
 const LIST_FOCUS = "channels.listfocus"; // when the panel went back to the task list, so the list takes the keyboard
 const LAST_TASK = "channels.lasttask"; // the task that was open, so the list's cursor starts on it
 const OPENED = "channels.opened"; // when a task was last opened in the panel, so its prompt takes the keyboard
+// What each channel's panel showed last: channel id -> null (the list) or { id, job } (a task), so coming back to
+// a channel shows it again (see panels.js). Shared state is saved to shared.json, so this outlasts a restart.
+const PANELS = "channels.panels";
+const rememberPanel = (channel, task) => { if (channel) setShared(PANELS, remember(shared(PANELS), channel, task)); };
 const DEFAULT_ICON = "💬"; // every channel has an icon; this is the one a new channel starts with
 const iconOf = (channel) => channel?.icon || DEFAULT_ICON;
 const FRESH = "New session";
@@ -190,8 +195,15 @@ function findTerm(task, machine) {
 const find = (node, id) => (!node ? null : node.id === id ? node : (node.children ?? []).reduce((hit, c) => hit ?? find(c, id), null));
 
 // Shows a task in the tasks panel, beside the channel's chat: the panel's stack gets a
-// "taskview" child holding the task's header and its live terminal.
-function showInPanel(task, address) {
+// "taskview" child holding the task's header and its live terminal. `channel` is the channel it is
+// open in (the one holding it, else the selected one): it is remembered there, and shown only if
+// that channel is still the selected one (a slow start mustn't pull the panel to another channel).
+// `reveal: false` leaves a hidden panel hidden, as a channel switch does; its prompt takes the
+// keyboard only if the panel is on screen.
+const channelOf = (task) => channels().find((c) => (c.tasks ?? []).some((x) => x.id === task.id)) ?? null;
+function showInPanel(task, address, { channel = channelOf(task) ?? current(), reveal = true } = {}) {
+  rememberPanel(channel, task);
+  if (keyOf(channel) !== keyOf(current())) return;
   const tree = JSON.parse(JSON.stringify(layout()));
   const panel = find(tree, "panel");
   if (!panel) return;
@@ -203,14 +215,19 @@ function showInPanel(task, address) {
     ],
   }];
   panel.active = "taskview";
-  panel.hidden = false;
+  if (reveal) panel.hidden = false;
   setShared(TASK, task.id);
   setShared(TASK_TERM, address);
-  setShared(OPENED, Date.now());
   run("layout.set", { layout: tree });
+  if (panel.hidden) return;
+  setShared(OPENED, Date.now());
   run("pane.focus", { terminal: address });
 }
-const showTasks = () => {
+// Back to the task list. The selected channel remembers the list, so it opens on the list next time;
+// `remember: false` is the panel following a switch to another channel, which leaves what the
+// channel left behind remembered.
+const showTasks = ({ remember: keep = true } = {}) => {
+  if (keep) rememberPanel(current(), null);
   if (shared(TASK)) setShared(LAST_TASK, shared(TASK));
   setShared(TASK, null);
   setShared(LIST_FOCUS, Date.now());
@@ -219,7 +236,7 @@ const showTasks = () => {
 
 // Opens a task in the panel: a background session is attached to; one from before tasks were all
 // background sessions (a plain `claude`, no job) is resumed.
-async function openTask(task) {
+async function openTask(task, where) {
   const machine = herdrMachine(task);
   if (machine === undefined) throw new Error(`${task.machine} can't be reached from this computer.`);
   let address = findTerm(task, machine);
@@ -234,7 +251,20 @@ async function openTask(task) {
     if (r.code !== 0) throw new Error((r.stderr.trim() || r.stdout.trim() || `hc exited ${r.code}`).split("\n").pop());
     address = JSON.parse(r.stdout).address;
   }
-  showInPanel(task, address);
+  showInPanel(task, address, where);
+}
+
+// The panel follows the channel: it shows what this channel's panel showed last, a task (as if it
+// were clicked) or the list. A task resolved, gone or out of reach since gives the list.
+function followPanel(c) {
+  const want = restore(shared(PANELS), c, (x) => herdrMachine(x) !== undefined);
+  const toList = () => { if (shared(TASK)) showTasks({ remember: false }); };
+  if (!want) return toList();
+  if (shared(TASK) === want.id) return;
+  // A task whose terminal is running shows at once; one that has to be attached again shows
+  // when it's ready, and the list stands in for it meanwhile (not the other channel's task).
+  openTask(want, { channel: c, reveal: false }).catch(() => { if (current()?.name === c.name) toList(); });
+  if (shared(TASK) !== want.id) toList();
 }
 
 // A channel's chat: one long-lived session on this machine, in one herdr-core terminal that
@@ -314,10 +344,9 @@ async function lastOf(address) {
 // (see afterEnd) down, with a message, until the channel is opened by hand.
 const finding = new Set(); // channels whose chat terminal is being found or started
 function openChannel(c, { auto = false } = {}) {
-  // The panel follows the channel: a task left open from another channel goes back to the list.
   const leaving = current()?.name !== c.name;
   setShared(CURRENT, c.name);
-  if (leaving && shared(TASK)) showTasks();
+  if (leaving) followPanel(c);
   const was = chatAddress(c);
   if (chatAlive(termOf(was)) && selectChat(was)) { if (downOf(c)) setDown(c, null); return; }
   const old = oldChatTab(c);
@@ -765,7 +794,7 @@ export default class Channels extends View {
         const out = await store('cd "$1" && claude --bg 2>&1', [PROJECTS], 60000);
         task.job = out.match(/claude attach (\S+)/)?.[1] ?? null;
         if (!task.job) throw new Error(out.trim().split("\n").pop() || "claude --bg gave no session");
-        await openTask(task);
+        await openTask(task, { channel: channels().find((c) => c.name === channel) ?? { name: channel } });
         await store('channels file "$1" "$2" --name "$3" --folder "$4"', [channel, task.job, FRESH, PROJECTS]);
         this.failed = null;
       } catch (err) {
