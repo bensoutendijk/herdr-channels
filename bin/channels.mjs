@@ -1176,6 +1176,9 @@ export function chatRunning(dir, channelId) {
   return info && Number.isInteger(info.pid) && alive(info.pid) ? info : null;
 }
 
+// Whether a terminal's command is a channel's chat (`… channels chat <name>`): the name can change with a rename.
+export const runsChat = (argv) => Array.isArray(argv) && argv.length >= 2 && argv.at(-2) === 'chat';
+
 export const chatTermName = (channelId) => `chat-${channelId}`.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
 
 // What a background chat runs: this same command, with the store and projects folder this one uses.
@@ -1194,21 +1197,31 @@ export async function ensureChat({ dir, deps, channel }) {
   if (running?.terminal) return { address: running.terminal, started: false };
   if (running) fail(`#${channel}'s chat is running (pid ${running.pid}) outside herdr, so it can't be shown or reached here.`);
   const name = chatTermName(c.id);
-  const look = async () => {
+  const get = async () => {
     const r = await deps.run(deps.hc, ['get', name, '--json'], { timeout: 15_000 });
-    try { const t = JSON.parse(r.out); return t?.state === 'live' && t.address ? t.address : null; } catch { return null; }
+    try { const t = JSON.parse(r.out); return t?.state === 'live' && t.address ? t : null; } catch { return null; }
   };
-  const there = await look();
-  if (there) return { address: there, started: false };
+  const look = async () => { const t = await get(); return t && runsChat(t.argv) ? t.address : null; };
+  const there = await get();
+  if (there && runsChat(there.argv)) return { address: there.address, started: false };
+  // A live terminal under the chat's name that runs something else is what is left of a chat: herdr-core gives a
+  // terminal it lost (a core restart or update, a reboot) a shell in its place, with the same address and name.
+  // It holds the name, and a routine would type into the shell: end it, and start the chat again.
+  let replaced = null;
+  if (there) {
+    replaced = there.address;
+    await deps.run(deps.hc, ['kill', there.address], { timeout: 15_000 });
+    for (let i = 0; i < 30 && (await get()); i++) await new Promise((r) => setTimeout(r, 100));
+  }
   // A chat started by an earlier version of this command (a herdr tab running `channels chat <name>`) keeps no
   // record and its listener knows no routine queue: it is found by what it runs, and the tick types into it itself.
   const old = await legacyChat(deps, c.name);
   if (old) return { address: old, started: false, legacy: true };
   if (!existsSync(deps.projects)) mkdirSync(deps.projects, { recursive: true });
   const r = await deps.run(deps.hc, ['run', '--bg', '--json', '--no-parent', '--name', name, '--cwd', deps.projects, '--', ...chatArgv(dir, deps, c.name)], { timeout: 30_000 });
-  try { const t = JSON.parse(r.out); if (r.code === 0 && t.address) return { address: t.address, started: true }; } catch { /* below */ }
+  try { const t = JSON.parse(r.out); if (r.code === 0 && t.address) return { address: t.address, started: true, ...(replaced ? { replaced } : {}) }; } catch { /* below */ }
   const raced = await look();
-  if (raced) return { address: raced, started: false };
+  if (raced) return { address: raced, started: false, ...(replaced ? { replaced } : {}) };
   fail(`Couldn't start #${channel}'s chat in the background: ${cut(oneLine(r.err || r.out || 'no output'), 240)}`);
 }
 
@@ -1221,7 +1234,7 @@ async function legacyChat(deps, name) {
     const r = await deps.run(deps.hc, ['get', t.address, '--json'], { timeout: 15_000 });
     try {
       const argv = JSON.parse(r.out).argv ?? [];
-      if (argv.length >= 2 && argv.at(-2) === 'chat' && argv.at(-1) === name) return t.address;
+      if (runsChat(argv) && argv.at(-1) === name) return t.address;
     } catch { /* not one */ }
   }
   return null;

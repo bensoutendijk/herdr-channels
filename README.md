@@ -138,6 +138,10 @@ adds the routines timer to an installation that doesn't have it yet.
 
 - **Chat.** Selecting a channel opens its chat in the main area. Ask the chat to start work and it
   creates a task with `channels start`, writing a brief that the task can follow on its own.
+  If the chat ends (`/exit`, a crash, or herdr-core losing it in an update or restart), it starts
+  again in a few seconds on the same session, so its history is kept. A chat that stops within
+  15 seconds of starting isn't started again on its own: the bar says so, and **Retry** (or
+  selecting the channel) tries again.
 - **Tasks panel.** The button at the top right toggles the panel. It groups the channel's tasks into
   *Needs input*, *Working* and *Ready for review*. A dot marks a task with an event you haven't
   seen (it finished or asked something since you last opened it). Click a task to open it live. Press the left arrow
