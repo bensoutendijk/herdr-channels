@@ -284,6 +284,26 @@ function setDown(c, value) {
   const all = { ...(shared(DOWN) ?? {}) };
   if (value) all[c.id] = value; else delete all[c.id];
   setShared(DOWN, all);
+  syncMain();
+}
+// While the selected channel's chat is down, the main area shows why, with a Retry, instead of herdr's
+// shown tab: that would be whatever tab herdr picked when the chat's closed, often another channel's
+// chat. The main block's own content is kept aside meanwhile and put back after. The sidebar's
+// timer calls this every second too, so the layout always ends up matching.
+const MAIN_SAVED = "channels.main";
+const isPlaceholder = (content) => content?.mod === MOD && content?.props?.down === true;
+function syncMain() {
+  if (shared("layout") !== LAYOUT) return;
+  const tree = layout();
+  const main = find(tree, "main");
+  if (!main) return;
+  const want = Boolean(downOf(current()));
+  if (want === isPlaceholder(main.content)) return;
+  const next = JSON.parse(JSON.stringify(tree));
+  const node = find(next, "main");
+  if (want) { setShared(MAIN_SAVED, node.content); node.content = { mod: MOD, props: { down: true } }; }
+  else node.content = shared(MAIN_SAVED) ?? { tab: "active", pane: { gap: 0 } };
+  run("layout.set", { layout: next });
 }
 const paneOf = (address) => (address ? panes().find((p) => p.terminal === address) ?? null : null);
 const spaceOfTab = (tab) => spaces().find((sp) => sp.tabs.some((x) => x.id === tab)) ?? null;
@@ -342,7 +362,13 @@ async function lastOf(address) {
 // --bg` starts it again on the same session, and its new tab takes the old one's place. `auto` is the
 // sidebar's timer putting the chat back on its own: it leaves a chat that stopped right after it started
 // (see afterEnd) down, with a message, until the channel is opened by hand.
-const finding = new Set(); // channels whose chat terminal is being found or started
+// Channels whose chat terminal is being found or started: id -> when. An entry older than a minute is
+// forgotten: its work went with the view that ran it.
+const finding = new Map();
+const findingNow = (id) => finding.has(id) && Date.now() - finding.get(id) < 60000;
+// A retry asked for by a view that goes away as the chat comes back (the main area's placeholder): the
+// sidebar, which lives as long as the layout, carries it out.
+const RETRY = "channels.retry"; // { channel, at }
 function openChannel(c, { auto = false } = {}) {
   const leaving = current()?.name !== c.name;
   setShared(CURRENT, c.name);
@@ -352,8 +378,8 @@ function openChannel(c, { auto = false } = {}) {
   const old = oldChatTab(c);
   if (old) { run("space.select", { id: holdSpace(null).id }); run("tab.select", { id: old.id }); return; }
   if (downOf(c)) { if (auto) return; setDown(c, null); }
-  if (finding.has(c.id)) return;
-  finding.add(c.id);
+  if (findingNow(c.id)) return;
+  finding.set(c.id, Date.now());
   (async () => {
     // The tab still showing the chat that ended, if one is: closed once the new chat has its own.
     const stale = paneOf(was)?.tab ?? null;
@@ -448,7 +474,7 @@ function lastRun(r, t) {
 export default class Channels extends View {
   init(_props, cx) {
     const p = props() ?? {};
-    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.head ? "head" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : "sidebar";
+    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.head ? "head" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
     this.hover = null;
     this.drag = null; // the channel row being held, see dragMove
     this.handle = cx.focus_handle();
@@ -511,10 +537,17 @@ export default class Channels extends View {
     this.knownChannels = null; // channels already drawn: a new one fades in
     this.settle = false;
     this.draining = false;
+    this.retryAt = shared(RETRY)?.at ?? null; // a retry left from before the app started isn't carried out
     setShared(BUSY, false);
     cx.timer.every(40, (cx) => {
       if (this.settle) { this.settle = false; cx.notify(); }
       if (placing.length) settlePlacing();
+      const retry = shared(RETRY);
+      if (retry && retry.at !== this.retryAt) {
+        this.retryAt = retry.at;
+        const c = channels().find((x) => x.name === retry.channel);
+        if (c) openChannel(c);
+      }
       this.drain(cx);
     });
     this.refresh(cx);
@@ -527,6 +560,7 @@ export default class Channels extends View {
       // does after a visit to another layout, or if the chat ended (/exit): it starts again. Not
       // more than once every few seconds: a chat's tab takes a moment to appear the first time.
       const here = current();
+      syncMain();
       if (here && shared("layout") === LAYOUT && !downOf(here) && !chatShown(here) && Date.now() - this.restoredAt > 4000) {
         this.restoredAt = Date.now();
         openChannel(here, { auto: true });
@@ -727,9 +761,6 @@ export default class Channels extends View {
       .when(Boolean(data?.error), (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.blocked).child(data.error)))
       .when(!data, (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.dim).child("Loading channels…")))
       .when(Boolean(failed) && Date.now() - failed.at < 12000, (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.blocked).child(failed?.message ?? "")))
-      .when(Boolean(downOf(here)), (el) => el.child(v_flex().px(18).py(4).gap(2).text_size(12)
-        .child(div().text_color(t.blocked).child(`${downOf(here)?.message ?? ""} Click the channel to try again.`))
-        .when(Boolean(downOf(here)?.last), (x) => x.child(div().text_color(t.dim).child(downOf(here)?.last ?? "")))))
       .child(v_flex().id("ch-list").flex_1().min_h(0).overflow_y_scrollbar()
         .when(Boolean(drag), (el) => el.cursor_grabbing())
         .on_mouse_move((e, cx) => this.dragMove(e, list.length, cx))
@@ -756,6 +787,27 @@ export default class Channels extends View {
       .child(div().flex_1().text_size(12.5).text_color(t.dim).child(text));
   }
 
+  // ---------- the main area, while the channel's chat is down ----------
+
+  // A chat that stopped right after it started isn't started again on its own (see openChannel):
+  // this stands in for it, says why, and retries on a click.
+  render_down() {
+    const t = theme();
+    const here = current();
+    const down = downOf(here);
+    return v_flex().size_full().items_center().justify_center().gap(10).px(32).bg(t.background).text_color(t.foreground)
+      .child(div().text_size(28).child(iconOf(here)))
+      .child(div().text_size(16).font_medium().child(here ? `#${here.name}'s chat failed to start` : "The chat failed to start"))
+      .when(Boolean(down?.message), (el) => el.child(div().max_w(560).text_size(13).text_color(t.muted)
+        .child(down.message.replace(/^#\S+'s chat s/, "S"))))
+      .when(Boolean(down?.last), (el) => el.child(div().max_w(560).px(12).py(8).rounded(8).bg(t.raised)
+        .text_size(12.5).text_color(t.blocked).child(down.last)))
+      .child(div().id("down-retry").mt(6).px(14).h(32).flex().items_center().rounded(8).text_size(13.5)
+        .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click(() => { if (here) setShared(RETRY, { channel: here.name, at: Date.now() }); }).child("Retry"))
+      .child(div().text_size(12).text_color(t.dim).child("Selecting the channel tries again too."));
+  }
+
   // ---------- the bar above the main area ----------
 
   render_bar() {
@@ -766,12 +818,6 @@ export default class Channels extends View {
         .child(div().text_size(15).child(iconOf(here)))
         .child(div().id("bar-channel").text_size(14).font_medium().cursor_pointer()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openChannel(here)).child(here.name)))
-      // A chat that stopped right after it started isn't started again on its own: say so, with a way to retry.
-      .when(Boolean(downOf(here)), (el) => el
-        .child(div().ml(8).min_w(0).truncate().text_size(13).text_color(t.blocked).child("Chat failed to start"))
-        .child(div().id("bar-retry").flex_none().px(10).h(26).flex().items_center().rounded(6).text_size(13)
-          .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openChannel(here)).child("Retry")))
       .child(div().flex_1())
       .when(Boolean(here) && Boolean(localName()), (el) => el.child(this.where(localName(), t)))
       .child(this.tool("bar-tasks", svg(ICON("panel-right")).size(16), () => run("layout.toggle", { id: "panel" }), t)
