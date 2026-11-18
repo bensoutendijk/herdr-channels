@@ -145,7 +145,9 @@ adds the routines timer to an installation that doesn't have it yet.
 - **Tasks panel.** The button at the top right toggles the panel. It groups the channel's tasks into
   *Needs input*, *Working* and *Ready for review*. A dot marks a task with an event you haven't
   seen (it finished or asked something since you last opened it). Click a task to open it live. Press the left arrow
-  on an empty prompt to return to the list. **+** starts a new session in the projects folder. The
+  on an empty prompt to return to the list. Each channel's panel keeps its place: switch to another
+  channel and back, and it shows the task you had open (or the list, if you went back to it), even
+  after Herdr restarts. **+** starts a new session in the projects folder. The
   check mark resolves a task: it is hidden from the panel, and the session is not stopped or deleted.
 
   <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: the task's Claude Code session asks which homepage headline to use, with three options to choose from">
