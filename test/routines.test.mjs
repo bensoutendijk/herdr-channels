@@ -106,17 +106,25 @@ const log = (f, x) => fs.appendFileSync(path.join(home, f), JSON.stringify(x) + 
 const legacy = path.join(home, 'hc-legacy.json'); // terminals as an earlier version left them: { address: argv }
 if (args[0] === 'ls') { const l = fs.existsSync(legacy) ? JSON.parse(fs.readFileSync(legacy, 'utf8')) : {}; process.stdout.write(JSON.stringify({ terminals: Object.keys(l).map((a) => ({ address: a, state: 'live' })) })); process.exit(0); }
 if (args[0] === 'get' && fs.existsSync(legacy) && JSON.parse(fs.readFileSync(legacy, 'utf8'))[args[1]]) { process.stdout.write(JSON.stringify({ address: args[1], state: 'live', argv: JSON.parse(fs.readFileSync(legacy, 'utf8'))[args[1]] })); process.exit(0); }
+// terms: name -> { address, argv, state }; a lost terminal is one the test turned into a shell, a killed one has finished.
+const save = () => fs.writeFileSync(file, JSON.stringify(terms));
 if (args[0] === 'get') {
   const t = terms[args[1]];
-  process.stdout.write(JSON.stringify(t ? { address: t, name: args[1], state: 'live', status: 'idle' } : { address: args[1], status: 'idle' })); process.exit(0);
+  process.stdout.write(JSON.stringify(t ? { address: t.address, name: args[1], argv: t.argv, state: t.state, status: 'idle' } : { address: args[1], status: 'idle' })); process.exit(0);
+}
+if (args[0] === 'kill') {
+  for (const t of Object.values(terms)) if (t.address === args[1]) t.state = 'finished';
+  save(); log('hc-kills.jsonl', { terminal: args[1] }); process.exit(0);
 }
 if (args[0] === 'run') {
   const name = args[args.indexOf('--name') + 1];
-  if (terms[name]) { process.stderr.write(JSON.stringify({ error: { kind: 'name_taken' } })); process.exit(1); }
-  terms[name] = 't' + (Object.keys(terms).length + 10);
-  fs.writeFileSync(file, JSON.stringify(terms));
-  log('hc-runs.jsonl', { argv: args.slice(args.indexOf('--') + 1), name, cwd: args[args.indexOf('--cwd') + 1] });
-  process.stdout.write(JSON.stringify({ address: terms[name], name, state: 'live' })); process.exit(0);
+  if (terms[name]?.state === 'live') { process.stderr.write(JSON.stringify({ error: { kind: 'name_taken' } })); process.exit(1); }
+  const argv = args.slice(args.indexOf('--') + 1);
+  const count = path.join(home, 'hc-count'); const n = fs.existsSync(count) ? Number(fs.readFileSync(count, 'utf8')) : 0; fs.writeFileSync(count, String(n + 1));
+  terms[name] = { address: 't' + (n + 10), argv, state: 'live' };
+  save();
+  log('hc-runs.jsonl', { argv, name, cwd: args[args.indexOf('--cwd') + 1] });
+  process.stdout.write(JSON.stringify({ address: terms[name].address, name, state: 'live' })); process.exit(0);
 }
 if (args[0] === 'send') { log('hc-sends.jsonl', { terminal: args[1], text: args[2] }); process.exit(0); }
 if (args[0] === 'attach') { log('hc-attach.jsonl', { terminal: args[1] }); process.exit(0); }
@@ -288,6 +296,25 @@ test('a routine whose chat isn\'t running starts it in the background, where its
   assert.deepEqual(JSON.parse(ok(['list', '--json'])).channels[0].chat_terminal, 't10');
   assert.ok(existsSync(join(dir, 'tick.log')) && /started #general's chat in the background in t10/.test(readFileSync(join(dir, 'tick.log'), 'utf8')));
   assert.ok(home);
+});
+
+test('a chat whose terminal ended, or that herdr-core replaced with a shell, is started again; the shell is ended first', (t) => {
+  const { ok, home, lines } = setup(t);
+  ok(['create', 'general']);
+  assert.deepEqual(JSON.parse(ok(['chat', 'general', '--bg', '--json'])), { address: 't10', started: true });
+  const terms = () => JSON.parse(readFileSync(join(home, 'hc-terms.json'), 'utf8'));
+  const edit = (fn) => { const all = terms(); for (const x of Object.values(all)) fn(x); writeFileSync(join(home, 'hc-terms.json'), JSON.stringify(all)); };
+  // Still running the chat: the same terminal.
+  assert.deepEqual(JSON.parse(ok(['chat', 'general', '--bg', '--json'])), { address: 't10', started: false });
+  // The core lost it (an update, a restart) and gave its address and name a shell: that isn't the chat.
+  edit((x) => { x.argv = ['/bin/zsh', '-l']; });
+  assert.deepEqual(JSON.parse(ok(['chat', 'general', '--bg', '--json'])), { address: 't11', started: true, replaced: 't10' });
+  assert.deepEqual(lines('hc-kills.jsonl'), [{ terminal: 't10' }]);
+  assert.deepEqual(lines('hc-runs.jsonl').map((r) => r.argv.slice(-2)), [['chat', 'general'], ['chat', 'general']]);
+  // /exit: the terminal finished. A new one starts, and there is nothing to end.
+  edit((x) => { x.state = 'finished'; });
+  assert.deepEqual(JSON.parse(ok(['chat', 'general', '--bg', '--json'])), { address: 't12', started: true });
+  assert.equal(lines('hc-kills.jsonl').length, 1);
 });
 
 test('a chat opened by an earlier version (no record, no inbox in its listener) gets the routine typed in by the tick, not a second chat', async (t) => {

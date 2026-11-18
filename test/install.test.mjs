@@ -42,7 +42,7 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   assert.deepEqual([listed.machine, listed.channels.map((c) => c.name)], ['testmac', ['design']]);
   // The mod, without the files herdr writes itself, and its settings.
   const mod = join(appHome, 'mods', 'channels');
-  assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'viewer.py']);
+  assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'chats.js', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'viewer.py']);
   const config = loadConfig(join(mod, 'config.js'));
   assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels', layout: 'channels', command: wrapper, path: 'string', projects: join(home, 'projects'), by: 'sam' });
   assert.ok(config.path.split(':').includes(join(home, '.local', 'bin')));

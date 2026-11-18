@@ -20,6 +20,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Switch, RadioGroup, Radio } from "gpui-base";
 import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
+import { chatAlive, afterEnd, lastLine } from "./chats.js";
 import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window } from "herdr";
 
 // The settings, from config.js (install.mjs writes it). MOD and LAYOUT are this mod's folder and
@@ -244,6 +245,16 @@ async function openTask(task) {
 const CHATS = "channels.chats"; // channel id -> the address of its chat's terminal, as last found
 const chatOf = (c) => ({ machine: localName(), session_id: `#${c.id ?? c.name}`, job: `#${c.id ?? c.name}`, name: "", folder: PROJECTS });
 const chatAddress = (c) => (shared(CHATS) ?? {})[c.id] ?? c.chat_terminal ?? null;
+const termOf = (address) => (address ? terminals().find((x) => x.address === address) ?? null : null);
+// Channels whose chat stopped right after it started: id -> { message, at }. The sidebar doesn't start those
+// again on its own; opening the channel (a click) does.
+const DOWN = "channels.down";
+const downOf = (c) => (c ? (shared(DOWN) ?? {})[c.id] ?? null : null);
+function setDown(c, value) {
+  const all = { ...(shared(DOWN) ?? {}) };
+  if (value) all[c.id] = value; else delete all[c.id];
+  setShared(DOWN, all);
+}
 const paneOf = (address) => (address ? panes().find((p) => p.terminal === address) ?? null : null);
 const spaceOfTab = (tab) => spaces().find((sp) => sp.tabs.some((x) => x.id === tab)) ?? null;
 // An earlier version's chat tab, still running its program.
@@ -263,41 +274,72 @@ function selectChat(address) {
 }
 // Gives the chat's terminal a tab in the "channels" space. A space made for it starts with a
 // shell tab, closed once the chat's tab is there (the sidebar's timer finishes the job).
-let placing = []; // { address, shell: the tab to close, or "?" until it is known, until }
-function placeChat(address) {
+// `stale` is the tab of a chat that ended, closed once the new chat's tab is there.
+let placing = []; // { address, shell: the tab to close, or "?" until it is known, stale, until }
+function placeChat(address, stale = null) {
   const space = holdSpace(null);
   if (space) run("space.select", { id: space.id });
   else run("space.new", { name: HOLD, folder: PROJECTS });
   run("terminal.keep", { terminal: address, place: "tab" });
-  placing.push({ address, shell: space ? null : "?", until: Date.now() + 8000 });
+  placing.push({ address, shell: space ? null : "?", stale, until: Date.now() + 8000 });
 }
+const closeTab = (id, keep) => { if (id && id !== keep && spaceOfTab(id)) run("tab.close", { id, confirmed: true }); };
 function settlePlacing() {
   placing = placing.filter((p) => {
     const pane = paneOf(p.address);
     if (!pane) return Date.now() < p.until;
-    if (p.shell === "?") p.shell = holdSpace(null)?.tabs.find((x) => x.id !== pane.tab)?.id ?? null;
-    if (p.shell && p.shell !== pane.tab) run("tab.close", { id: p.shell, confirmed: true });
+    if (p.shell === "?") p.shell = holdSpace(null)?.tabs.find((x) => x.id !== pane.tab && x.id !== p.stale)?.id ?? null;
+    closeTab(p.shell, pane.tab);
+    closeTab(p.stale, pane.tab);
     run("tab.select", { id: pane.tab });
     return false;
   });
 }
+// What `hc get --json` says of a terminal, with the last line it printed when it has ended; null when
+// herdr-core doesn't know it.
+async function lastOf(address) {
+  const r = await hc(["get", address, "--json"]);
+  if (r.code !== 0) return null;
+  try {
+    const info = JSON.parse(r.stdout);
+    if (info.state !== "live") info.last = lastLine((await hc(["read", address])).stdout);
+    return info;
+  } catch { return null; }
+}
+
+// Opens a channel: shows its chat, starting it when it isn't running. A chat ends with /exit or a crash, or
+// herdr-core loses it (an update or restart of the core) and shows a shell under its address. `channels chat
+// --bg` starts it again on the same session, and its new tab takes the old one's place. `auto` is the
+// sidebar's timer putting the chat back on its own: it leaves a chat that stopped right after it started
+// (see afterEnd) down, with a message, until the channel is opened by hand.
 const finding = new Set(); // channels whose chat terminal is being found or started
-function openChannel(c) {
+function openChannel(c, { auto = false } = {}) {
   // The panel follows the channel: a task left open from another channel goes back to the list.
   const leaving = current()?.name !== c.name;
   setShared(CURRENT, c.name);
   if (leaving && shared(TASK)) showTasks();
-  if (selectChat(chatAddress(c))) return;
+  const was = chatAddress(c);
+  if (chatAlive(termOf(was)) && selectChat(was)) { if (downOf(c)) setDown(c, null); return; }
   const old = oldChatTab(c);
   if (old) { run("space.select", { id: holdSpace(null).id }); run("tab.select", { id: old.id }); return; }
+  if (downOf(c)) { if (auto) return; setDown(c, null); }
   if (finding.has(c.id)) return;
   finding.add(c.id);
-  store('channels chat "$1" --bg --json', [c.name], 40000).then((out) => {
-    const { address } = JSON.parse(out);
+  (async () => {
+    // The tab still showing the chat that ended, if one is: closed once the new chat has its own.
+    const stale = paneOf(was)?.tab ?? null;
+    if (was && !chatAlive(termOf(was))) {
+      const info = await lastOf(was);
+      const next = afterEnd(info, { auto, channel: c.name });
+      if (!next.start) return setDown(c, { message: next.message, last: info?.last || null, at: Date.now() });
+    }
+    const { address } = JSON.parse(await store('channels chat "$1" --bg --json', [c.name], 40000));
     setShared(CHATS, { ...(shared(CHATS) ?? {}), [c.id]: address });
     // Only if the user is still on this channel: a slow start mustn't pull them back.
-    if (current()?.name === c.name && !selectChat(address)) placeChat(address);
-  }).catch((err) => fail(`Couldn't open #${c.name}'s chat: ${String(err?.message ?? err)}`))
+    if (current()?.name !== c.name) closeTab(stale, paneOf(address)?.tab);
+    else if (selectChat(address)) closeTab(stale, paneOf(address)?.tab);
+    else placeChat(address, stale);
+  })().catch((err) => fail(`Couldn't open #${c.name}'s chat: ${String(err?.message ?? err)}`))
     .finally(() => finding.delete(c.id));
 }
 
@@ -311,7 +353,8 @@ function chatShown(c) {
   const tab = space.tabs.find((x) => x.active);
   if (!tab) return false;
   const pane = paneOf(chatAddress(c));
-  if (pane) return pane.tab === tab.id;
+  // A tab still showing a chat that ended (or the shell herdr-core put in its place) isn't the chat.
+  if (pane) return pane.tab === tab.id && chatAlive(termOf(chatAddress(c)));
   return Boolean(oldChatTab(c)?.active);
 }
 
@@ -452,12 +495,12 @@ export default class Channels extends View {
       const now = shared(TICK) ?? 0;
       if (now !== this.tick) { this.tick = now; this.refresh(cx); }
       // Put the selected channel's chat back if the main area is showing anything else, as it
-      // does after a visit to another layout. Not more than once every few seconds: a chat's tab
-      // takes a moment to appear the first time.
+      // does after a visit to another layout, or if the chat ended (/exit): it starts again. Not
+      // more than once every few seconds: a chat's tab takes a moment to appear the first time.
       const here = current();
-      if (here && shared("layout") === LAYOUT && !chatShown(here) && Date.now() - this.restoredAt > 4000) {
+      if (here && shared("layout") === LAYOUT && !downOf(here) && !chatShown(here) && Date.now() - this.restoredAt > 4000) {
         this.restoredAt = Date.now();
-        openChannel(here);
+        openChannel(here, { auto: true });
       }
     });
     // For keys: channels.next / .prev walk the channels; .new-channel opens the dialog.
@@ -655,6 +698,9 @@ export default class Channels extends View {
       .when(Boolean(data?.error), (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.blocked).child(data.error)))
       .when(!data, (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.dim).child("Loading channels…")))
       .when(Boolean(failed) && Date.now() - failed.at < 12000, (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.blocked).child(failed?.message ?? "")))
+      .when(Boolean(downOf(here)), (el) => el.child(v_flex().px(18).py(4).gap(2).text_size(12)
+        .child(div().text_color(t.blocked).child(`${downOf(here)?.message ?? ""} Click the channel to try again.`))
+        .when(Boolean(downOf(here)?.last), (x) => x.child(div().text_color(t.dim).child(downOf(here)?.last ?? "")))))
       .child(v_flex().id("ch-list").flex_1().min_h(0).overflow_y_scrollbar()
         .when(Boolean(drag), (el) => el.cursor_grabbing())
         .on_mouse_move((e, cx) => this.dragMove(e, list.length, cx))
@@ -691,6 +737,12 @@ export default class Channels extends View {
         .child(div().text_size(15).child(iconOf(here)))
         .child(div().id("bar-channel").text_size(14).font_medium().cursor_pointer()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openChannel(here)).child(here.name)))
+      // A chat that stopped right after it started isn't started again on its own: say so, with a way to retry.
+      .when(Boolean(downOf(here)), (el) => el
+        .child(div().ml(8).min_w(0).truncate().text_size(13).text_color(t.blocked).child("Chat failed to start"))
+        .child(div().id("bar-retry").flex_none().px(10).h(26).flex().items_center().rounded(6).text_size(13)
+          .border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openChannel(here)).child("Retry")))
       .child(div().flex_1())
       .when(Boolean(here) && Boolean(localName()), (el) => el.child(this.where(localName(), t)))
       .child(this.tool("bar-tasks", svg(ICON("panel-right")).size(16), () => run("layout.toggle", { id: "panel" }), t)
