@@ -90,8 +90,8 @@ Branch feature-x is not on GitHub, so the cloud session starts from its own comm
   of `~/.claude/.credentials.json` was blocked by the auto-mode classifier, and building on a private route
   with a scraped token is fragile. It breaks without notice, and a company laptop would rightly flag it. So
   its exact fields are unknown.
-- **Claude.ai Agents MCP** (the agent-os server on boris, `list_sessions`): lists what `claude agents --json` lists on
-  boris and the registered machines. It has no cloud sessions.
+- **The claude.ai Agents MCP** (a self-hosted connector, `list_sessions`): lists what `claude agents --json` lists on
+  the home server and its registered machines. It has no cloud sessions.
 - **Docs** (code.claude.com/docs/en/claude-code-on-the-web): no command, JSON or public API lists cloud
   sessions with state. `/list-agents` in a Remote Control session shows "your cloud sessions" by name, with
   no state. The Compliance API's `GET /v1/compliance/apps/sessions/remote` lists Cowork and Claude Tag
@@ -140,7 +140,7 @@ Error: failed to send message to cloud session session_doesnotexist: invalid ses
   message hadn't been taken about 4 minutes later. The question still showed unanswered. So `ok` means
   "queued", not "delivered". A channel can't answer a cloud task's question this way, and the card's Answer
   button would quietly do nothing.
-- It returns at once, with no reply. agent-os's wake depends on the same thing (`Sent to cloud session`).
+- It returns at once, with no reply. The existing wake that reports into a cloud session depends on the same thing (`Sent to cloud session`).
 - The docs give two more errors: an archived session ("is archived and cannot accept new messages") and
   `Session not found`.
 
@@ -171,7 +171,7 @@ Error: failed to send message to cloud session session_doesnotexist: invalid ses
   3. Teleport per task: far too heavy (a TUI, a checkout and a local transcript per look).
 - **Reverse report**: a cloud session can't message this machine back (cross-session docs: "Read the cloud
   session's response in its transcript at claude.ai/code"). Its claude.ai connectors do work, though. On
-  boris, a session could call the agent-os Agents MCP to say it's done, but that doesn't help the work laptop.
+  the home server, a session could call the self-hosted Agents MCP to say it's done, but that doesn't help the work laptop.
 - Side note: the cloud session's transcript showed a system hint about attaching "the user's own computer"
   (`list_computer_folders`, `request_computer_folder`). A cloud session can ask to use a folder on a machine
   connected through Remote Control. It's a separate feature, but relevant if the cloud task needs local files.
