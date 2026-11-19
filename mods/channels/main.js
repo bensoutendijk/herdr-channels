@@ -616,6 +616,8 @@ export default class Channels extends View {
           const at = list.findIndex(isShown);
           if (list.length) openTask(list[(at + (c === "task-next" ? 1 : -1) + list.length) % list.length]).catch(() => {});
         } else if (c === "tasks") showTasks();
+        // channels.rename-task: the Rename dialog for the task open in the panel.
+        else if (c === "rename-task") { const task = findTask(shared(TASK)); if (task) renameTask(task); }
         // channels.open-task: a task card's Open, in the chat's Claude Code (see openRequested).
         else if (c === "open-task") openRequested(cx, () => this.refresh(cx)).catch((err) => fail(`Couldn't open the task: ${String(err?.message ?? err)}`));
         // channels.rename / .instructions / .icon / .archive: that dialog for the selected channel.

@@ -162,7 +162,9 @@ same session, with its history.
   its name there renames it. The rename reaches Claude Code itself, so `claude agents` shows the same
   name, and the task's copies and its cards above the chat take it too.
 
-  <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: the task's Claude Code session asks which homepage headline to use, with three options to choose from">
+  <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: its header has the task's name, Needs input, and Rename, Resolve and Close buttons; below, the task's Claude Code session asks which homepage headline to use, with three options to choose from">
+
+  <img src="docs/task-menu.png" width="420" alt="The tasks panel with a task's menu open over the Watch the release build row, offering Rename and Resolve">
 
 ### Task events
 
