@@ -281,9 +281,9 @@ same throwaway repo:
 | Flags | Same as Linux | `tengu_remote_backend` not set, `tengu_violin_maple: false` |
 | Start | **Works**, with two catches | Prints the same three lines and exits 0 in 2.2 s inside the pty. A new folder stops at the trust dialog first. |
 | Start without a pty | No | `Error: --cloud requires an interactive terminal.` |
-| Send | **Works** | `{"ok":true,…}` in 0.7 s |
+| Send | **Works** | `{"ok":true,…}` in 0.7 s. The list later showed the session's summary "replied 'pong' as asked" |
 | Attach | No (flag off) | `Error: Attaching to an existing cloud session is not enabled for your account.` |
-| List through the Keychain login | Not tried | Auto mode refuses to let an agent read the Keychain item. It needs a run by hand (below). |
+| List through the Keychain login | **Works** | Run by hand, since auto mode refuses to let an agent read the Keychain item. 200, the same fields as on Linux (below) |
 
 The two catches when starting:
 
@@ -293,10 +293,23 @@ The two catches when starting:
   …`). So the wrapper must spawn it with a stdin it controls, watch for the `View:` line, then close stdin or
   kill `script`. Linux's `script -qec` exits with its command.
 
-The list call on a Mac would read the login from the Keychain item `Claude Code-credentials`, which should hold
-the same JSON as the Linux file (`claudeAiOauth.accessToken`). Neither the name nor the contents were checked on
-the Mac yet. The first read by a program other than Claude Code may show a Keychain prompt.
-"Always Allow" for `node` (or `security`) settles it for a personal Mac. A managed Mac may forbid it.
+The list call on a Mac reads the login from the login Keychain item `Claude Code-credentials`. It holds the same
+JSON as the Linux file, and the token is in `claudeAiOauth.accessToken`. A small node script read it with
+`security find-generic-password -s "Claude Code-credentials" -w` and called the API (ids shortened):
+
+```
+200 scopes: user:file_upload user:inference user:mcp_servers user:plugins user:privacy_consents:write user:profile user:sessions:claude_code
+cse_01…TzH | Cloud tasks: Mac check | bridge          | active | idle |
+cse_01…LmC | mac-probe              | anthropic_cloud | active | idle | replied 'pong' as asked; no changes made
+cse_01…JqG | mac-probe-timing       | anthropic_cloud | active | idle | replied ok as asked; no changes made
+cse_01…JeY | #herdr                 | bridge          | active | idle | Should I start the Remote Control build task?
+```
+
+(columns: id, title, `environment_kind`, `status`, `worker_status`, `post_turn_summary.status_detail`)
+
+The run reported no Keychain prompt on this personal Mac. A managed Mac may forbid other programs from reading
+the item. The `#herdr` row shows that `status_detail` carries a pending question in plain words, which is what an
+"asks you" card needs.
 
 ## 7. Limits
 
