@@ -14,6 +14,7 @@
 //   channels send <session> [--wake-on <on>] <text | ->   a message to a session; continues it, or files the copy Claude Code starts
 //   channels watch <session> --wake-on finish|question|any|none [--why <text>]   wake the chat on the task's next such event
 //   channels seen <session>                   the task's events have been seen in the panel
+//   channels rename-task <session> <new-name>   renames the session in Claude Code too, as `claude agents` does
 //   channels dismiss <session> [--by <who>]
 //   channels listen <channel> [--once]        what the chat runs beside itself; by hand, for a look at what it would do
 //   channels pending <channel> [--hook]       events waiting for the chat's next message; --hook is the chat's own hook
@@ -411,12 +412,21 @@ function liveNames(live) {
 function showTask(home, t, names) {
   const job = t.machine === LOCAL ? jobState(home, t.job) : null;
   const sessionId = t.session_id ?? job?.sessionId ?? null;
-  // A copy Claude Code started in a task's place keeps the task's name, unless the copy was renamed by someone:
-  // Claude Code names the copy from the message it was sent.
-  if (t.how === 'copied' && t.name && job?.nameSource !== 'user') return taskRow(t, sessionId, t.name);
+  const kept = keptName(t, job);
+  if (kept) return taskRow(t, sessionId, kept);
   let name = job?.name || '';
   if (!name && t.machine === LOCAL && sessionId) name = names.get(sessionId) || (t.dismissed_at ? '' : transcriptTitle(home, sessionId));
   return taskRow(t, sessionId, name || t.name || '');
+}
+
+// The name the store keeps for a task over Claude Code's, or null. A copy Claude Code started in a task's place keeps
+// the task's name, unless the copy's job was renamed by someone (Claude Code names a copy from the message it was
+// sent). A session with no job that was renamed with rename-task keeps that name: Claude Code has no way to rename it
+// from outside (see renameTask).
+function keptName(t, job) {
+  if (t.how === 'copied' && t.name && job?.nameSource !== 'user') return t.name;
+  if (t.named === 'user' && t.name && !job) return t.name;
+  return null;
 }
 
 function taskRow(t, sessionId, name) {
@@ -424,7 +434,7 @@ function taskRow(t, sessionId, name) {
     id: `${t.machine}/${sessionId ?? `job:${t.job}`}`, machine: t.machine, session_id: sessionId, job: t.job ?? null,
     name, repo: t.repo ?? null, folder: t.folder ?? null, added_at: t.added_at, how: t.how,
     dismissed: Boolean(t.dismissed_at), dismissed_at: t.dismissed_at ?? null, dismissed_by: t.dismissed_by ?? null,
-    superseded_by: t.superseded_by ?? null, unread: t.unread ?? null, wake: t.wake ?? null,
+    superseded_by: t.superseded_by ?? null, copy_of: t.copy_of ?? null, named: t.named ?? null, unread: t.unread ?? null, wake: t.wake ?? null,
   };
 }
 
@@ -649,6 +659,93 @@ function dismiss({ dir, ref, by }) {
     t.unread = null;
     return { already: false, channel: c.name, task: t };
   });
+}
+
+// ---------- renaming a task ----------
+
+// A task's name is one line of up to 80 characters.
+export function taskName(raw) {
+  const name = oneLine(raw);
+  if (!name) fail('A task name needs some text.');
+  if (/[\u0000-\u001f\u007f]/.test(name) || [...name].length > 80) fail(`A task name is one line of up to 80 characters (got "${cut(name, 40)}").`);
+  return name;
+}
+
+// Renames a background session in Claude Code, as its own agents view (`claude agents`, Rename) does: the job's
+// state.json gets the name with nameSource "user". A running session watches that file and takes the name on at once
+// (no turn starts), `claude agents` lists it, `claude respawn` and a resume keep it, and Claude Code's own naming
+// never replaces a name the user gave. The session's process writes the same file as it works, read-change-write, so
+// a write of ours can be lost to one of its writes: the name is read back and written again until it holds.
+// true when the job holds the name, false when it has no state to rename.
+export async function renameJob(deps, job, name) {
+  if (!job || !/^[A-Za-z0-9_-]{1,64}$/.test(job)) return false;
+  const file = join(deps.home, '.claude', 'jobs', job, 'state.json');
+  for (let k = 0; k < 5; k++) {
+    const s = readJson(file);
+    if (!s || typeof s !== 'object') return false;
+    if (s.name === name && s.nameSource === 'user') {
+      if (k > 0) return true;
+    } else {
+      const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify({ ...s, name, nameSource: 'user', updatedAt: new Date().toISOString() }, null, 2)}`, { mode: 0o600 });
+      renameSync(tmp, file);
+    }
+    await deps.sleep(k === 0 ? 400 : 250);
+  }
+  const s = readJson(file);
+  return Boolean(s && s.name === name && s.nameSource === 'user');
+}
+
+// A task and its copies in its channel: the tasks it was a copy of, and the copies started in its place, by
+// copy_of and superseded_by.
+function chainOf(c, t) {
+  const ref = (x) => taskRef(x);
+  const chain = new Set([t]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const x of c.tasks) {
+      if (chain.has(x)) continue;
+      if ([...chain].some((y) => x.superseded_by === ref(y) || y.superseded_by === ref(x) || x.copy_of === ref(y) || y.copy_of === ref(x))) { chain.add(x); grew = true; }
+    }
+  }
+  return [...chain];
+}
+
+// Renames a task: in Claude Code, so the agents list and the panel show the same name, and in the store, so the
+// task's copies (filed under its name) and its cards above the chat's prompt show it too. Every session in the chain
+// that is a background job is renamed in Claude Code. A session with no job (an interactive one filed with `file`)
+// can only be renamed from inside it, with /rename: Claude Code offers no way from outside, so the store keeps the
+// name for the panel and says so. A session that is no channel's task is renamed in Claude Code alone.
+async function renameTask({ dir, deps, ref, name }) {
+  const { machine, id } = parseSessionRef(ref);
+  const store = readStore(dir);
+  const { open, found } = filedTasks(store, ref);
+  const hit = open[0] ?? found[0] ?? null;
+  let targets;
+  if (hit) {
+    targets = chainOf(hit.c, hit.t).map((t) => ({ ref: taskRef(t), session_id: t.session_id ?? null, job: t.job ?? (t.session_id ? readJobs(deps.home).get(t.session_id)?.job : null) ?? null }));
+  } else {
+    const s = await findLocalSession({ deps, id });
+    targets = [{ ref: `${machine}/${s.session_id}`, session_id: s.session_id, job: s.job ?? readJobs(deps.home).get(s.session_id)?.job ?? null }];
+  }
+  const renamed = [];
+  const kept = [];
+  for (const x of targets) ((x.job && (await renameJob(deps, x.job, name))) ? renamed : kept).push(x);
+  const inClaude = new Set(renamed.map((x) => x.ref));
+  if (hit) {
+    updateStore(dir, (s) => {
+      const c = s.channels.find((x) => x.id === hit.c.id);
+      if (!c) return;
+      const refs = new Set(targets.map((x) => x.ref));
+      for (const t of c.tasks) {
+        if (!refs.has(taskRef(t))) continue;
+        t.name = name;
+        if (inClaude.has(taskRef(t))) delete t.named; else t.named = 'user';
+      }
+      for (const e of c.inbox ?? []) if (refs.has(e.task)) e.name = name;
+    });
+  }
+  return { channel: hit?.c.name ?? null, ref: hit ? taskRef(hit.t) : targets[0].ref, name, renamed: renamed.map((x) => x.ref), kept: kept.map((x) => x.ref) };
 }
 
 // ---------- delivery levels: registrations, unread, the chat's inbox ----------
@@ -1000,8 +1097,7 @@ export async function listenTick({ dir, home, channelId, deliver }) {
     now.mark.key = eventKey(now.kind, now.mark.last ?? lastMark(now.job?.result), waiting);
     const repeat = isRepeat(t.told, now.kind, now.mark);
     const reg = !repeat && wakes(t.wake, now.kind) ? t.wake : null;
-    const keep = t.how === 'copied' && t.name && jobState(home, t.job)?.nameSource !== 'user'; // as list names it
-    const name = (keep ? t.name : now.job?.name || now.live?.name || t.name || transcript?.title) || '';
+    const name = (keptName(t, t.job ? jobState(home, t.job) : null) || now.job?.name || now.live?.name || t.name || transcript?.title) || ''; // as list names it
     const at = now.job?.updatedAt || new Date().toISOString();
     const facts = { channel: c.name, ref, name, at, doing: now.st.doing, waiting, prompt, last: transcript?.last?.text, result: now.job?.result };
     let text = null;
@@ -1556,7 +1652,7 @@ export function parseArgs(args) {
 
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
-const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | tick';
+const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | tick';
 const ROUTINE_USAGE = [
   'channels routine list [<channel>] [--json]',
   'channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->',
@@ -1806,6 +1902,20 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       const name = channelName(pos[0]);
       const t = await file({ dir, deps, name, ref: pos[1], title: opts.name, folder: opts.folder });
       console.log(`Filed ${t.machine}/${t.session_id} into #${name}${t.name ? `: ${t.name}` : ''}`);
+      return 0;
+    }
+    if (sub === 'rename-task') {
+      if (pos.length < 2) fail('channels rename-task <session> <new-name>');
+      const r = await renameTask({ dir, deps, ref: pos[0], name: taskName(pos.slice(1).join(' ')) });
+      if (opts.json) { console.log(JSON.stringify(r)); return 0; }
+      const where = r.channel ? ` in #${r.channel}` : '';
+      const lines = [];
+      if (r.renamed.length) lines.push(`Renamed ${r.ref}${where} to "${r.name}" in Claude Code${r.renamed.length > 1 ? `, with its ${r.renamed.length - 1} ${r.renamed.length === 2 ? 'copy' : 'copies'}` : ''}: \`claude agents\` shows the new name.`);
+      if (r.kept.length) {
+        if (!r.channel) fail(`${r.ref} isn't a background session, so Claude Code can't rename it from outside: use /rename in the session itself.`);
+        lines.push(`${r.kept.join(', ')} ${r.kept.length > 1 ? 'aren\'t background sessions' : 'isn\'t a background session'}, so Claude Code can't rename ${r.kept.length > 1 ? 'them' : 'it'} from outside (only /rename inside does): the panel shows "${r.name}", \`claude agents\` keeps the old name.`);
+      }
+      console.log(lines.join('\n'));
       return 0;
     }
     if (sub === 'dismiss') {

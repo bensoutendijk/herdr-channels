@@ -671,3 +671,86 @@ test('open asks the herdr window to show the task, leaving the request for the m
   assert.match(run(['open', SID], '', extra).stderr, /The herdr window didn't take it: no window/);
   assert.equal(existsSync(join(dir, 'open.json')), false);
 });
+
+test('rename-task renames the background session in Claude Code, as its agents view does, and the task\'s card', (t) => {
+  const { home, ok, run, list, store, job, transcript } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  const state = () => JSON.parse(readFileSync(join(home, '.claude', 'jobs', 'dddd0001', 'state.json'), 'utf8'));
+  transcript(SID, said('Which colour?\n- Teal\n- Coral'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', nameSource: 'auto', cwd: '/', detail: 'asked' }, 2);
+  ok(['listen', 'design', '--once']);
+  assert.equal(store().channels[0].inbox[0].name, 'Draw the logo');
+  const out = ok(['rename-task', SID, 'Logo,', 'second', 'try']);
+  assert.match(out, new RegExp(`Renamed ${HERE}/${SID} in #design to "Logo, second try" in Claude Code: \`claude agents\` shows the new name\\.`));
+  // Only the name changes in the job's record, marked as the user's, as Claude Code's own rename writes it.
+  const s = state();
+  assert.deepEqual([s.name, s.nameSource, s.sessionId, s.state, s.needs, s.detail], ['Logo, second try', 'user', SID, 'blocked', 'which colour?', 'asked']);
+  assert.ok(Date.parse(s.updatedAt) > Date.now() - 60_000);
+  assert.equal(list().channels[0].tasks[0].name, 'Logo, second try');
+  assert.equal(store().channels[0].tasks[0].name, 'Logo, second try');
+  assert.equal(store().channels[0].tasks[0].named, undefined, 'Claude Code holds the name');
+  assert.equal(store().channels[0].inbox[0].name, 'Logo, second try', 'the card shows it');
+  // By a short session id or the job too, and refused when empty or too long.
+  assert.match(ok(['rename-task', 'dddd0001', 'Logo']), /to "Logo" in Claude Code/);
+  assert.match(run(['rename-task', SID, '  ']).stderr, /A task name needs some text/);
+  assert.match(run(['rename-task', SID, 'x'.repeat(81)]).stderr, /one line of up to 80 characters/);
+  assert.match(run(['rename-task', 'nope0000']).stderr, /channels rename-task <session> <new-name>/);
+  assert.equal(state().name, 'Logo');
+});
+
+test('rename-task renames a task\'s copies with it, and a renamed copy keeps the name', (t) => {
+  const { home, ok, list, live, job, store } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa', '--name', 'Pick the colour']);
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'resume-copies'), '');
+  const [, copyJob] = /\(job (eeee\d{4})\)/.exec(ok(['send', OLD, 'Blue.'])) ?? [];
+  const copy = `${copyJob}-0000-4000-8000-000000000000`;
+  const state = (j) => JSON.parse(readFileSync(join(home, '.claude', 'jobs', j, 'state.json'), 'utf8'));
+  assert.equal(state(copyJob).nameSource, 'auto');
+  assert.match(ok(['rename-task', copy, 'Colour scheme']), /in Claude Code, with its 1 copy/);
+  for (const j of ['aaaaaaaa', copyJob]) assert.deepEqual([state(j).name, state(j).nameSource], ['Colour scheme', 'user']);
+  assert.deepEqual(store().channels[0].tasks.map((x) => x.name), ['Colour scheme', 'Colour scheme']);
+  const shown = Object.fromEntries(list('--all').channels[0].tasks.map((x) => [x.session_id, x.name]));
+  assert.deepEqual(shown, { [OLD]: 'Colour scheme', [copy]: 'Colour scheme' });
+  // Claude Code renaming the copy later (from /rename in it) shows too: its job's name is the user's now.
+  job(copyJob, { ...state(copyJob), name: 'Palette' });
+  assert.equal(list().channels[0].tasks[0].name, 'Palette');
+});
+
+test('rename-task keeps the name in the store for a session Claude Code can\'t rename from outside, and says so', (t) => {
+  const { home, ok, run, list, store, transcript } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', GONE]);
+  assert.equal(list().channels[0].tasks[0].name, 'Old talk');
+  const out = ok(['rename-task', GONE, 'New talk']);
+  assert.match(out, new RegExp(`${HERE}/${GONE} isn't a background session, so Claude Code can't rename it from outside \\(only /rename inside does\\): the panel shows "New talk", \`claude agents\` keeps the old name\\.`));
+  assert.deepEqual([store().channels[0].tasks[0].name, store().channels[0].tasks[0].named], ['New talk', 'user']);
+  assert.equal(list().channels[0].tasks[0].name, 'New talk', 'over the transcript\'s title');
+  assert.equal(existsSync(join(home, '.claude', 'jobs', GONE)), false, 'nothing of Claude Code\'s is written');
+  assert.match(readFileSync(join(home, '.claude', 'projects', '-x', `${GONE}.jsonl`), 'utf8'), /"customTitle":"Old talk"/);
+  // A session that is no task: a background one is renamed in Claude Code alone, another is refused.
+  assert.match(ok(['rename-task', 'aaaaaaaa', 'Total fix']), new RegExp(`Renamed ${HERE}/${OLD} to "Total fix" in Claude Code`));
+  assert.equal(JSON.parse(readFileSync(join(home, '.claude', 'jobs', 'aaaaaaaa', 'state.json'), 'utf8')).nameSource, 'user');
+  transcript('99999999-0000-4000-8000-000000000000', [{ type: 'user', cwd: '/', message: { content: 'hi' } }]);
+  assert.match(run(['rename-task', '99999999-0000-4000-8000-000000000000', 'X']).stderr, /isn't a background session, so Claude Code can't rename it from outside: use \/rename in the session itself/);
+});
+
+test('renameJob writes the name again when the session\'s own write lost it', async (t) => {
+  const { renameJob } = await import('../bin/channels.mjs');
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'channels-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const file = join(home, '.claude', 'jobs', 'j1', 'state.json');
+  mkdirSync(join(home, '.claude', 'jobs', 'j1'), { recursive: true });
+  const before = { sessionId: 's', state: 'working', name: 'auto name', nameSource: 'auto', detail: 'a' };
+  writeFileSync(file, JSON.stringify(before));
+  let sleeps = 0;
+  // The session writes its state from what it read before the rename, once.
+  const deps = { home, sleep: async () => { if (sleeps++ === 0) writeFileSync(file, JSON.stringify({ ...before, detail: 'b' })); } };
+  assert.equal(await renameJob(deps, 'j1', 'Mine'), true);
+  const s = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual([s.name, s.nameSource, s.detail], ['Mine', 'user', 'b']);
+  assert.equal(await renameJob(deps, 'nope', 'Mine'), false);
+  assert.equal(await renameJob(deps, '../j1', 'Mine'), false);
+});
