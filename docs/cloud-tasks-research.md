@@ -271,6 +271,33 @@ Error: failed to send message to cloud session session_doesnotexist: invalid ses
   (`list_computer_folders`, `request_computer_folder`). A cloud session can ask to use a folder on a machine
   connected through Remote Control. It's a separate feature, but relevant when a cloud task needs local files.
 
+## On macOS
+
+Repeated on a Mac (macOS 27.2.1, Claude Code 2.1.329, `/usr/bin/script`) by a session on that machine, with the
+same throwaway repo:
+
+| Step | Result | Note |
+| --- | --- | --- |
+| Flags | Same as Linux | `tengu_remote_backend` not set, `tengu_violin_maple: false` |
+| Start | **Works**, with two catches | Prints the same three lines and exits 0 in 2.2 s inside the pty. A new folder stops at the trust dialog first. |
+| Start without a pty | No | `Error: --cloud requires an interactive terminal.` |
+| Send | **Works** | `{"ok":true,…}` in 0.7 s |
+| Attach | No (flag off) | `Error: Attaching to an existing cloud session is not enabled for your account.` |
+| List through the Keychain login | Not tried | Auto mode refuses to let an agent read the Keychain item. It needs a run by hand (below). |
+
+The two catches when starting:
+
+- **The trust dialog**: the first `claude --cloud` in a folder waits on it. Channels start in `~/projects`
+  folders, which are trusted, so this only matters for a new one.
+- **macOS `script` stays open until its stdin closes**, even after `claude` exits (`script -q /dev/null claude
+  …`). So the wrapper must spawn it with a stdin it controls, watch for the `View:` line, then close stdin or
+  kill `script`. Linux's `script -qec` exits with its command.
+
+The list call on a Mac would read the login from the Keychain item `Claude Code-credentials`, which should hold
+the same JSON as the Linux file (`claudeAiOauth.accessToken`). Neither the name nor the contents were checked on
+the Mac yet. The first read by a program other than Claude Code may show a Keychain prompt.
+"Always Allow" for `node` (or `security`) settles it for a personal Mac. A managed Mac may forbid it.
+
 ## 7. Limits
 
 - **Code**: a fresh clone of the GitHub remote at the pushed branch. Unpushed commits and uncommitted or untracked
@@ -329,7 +356,8 @@ channels start <channel> --cloud [--repo <project>] [--title <t>] "<brief>"
    GitHub").
 2. Run `claude --cloud "<brief>" -n <title>` under a pty (`script -qec … /dev/null` on Linux,
    `script -q /dev/null …` on macOS), with `cwd` the repo. Parse `Created cloud session:` and `View: <url>`, the
-   way `start` parses `backgrounded · <job>` now.
+   way `start` parses `backgrounded · <job>` now. On macOS, close `script`'s stdin once `View:` arrives, or
+   `script` never exits.
 3. Store the task like a local one, with a `cloud` block instead of `job`:
 
    ```json
