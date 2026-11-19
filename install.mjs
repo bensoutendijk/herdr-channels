@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Installs herdr-channels on this Mac, from this clone:
-//   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--no-timer] [--no-switch] [--dry-run]
+//   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--remote-control | --no-remote-control] [--no-timer] [--no-switch] [--dry-run]
 //   node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--label <label>]
 //
 // 1. Writes `channels` into --bin (default ~/.local/bin): a small sh script that runs bin/channels.mjs in this
@@ -17,6 +17,10 @@
 // 5. Adds the routines timer: a launchd user agent (~/Library/LaunchAgents/<label>.plist, label
 //    dev.herdr-channels.tick unless --label says otherwise) that runs `channels tick` every minute and once when the
 //    Mac wakes. --no-timer leaves it out; it is macOS only.
+// 6. Remote Control (off unless asked for): with --remote-control the command gets CHANNELS_REMOTE_CONTROL=1, and
+//    the chats and tasks `channels` starts also show at claude.ai/code. --no-remote-control turns it off again; an
+//    install with neither keeps what the command had, and a first install in a terminal asks. Claude Code's own
+//    settings are never touched.
 // --uninstall takes out what an install put in: the timer, the command and the mod and layout this repo installed
 // (a mod folder marked with .herdr-channels.json, and its layout). It never touches anything it didn't install, nor
 // the channel store or any Claude Code session.
@@ -32,11 +36,11 @@ const MOD_MARK = '.herdr-channels.json';
 // What herdr writes into a mod folder itself: never copied, and left alone in an installed copy.
 const GENERATED = new Set(['gpui-kit.d.ts', 'jsconfig.json', MOD_MARK, 'config.js']);
 
-const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
+const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--remote-control | --no-remote-control] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
 export const LABEL = 'dev.herdr-channels.tick';
 
 export function parse(argv, env = process.env, home = homedir()) {
-  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL };
+  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL, remote: null };
   const valued = { '--app-home': 'appHome', '--bin': 'bin', '--chat-mod': 'chatMod', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -44,6 +48,8 @@ export function parse(argv, env = process.env, home = homedir()) {
     else if (a === '--dry-run') o.dryRun = true;
     else if (a === '--no-timer') o.timer = false;
     else if (a === '--uninstall') o.uninstall = true;
+    else if (a === '--remote-control') o.remote = true;
+    else if (a === '--no-remote-control') o.remote = false;
     else if (a === '-h' || a === '--help') { console.log(usage); process.exit(0); }
     else if (valued[a]) {
       if (i + 1 >= argv.length) throw new Error(`${a} needs a value.\n${usage}`);
@@ -66,9 +72,26 @@ export function findProgram(name, { env = process.env, home = homedir() } = {}) 
   return null;
 }
 
+// Whether the installed command has Remote Control on: null when there is no command from this install yet.
+export function installedRemote(bin) {
+  try {
+    const text = readFileSync(join(bin, 'channels'), 'utf8');
+    return text.includes(MARK) ? /CHANNELS_REMOTE_CONTROL:-1/.test(text) : null;
+  } catch { return null; }
+}
+
+export const REMOTE_QUESTION = [
+  'Remote Control for channel chats and tasks?',
+  "With it on, each channel's chat and every task channels starts also shows at claude.ai/code",
+  'and in the Claude app, where you can follow and answer it. Their transcripts (so code and',
+  "command output) go through the claude.ai account this Mac's Claude Code is signed in to. On a",
+  'Team or Enterprise plan, the organization has to allow Remote Control. Check first: README,',
+  '"Remote Control".',
+].join('\n');
+
 const sq = (s) => `'${`${s}`.replace(/'/g, `'\\''`)}'`;
 
-export function wrapperText({ node, script, store, projects, path, chatMod = null, mod = null, appHome = null, app = null }) {
+export function wrapperText({ node, script, store, projects, path, chatMod = null, mod = null, appHome = null, app = null, remote = false }) {
   const keep = (name, value) => (value ? [`export ${name}="\${${name}:-${`${value}`.replace(/["\\$`]/g, '\\$&')}}"`] : []);
   return [
     '#!/bin/sh',
@@ -83,6 +106,8 @@ export function wrapperText({ node, script, store, projects, path, chatMod = nul
     ...keep('CHANNELS_HERDR_MOD', mod),
     ...keep('CHANNELS_HERDR_HOME', appHome),
     ...keep('CHANNELS_HERDR_APP', app),
+    // Remote Control for the chats and tasks channels starts: install.mjs --remote-control, --no-remote-control.
+    ...keep('CHANNELS_REMOTE_CONTROL', remote ? '1' : null),
     `exec ${sq(node)} ${sq(script)} "$@"`,
     '',
   ].join('\n');
@@ -250,10 +275,12 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   rename(layout);
   const config = { mod: name, layout: name, command: wrapper, path, projects: o.projects, by: o.by };
 
-  if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null, chatMod: o.chatMod };
+  const was = installedRemote(o.bin);
+  const remote = o.remote ?? was ?? false;
+  if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null, chatMod: o.chatMod, remote, was: was ?? false };
 
   mkdirSync(o.bin, { recursive: true });
-  writeAtomic(wrapper, wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home) }));
+  writeAtomic(wrapper, wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home), remote }));
   spawnSync('chmod', ['755', wrapper]);
   copyMod(join(REPO, 'mods', 'channels'), modDir);
   copyChatMod(join(REPO, 'mods', 'claude'), o.chatMod);
@@ -264,7 +291,7 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   mkdirSync(o.projects, { recursive: true });
   const selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
   const timer = o.timer ? installTimer({ label: o.label, wrapper, store: o.store, home, platform, run }) : { plist: null, state: 'not added (--no-timer)' };
-  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, chatMod: o.chatMod };
+  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, chatMod: o.chatMod, remote, was: was ?? false };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -276,6 +303,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.log(`The channel store and Claude Code's sessions are left in place.`);
       process.exit(0);
     }
+    // Remote Control: asked on a first install in a terminal, when no option says.
+    if (o.remote == null && installedRemote(o.bin) == null && process.stdin.isTTY && !o.dryRun) {
+      const { createInterface } = await import('node:readline/promises');
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const a = await rl.question(`${REMOTE_QUESTION}\nTurn it on for this Mac? [y/N] `);
+      rl.close();
+      o.remote = /^y(es)?$/i.test(a.trim());
+      console.log('');
+    }
     const r = install(o);
     const missing = Object.entries(r.found).filter(([, p]) => !p).map(([n]) => n);
     console.log(`${o.dryRun ? 'Would install' : 'Installed'} herdr-channels from ${REPO}:`);
@@ -286,9 +322,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`  store    ${o.store}`);
     console.log(`  projects ${o.projects}`);
     if (r.selected) console.log(`  The ${r.name} layout is ${r.selected}.`);
+    console.log(`  remote   ${r.remote ? 'on: new tasks and chats show at claude.ai/code (--no-remote-control turns it off)' : 'off (--remote-control turns it on; see the README, "Remote Control")'}`);
     if (r.timer) console.log(`  timer    ${r.timer.plist ? `${r.timer.plist}: ` : ''}${r.timer.state}`);
     if (missing.length) console.log(`\nNot found: ${missing.join(', ')}. Install ${missing.includes('hc') ? 'the herdr app (it brings hc), ' : ''}${missing.filter((m) => m !== 'hc').join(' and ') || ''} and run this again.`);
     if (!`${process.env.PATH}`.split(delimiter).includes(o.bin)) console.log(`\n${o.bin} isn't on your PATH. Add it to use \`channels\` in a terminal; the mod and chats find it without that.`);
+    if (!o.dryRun && o.remote != null && r.remote !== r.was) console.log(`\nRemote Control is now ${r.remote ? 'on' : 'off'} for what channels starts from here. A chat that is running takes it ${r.remote ? 'on' : 'off'} when it starts again: type /exit in it. Tasks keep what they started with.`);
     console.log(`\nClaude Code starts background sessions only in a folder you trust: run \`claude\` once in ${o.projects} and accept, if you haven't.`);
   } catch (err) {
     console.error(err.message);

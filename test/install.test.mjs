@@ -100,6 +100,29 @@ test('a name already taken is never overwritten: the copy is renamed everywhere;
   assert.ok(existsSync(join(home, '.local', 'bin', 'channels')));
 });
 
+test('Remote Control is off unless asked for; --remote-control turns it on, an install with neither option keeps it, --no-remote-control turns it off', (t) => {
+  const { home, env, install } = setup(t);
+  const wrapper = join(home, '.local', 'bin', 'channels');
+  const listed = () => JSON.parse(spawnSync(wrapper, ['list', '--json'], { encoding: 'utf8', env: { ...env, CHANNELS_MACHINE: 'testmac' } }).stdout).remote_control;
+  // Not a terminal: no question, and off.
+  assert.match(install(), /remote {3}off \(--remote-control turns it on/);
+  assert.equal(listed(), false);
+  assert.doesNotMatch(readFileSync(wrapper, 'utf8'), /CHANNELS_REMOTE_CONTROL/);
+  assert.match(install('--remote-control'), /remote {3}on: new tasks and chats show at claude\.ai\/code[\s\S]*Remote Control is now on[\s\S]*type \/exit in it/);
+  assert.equal(listed(), true);
+  assert.match(readFileSync(wrapper, 'utf8'), /^export CHANNELS_REMOTE_CONTROL="\$\{CHANNELS_REMOTE_CONTROL:-1\}"$/m);
+  const again = install();
+  assert.match(again, /remote {3}on/, 'an update keeps it');
+  assert.doesNotMatch(again, /Remote Control is now/);
+  assert.match(install('--dry-run', '--no-remote-control'), /remote {3}off/);
+  assert.equal(listed(), true, 'a dry run changes nothing');
+  assert.match(install('--no-remote-control'), /Remote Control is now off/);
+  assert.equal(listed(), false);
+  // Claude Code's own settings are never written.
+  assert.equal(existsSync(join(home, '.claude', 'settings.json')), false);
+  assert.equal(existsSync(join(home, '.claude.json')), false);
+});
+
 test('a `channels` on PATH that this install didn\'t write is left alone', (t) => {
   const { home, env } = setup(t);
   mkdirSync(join(home, '.local', 'bin'), { recursive: true });

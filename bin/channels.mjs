@@ -14,6 +14,7 @@
 //   channels send <session> [--wake-on <on>] <text | ->   a message to a session; continues it, or files the copy Claude Code starts
 //   channels watch <session> --wake-on finish|question|any|none [--why <text>]   wake the chat on the task's next such event
 //   channels seen <session>                   the task's events have been seen in the panel
+//   channels link <session> [--open]          its claude.ai/code link, when it has Remote Control; --open opens it
 //   channels rename-task <session> <new-name>   renames the session in Claude Code too, as `claude agents` does
 //   channels dismiss <session> [--by <who>]
 //   channels listen <channel> [--once]        what the chat runs beside itself; by hand, for a look at what it would do
@@ -173,7 +174,7 @@ export function readJobs(home) {
     out.set(s.sessionId, {
       job, state: s.state, detail: s.detail ?? '', needs: s.needs ?? null, cwd: s.cwd ?? null, name: s.name ?? '',
       nameSource: s.nameSource ?? null, inFlight: Number(s.inFlight?.tasks) || 0, result: s.output?.result ?? null,
-      updatedAt: s.updatedAt ?? null, transcript: s.linkScanPath ?? null, work: countLines(join(dir, job, 'timeline.jsonl')),
+      updatedAt: s.updatedAt ?? null, transcript: s.linkScanPath ?? null, bridge: s.bridgeSessionId ?? null, work: countLines(join(dir, job, 'timeline.jsonl')),
     });
   }
   return out;
@@ -193,7 +194,7 @@ export function readLive(home) {
   for (const f of files) {
     const s = readJson(join(dir, f));
     if (!s?.sessionId || !Number.isInteger(s.pid) || !alive(s.pid)) continue;
-    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null });
+    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null, bridge: s.bridgeSessionId ?? null });
   }
   return out;
 }
@@ -303,6 +304,54 @@ export function transcriptTitle(home, id) {
   return '';
 }
 
+// ---------- Remote Control ----------
+
+// Remote Control: when it is on (CHANNELS_REMOTE_CONTROL, which install.mjs writes into the installed command), the
+// chat and every task `start` makes also show at claude.ai/code and in the Claude app. Only the flags this command
+// passes turn it on; the user's own Claude Code settings are never touched.
+export const remoteOn = (env = process.env) => /^(1|on|yes|true)$/i.test(`${env.CHANNELS_REMOTE_CONTROL ?? ''}`.trim());
+
+// The claude.ai name of a channel's chat: the channel and the machine, since the account's list doesn't say which
+// machine a session runs on and the same channel can exist on several.
+export const remoteChatName = (name, machine = LOCAL) => `#${name} · ${machine}`;
+
+// A Remote Control session id (cse_… in a job record and the transcript, session_… in a live record) as its
+// claude.ai/code link, or null.
+export function remoteLink(bridge) {
+  const m = /^(?:cse|session)_([A-Za-z0-9]{8,64})$/.exec(`${bridge ?? ''}`.trim());
+  return m ? `https://claude.ai/code/session_${m[1]}` : null;
+}
+
+// The last Remote Control session id a transcript records ("bridge-session" lines), or null.
+export function transcriptBridge(text) {
+  const mark = '"type":"bridge-session"';
+  let at = `${text ?? ''}`.lastIndexOf(mark);
+  while (at !== -1) {
+    const start = text.lastIndexOf('\n', at) + 1;
+    const end = text.indexOf('\n', at);
+    try {
+      const id = JSON.parse(text.slice(start, end === -1 ? undefined : end)).bridgeSessionId;
+      if (remoteLink(id)) return id;
+    } catch { /* a line being written */ }
+    at = start > 0 ? text.lastIndexOf(mark, start - 1) : -1;
+  }
+  return null;
+}
+
+// A session's claude.ai/code link, when it has had Remote Control: from its job's record (kept after the process
+// exits), else its running process's record, else its transcript (which `transcript: false` skips, as list does for
+// a session that has a job). It stays the same across `send` and a chat's restart; a copy gets a link of its own.
+export function remoteUrl(home, { sessionId = null, job = null, live = null, transcript = true, file = null } = {}) {
+  const fromJob = remoteLink(job?.bridge ?? job?.bridgeSessionId);
+  if (fromJob) return fromJob;
+  const fromLive = remoteLink(live?.bridge ?? live?.bridgeSessionId);
+  if (fromLive) return fromLive;
+  if (!transcript || !sessionId) return null;
+  const path = file && existsSync(file) ? file : findTranscript(home, sessionId);
+  if (!path) return null;
+  try { return remoteLink(transcriptBridge(readFileSync(path, 'utf8'))); } catch { return null; }
+}
+
 // ---------- running programs ----------
 
 // Variables a Claude Code session sets for the programs it runs. A task started from the chat's Bash would inherit
@@ -340,6 +389,7 @@ export function defaultDeps(home = homedir()) {
     claude: process.env.CHANNELS_CLAUDE || 'claude',
     hc: process.env.CHANNELS_HC || 'hc',
     app: process.env.CHANNELS_HERDR_APP || 'herdr-app',
+    open: process.env.CHANNELS_OPEN || 'open',
     run: runProgram,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   };
@@ -409,14 +459,17 @@ function liveNames(live) {
 
 // One task as list shows it, with its current Claude Code name: its job's, else its running process's, else its
 // transcript's (not read for a dismissed task), else the name it was filed under.
-function showTask(home, t, names) {
+// Its claude.ai link too, when it has had Remote Control (the transcript is read for one only for a session with no
+// job that isn't dismissed).
+function showTask(home, t, names, live = new Map()) {
   const job = t.machine === LOCAL ? jobState(home, t.job) : null;
   const sessionId = t.session_id ?? job?.sessionId ?? null;
+  const remote = t.machine === LOCAL ? remoteUrl(home, { sessionId, job, live: sessionId ? live.get(sessionId) : null, transcript: !job && !t.dismissed_at }) : null;
   const kept = keptName(t, job);
-  if (kept) return taskRow(t, sessionId, kept);
+  if (kept) return taskRow(t, sessionId, kept, remote);
   let name = job?.name || '';
   if (!name && t.machine === LOCAL && sessionId) name = names.get(sessionId) || (t.dismissed_at ? '' : transcriptTitle(home, sessionId));
-  return taskRow(t, sessionId, name || t.name || '');
+  return taskRow(t, sessionId, name || t.name || '', remote);
 }
 
 // The name the store keeps for a task over Claude Code's, or null. A copy Claude Code started in a task's place keeps
@@ -429,12 +482,13 @@ function keptName(t, job) {
   return null;
 }
 
-function taskRow(t, sessionId, name) {
+function taskRow(t, sessionId, name, remote = null) {
   return {
     id: `${t.machine}/${sessionId ?? `job:${t.job}`}`, machine: t.machine, session_id: sessionId, job: t.job ?? null,
     name, repo: t.repo ?? null, folder: t.folder ?? null, added_at: t.added_at, how: t.how,
     dismissed: Boolean(t.dismissed_at), dismissed_at: t.dismissed_at ?? null, dismissed_by: t.dismissed_by ?? null,
     superseded_by: t.superseded_by ?? null, copy_of: t.copy_of ?? null, named: t.named ?? null, unread: t.unread ?? null, wake: t.wake ?? null,
+    remote_url: remote,
   };
 }
 
@@ -443,15 +497,17 @@ function taskRow(t, sessionId, name) {
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
   if (only) channelOf(store, only, { archived: true });
-  const names = liveNames(readLive(home));
+  const live = readLive(home);
+  const names = liveNames(live);
   const position = new Map(store.channels.filter((c) => !c.archived_at).map((c, i) => [c, i + 1]));
   return {
     machine: LOCAL,
+    remote_control: remoteOn(),
     channels: store.channels.filter((c) => (only ? c.name === only : all || !c.archived_at)).map((c) => ({
       id: c.id, name: c.name, position: position.get(c) ?? null, icon: c.icon ?? null, created_at: c.created_at, archived_at: c.archived_at ?? null,
       description_path: descriptionPath(dir, c.name), chat: c.chat ?? null, chat_terminal: chatRunning(dir, c.id)?.terminal ?? null,
       routines: c.routines.map((r) => showRoutine(r)), queued: c.queue.length,
-      tasks: c.tasks.map((t) => showTask(home, t, names)).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`)),
+      tasks: c.tasks.map((t) => showTask(home, t, names, live)).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`)),
     })),
   };
 }
@@ -551,7 +607,9 @@ async function start({ dir, deps, name, repo, title, model, mode, brief, wake = 
   const cwd = repo ? join(deps.projects, repo) : deps.projects;
   if (!existsSync(cwd)) fail(`The projects folder ${cwd} doesn't exist. Make it, or set CHANNELS_PROJECTS.`);
   const label = cut(oneLine(title || brief), 60);
-  const args = ['--bg', '-n', label, ...(mode ? ['--permission-mode', mode] : []), ...(model ? ['--model', model] : []), brief];
+  // With Remote Control on, the task also shows at claude.ai/code under its name. `send` passes no flags: Claude Code
+  // resumes a background session with the options it started with, this one included.
+  const args = ['--bg', ...(remoteOn() ? ['--remote-control', label] : []), '-n', label, ...(mode ? ['--permission-mode', mode] : []), ...(model ? ['--model', model] : []), brief];
   const r = await deps.run(deps.claude, args, { cwd, env: cleanEnv(), timeout: 90_000 });
   const said = `${r.out}\n${r.err}`;
   const job = (/backgrounded · (\S+)/.exec(said) || /claude attach (\S+)/.exec(said) || [])[1];
@@ -802,6 +860,7 @@ async function read({ deps, ref, limit }) {
     id: s.session_id, machine: LOCAL, job: s.job, title: job?.name || live?.name || t?.title || s.name || '', state: st.state, doing: st.doing,
     project: projectOf(deps.projects, s.cwd), folder: s.cwd, waiting_on: st.state === 'waiting_on_user' ? (live?.waitingFor || 'a prompt') : st.state === 'blocked' ? st.doing : null,
     result: job?.result ?? null, last_agent_message: t?.last?.text ?? null,
+    remote_url: remoteUrl(deps.home, { sessionId: s.session_id, job, live, file: job?.transcript }),
   };
   const thread = t?.thread ?? [];
   // The last agent message is shown whole, the others cut.
@@ -814,6 +873,7 @@ const clock = (iso) => (typeof iso === 'string' ? iso.slice(0, 16).replace('T', 
 function printSession({ summary: s, messages, more }) {
   console.log(`${s.title || '(no name yet)'}  ${s.machine}/${s.id}${s.job ? `  (job ${s.job})` : ''}`);
   console.log(`${s.state}: ${s.doing}${s.project ? `  (${s.project})` : ''}`);
+  if (s.remote_url) console.log(`On claude.ai: ${s.remote_url}`);
   if (s.waiting_on) console.log(`Waiting on you: ${s.waiting_on}`);
   if (s.result) console.log(`Result: ${s.result}`);
   const msgs = [...messages].reverse();
@@ -895,7 +955,7 @@ async function send({ dir, deps, ref, text, wake = null }) {
   const copyRef = `${LOCAL}/${copyId ?? `job:${woke}`}`;
   const out = { id: s.session_id, machine: LOCAL, delivered_as: 'copy_started', job: woke, copy: { id: copyRef, session_id: copyId, job: woke }, filed_in: null };
   const head = `Claude Code didn't continue ${LOCAL}/${s.session_id}: it started a copy of it, ${copyRef} (job ${woke}), and the message went to the copy.`;
-  if (!filed || filed.archived) return { ...out, note: `${head} The original isn't a task in an open channel, so the copy wasn't filed anywhere.` };
+  if (!filed || filed.archived) return { ...out, note: `${head} The original isn't a task in an open channel, so the copy wasn't filed anywhere.${copyRemoteNote()}` };
   const was = filed.task;
   const task = {
     machine: LOCAL, session_id: copyId, job: woke, name: was.name || s.name || '', repo: was.repo ?? projectOf(deps.projects, job?.cwd || s.cwd),
@@ -907,8 +967,13 @@ async function send({ dir, deps, ref, text, wake = null }) {
     if (!(err instanceof UsageError)) throw err;
     return { ...out, note: `${head} Filing the copy into #${channel} failed: ${err.message}` };
   }
-  return { ...out, filed_in: channel, note: `${head} The copy is filed into #${channel} as "${task.name}" in its place, and the original task is marked superseded by it and resolved.` };
+  return { ...out, filed_in: channel, note: `${head} The copy is filed into #${channel} as "${task.name}" in its place, and the original task is marked superseded by it and resolved.${copyRemoteNote()}` };
 }
+
+// A copy Claude Code starts gets only the flags of the command that made it, and `send` passes none (a flag on a
+// resume would start a copy every time). So with Remote Control on, the copy has it only if the user's own Claude Code
+// setting turns it on for every session.
+const copyRemoteNote = () => (remoteOn() ? ' The copy isn\'t on claude.ai unless Remote Control is on for all sessions in Claude Code\'s own settings: Claude Code gives a copy only the options of the command that started it.' : '');
 
 // Takes a task's waiting event out of every channel's inbox.
 function dropWaiting(dir, ref) {
@@ -951,6 +1016,18 @@ async function openTask({ dir, deps, ref }) {
     fail(`The herdr window didn't take it: ${cut(oneLine(r.err || r.out || 'no output'), 240)}. Is Herdr open with the channels layout?`);
   }
   return { task: id, channel: hit.c.name };
+}
+
+// A session's claude.ai/code link (Remote Control), and with `open` it is opened in the browser with macOS `open`.
+async function link({ deps, ref, open = false }) {
+  const { s, job, live } = await sessionFacts(deps, ref);
+  const url = remoteUrl(deps.home, { sessionId: s.session_id, job, live, file: job?.transcript });
+  if (!url) fail(`${LOCAL}/${s.session_id} has no claude.ai link: it has never had Remote Control${remoteOn() ? '' : ', which is off for channels on this Mac (see the README, "Remote Control")'}.`);
+  if (open) {
+    const r = await deps.run(deps.open, [url], { timeout: 20_000, env: cleanEnv() });
+    if (r.code !== 0) fail(`Couldn't open ${url}: ${cut(oneLine(r.err || r.out || 'no output'), 240)}`);
+  }
+  return { id: `${LOCAL}/${s.session_id}`, url, opened: open };
 }
 
 // What the mod takes when told to open a task: the request, if it is fresh, and it is gone after.
@@ -1107,6 +1184,8 @@ export async function listenTick({ dir, home, channelId, deliver }) {
     }
     const note = repeat || reg ? null : noteText({ ...facts, kind: now.kind });
     const card = note ? cardOf({ kind: now.kind, prompt, waiting, last: transcript?.last?.text, result: now.job?.result }) : null;
+    // The task's claude.ai link, for the card's Open on claude.ai.
+    const remote = note ? remoteUrl(home, { sessionId: now.sid, job: now.job, live: now.live, file: now.job?.transcript }) : null;
     updateStore(dir, (s) => {
       const ch = s.channels.find((x) => x.id === channelId);
       const task = ch?.tasks.find((x) => sameSession(x, t.machine, t.session_id ?? t.job));
@@ -1118,7 +1197,7 @@ export async function listenTick({ dir, home, channelId, deliver }) {
       // The task's older waiting event says less than this one: it is replaced, or, on a wake, taken.
       ch.inbox = (ch.inbox ?? []).filter((e) => e.task !== ref);
       if (reg) task.wake = null;
-      else ch.inbox.push({ task: ref, name, kind: now.kind, at, text: note, card });
+      else ch.inbox.push({ task: ref, name, kind: now.kind, at, text: note, card, ...(remote ? { remote } : {}) });
     });
     if (!repeat) out.push({ level: reg ? 'wake' : 'ride-along', task: ref, text: text ?? note });
   }
@@ -1582,9 +1661,21 @@ const shq = (s) => `'${`${s}`.replace(/'/g, `'\\''`)}'`;
 // The chat's own settings, given with --settings so they reach this session only, never the user's settings files:
 // no agent view, and the UserPromptSubmit hook that attaches the channel's waiting events to each message the
 // user sends. The hook runs this same script with this same node, so it needs nothing on PATH.
-export function chatSettings(dir, channelId) {
+// With Remote Control on, remoteControlAtStartup too: for this session only, like the rest.
+export function chatSettings(dir, channelId, { remote = remoteOn() } = {}) {
   const command = `CHANNELS_DIR=${shq(dir)} ${shq(process.execPath)} ${shq(fileURLToPath(import.meta.url))} pending ${shq(channelId)} --hook`;
-  return { disableAgentView: true, hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
+  return { disableAgentView: true, ...(remote ? { remoteControlAtStartup: true } : {}), hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
+}
+
+// The chat's claude arguments. With Remote Control on, its claude.ai name carries the machine (#general · studio);
+// the local name stays #general.
+export function chatArgs({ dir, name, id, resume, channelId, projects, mod = null, remote = remoteOn() }) {
+  const args = [resume ? '--resume' : '--session-id', id, '-n', `#${name}`];
+  if (remote) args.push('--remote-control', remoteChatName(name));
+  args.push('--append-system-prompt', chatPrompt(dir, name, { projects }), '--settings', JSON.stringify(chatSettings(dir, channelId, { remote })));
+  // The task cards mod, for this session only: it draws the channel's waiting events above the prompt.
+  if (mod) args.push('--plugin-dir', mod);
+  return args;
 }
 
 // The channel's chat, every time the mod needs its tab: the first time a new session id is recorded as the chat
@@ -1610,10 +1701,7 @@ async function chat({ dir, deps, name }) {
   writeAtomic(chatFile(dir, channelId), `${JSON.stringify({ pid: process.pid, terminal, session_id: id, started_at: new Date().toISOString() })}\n`);
   if (!existsSync(deps.projects)) mkdirSync(deps.projects, { recursive: true });
   const resume = !recorded && Boolean(findTranscript(deps.home, id));
-  const args = [resume ? '--resume' : '--session-id', id, '-n', `#${name}`, '--append-system-prompt', chatPrompt(dir, name, { projects: deps.projects }), '--settings', JSON.stringify(chatSettings(dir, channelId))];
-  // The task cards mod, for this session only: it draws the channel's waiting events above the prompt.
-  const mod = chatModDir();
-  if (mod) args.push('--plugin-dir', mod);
+  const args = chatArgs({ dir, name, id, resume, channelId, projects: deps.projects, mod: chatModDir() });
   // The chat runs `channels` with Bash: this command's folder goes first on its PATH.
   const env = cleanEnv();
   const bin = process.env.CHANNELS_BIN ? dirname(process.env.CHANNELS_BIN) : null;
@@ -1640,7 +1728,7 @@ export function parseArgs(args) {
   const pos = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take') opts[a.slice(2)] = true;
+    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open') opts[a.slice(2)] = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
       opts[a.slice(2).replace(/-(.)/g, (_, x) => x.toUpperCase())] = args[++i];
@@ -1652,7 +1740,7 @@ export function parseArgs(args) {
 
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
-const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | tick';
+const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | tick';
 const ROUTINE_USAGE = [
   'channels routine list [<channel>] [--json]',
   'channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->',
@@ -1831,6 +1919,12 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       if (pos.length !== 1) fail('channels open <session>   (shows the task in the herdr tasks panel)');
       const r = await openTask({ dir, deps, ref: pos[0] });
       console.log(`Asked herdr to show ${r.task} in #${r.channel}'s tasks panel.`);
+      return 0;
+    }
+    if (sub === 'link') {
+      if (pos.length !== 1) fail('channels link <session> [--open] [--json]   (the session\'s claude.ai link, with Remote Control)');
+      const r = await link({ deps, ref: pos[0], open: Boolean(opts.open) });
+      console.log(opts.json ? JSON.stringify(r) : r.url);
       return 0;
     }
     if (sub === 'watch') {
