@@ -898,7 +898,7 @@ export function chatPrompt(dir, name, { projects = projectsDir() } = {}) {
 
 const safeName = (s) => cut(oneLine(s), 120).replace(/[<>"]/g, '');
 const fence = (text) => `${text}`.trim().replace(/<(\/?)task-report/gi, '<$1task_report');
-const whyLine = (why) => (why === CARD_ASKED ? ['The user pressed Tell chat on its card above the prompt: they want to hear about it now.']
+const whyLine = (why) => (why === CARD_ASKED ? ['The user pressed Tell chat on its card above the prompt: they want to hear about it now. The card is gone, and nothing about this task waits to ride along.']
   : why ? [`Why you're woken: ${safeName(why)}. That registration is now used up.`] : []);
 const CARD_ASKED = Symbol('card');
 

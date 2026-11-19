@@ -16,7 +16,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Card, CardWork } from '../types'
-import { OTHER, ago, cardsOf, lastLine } from './cards'
+import { OTHER, ago, cardsOf, lastLine, questionOf } from './cards'
 
 const cards = atom({ plugin: 'channels-cards', key: 'cards' } as const, [] as Card[])
 const drafts = atom({ plugin: 'channels-cards', key: 'drafts' } as const, {} as Record<string, string>)
@@ -168,7 +168,7 @@ export const register: Register = on => {
             <Text bold>{card.name}</Text>
             <Text dimColor> asks · {ago(card.at, now)}</Text>
           </Text>
-          <Text maxLines={4}>{card.message ?? card.waiting ?? 'It asked something: open it to see.'}</Text>
+          <Text maxLines={4}>{questionOf(card)}</Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             {options.length ? (
               <Select
@@ -219,7 +219,7 @@ export const register: Register = on => {
 
     const done = (card: Card) => (
       <Box key={`card:${card.task}`} flexDirection="column" paddingX={1} width={width}>
-        <Box flexDirection="row" gap={1}>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Text dimColor wrap="truncate-end">
             <Text color="success">✓</Text> {card.name} finished · {ago(card.at, now)}
           </Text>

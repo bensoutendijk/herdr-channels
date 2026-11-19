@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cardsOf } from '../hooks/cards'
+import { cardsOf, questionOf } from '../hooks/cards'
 
 const BAND = {
   plugin: 'channels-cards',
@@ -184,4 +184,10 @@ test('the store read into cards: an older entry without a card, other channels l
   const got = cardsOf(JSON.stringify({ channels: [{ id: CH, inbox: [finished, old] }, { id: 'x', inbox: [question()] }] }), CH)
   expect(got.map(c => [c.task, c.state])).toEqual([[P, 'prompt'], [D, 'done']])
   expect(got[0]?.options).toEqual([])
+})
+
+test('a question whose options are in the Select leaves their list out of its text', () => {
+  const card = { task: Q, name: 'n', state: 'question', at: AT, waiting: null, options: ['Calm', 'Playful'], message: 'Which tone?\n\n1. **Calm**\n2. Playful\n\nI lean calm.' } as const
+  expect(questionOf({ ...card, options: [...card.options] })).toBe('Which tone?\n\nI lean calm.')
+  expect(questionOf({ ...card, options: [] })).toBe(card.message)
 })

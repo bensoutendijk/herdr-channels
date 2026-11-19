@@ -66,4 +66,16 @@ export function lastLine(text: string): string {
   return (lines[lines.length - 1] ?? '').trim()
 }
 
+// A question's text as its card shows it: when the options are in the Select, the list of them is left out.
+export function questionOf(card: Card): string {
+  const text = card.message ?? card.waiting ?? 'It asked something: open it to see.'
+  if (!card.options.length) return text
+  const item = /^\s*(?:\d{1,2}[.)]|[-*•]|\(?[a-fA-F][.)])\s+(.+?)\s*$/
+  const kept = text.split('\n').filter(l => {
+    const m = item.exec(l)
+    return !(m && card.options.includes((m[1] ?? '').replace(/\*\*|__|`/g, '').trim()))
+  })
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim() || text
+}
+
 export const OTHER = '__something_else__'
