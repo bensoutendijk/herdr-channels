@@ -318,6 +318,10 @@ menu, a button in its header when it is open in the panel, and a button on its c
 opens the link in your browser with macOS `open`. `channels link <session>` prints it, `--open` opens it, and
 `channels read` shows it on its first lines.
 
+<img src="docs/task-menu-claude-ai.png" width="420" alt="The tasks panel with a task's menu open, offering Rename, Open on claude.ai and Resolve">
+
+<img src="docs/task-header-claude-ai.png" width="420" alt="An open task's header in the tasks panel, Write the release notes, Ready for review, with an Open on claude.ai button beside Rename, Resolve and Close; below it the task's Claude Code session says /rc active">
+
 **Renaming.** `channels rename-task` (and Rename in the panel) renames the task in Claude Code's job record, which
 is how `claude agents` renames a session. Claude Code passes that name on to claude.ai, so the title there
 follows, and keeps it when the task is resumed.
