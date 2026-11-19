@@ -17,3 +17,14 @@ jobs:
           node-version: 24
       - run: node --check bin/channels.mjs && node --check bin/schedule.mjs && node --check install.mjs
       - run: node --test test/*.test.mjs
+  # The chats' task cards mod (mods/claude): Claude Code's own checks of a plugin, run against the engine itself.
+  cards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install -g @anthropic-ai/claude-code@2.1.328
+      - run: claude plugin validate mods/claude
+      - run: claude plugin test mods/claude

@@ -6,8 +6,9 @@ entirely on your machine.
 A channel groups the work on one topic. Each channel has an icon, a description, a long-lived
 Claude Code chat, a list of tasks, and routines: prompts its chat receives on a schedule. A task is a Claude Code background session (`claude --bg`)
 that you can open live in the tasks panel next to the chat. The chat can start tasks, read them and
-send them messages. When a task finishes or asks a question, the tasks panel shows it, and the chat
-hears about it with your next message; it is interrupted only when it asked to be.
+send them messages. When a task finishes or asks a question, the tasks panel shows it, a card above
+the chat's prompt lets you answer or dismiss it without the chat taking a turn, and the chat hears
+about it with your next message; it is interrupted only when it asked to be.
 
 Everything is local: the channel store is a folder on disk, tasks run under your own `claude`, and
 the herdr mod runs every command on the same machine. No server is involved.
@@ -19,6 +20,7 @@ the herdr mod runs every command on the same machine. No server is involved.
 | Path | Purpose |
 |---|---|
 | `mods/channels/` | The herdr mod: sidebar, header bar, tasks panel and dialogs |
+| `mods/claude/` | The Claude Code mod each channel's chat loads: the [task cards](#task-cards) above its prompt |
 | `layouts/channels.json` | The herdr layout that arranges the mod |
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
@@ -97,6 +99,8 @@ The installer:
 
 - writes the `channels` command to `~/.local/bin`,
 - copies the mod and layout into `~/.config/herdr-app`,
+- copies the task cards mod (`mods/claude`) to `~/.local/share/herdr-channels/chat-mod`, which
+  every channel's chat loads,
 - selects the channels layout, and
 - adds the routines timer: a launchd user agent, `~/Library/LaunchAgents/dev.herdr-channels.tick.plist`,
   that runs `channels tick` every minute (see [Routines](#routines)).
@@ -111,6 +115,7 @@ on). Running the installer again updates a previous installation in place.
 | `--store <dir>` | `~/.local/state/herdr-channels` | Where channels are stored |
 | `--by <name>` | `user` | Name recorded when a task is resolved from the panel |
 | `--bin <dir>` | `~/.local/bin` | Where the `channels` command is written |
+| `--chat-mod <dir>` | `~/.local/share/herdr-channels/chat-mod` | Where the chats' task cards mod is copied |
 | `--app-home <dir>` | `$HERDR_APP_HOME` or `~/.config/herdr-app` | herdr configuration folder |
 | `--label <label>` | `dev.herdr-channels.tick` | The launchd label of the routines timer |
 | `--no-timer` | | Install without the routines timer |
@@ -126,6 +131,10 @@ cd ~/projects/herdr-channels && git pull && node install.mjs
 
 Pass the same options as the first install (for example `--projects ~/code`). Installing again also
 adds the routines timer to an installation that doesn't have it yet.
+
+A chat loads the task cards mod when it starts. A chat that was already running before the update
+has no cards until it starts again: type `/exit` in it, and it starts again in a few seconds on the
+same session, with its history.
 
 ## Usage
 
@@ -162,13 +171,15 @@ or show a permission prompt, is an *event*. Each event is delivered at one of th
 | Level | When | What happens |
 |---|---|---|
 | **panel** | Every event | The task gets a dot in the tasks panel until you open it there. |
-| **ride-along** | The default, for finishes and questions | Nothing happens in the chat. The event waits in the store and is attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
+| **ride-along** | The default, for finishes and questions | The chat takes no turn. The event shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
 | **wake** | Only when a registration exists for that task | The listener pastes a `[task report]` (with the task's final message in full) or a `[task question]` into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. |
 
 Ride-along uses a Claude Code `UserPromptSubmit` hook. `channels chat` passes it to the chat with
 `--settings`, so it applies to that session only and your own settings files are not touched. The
 hook runs `channels pending <channel> --hook`, which prints the waiting events as additional
 context and marks them delivered. A task's newer event replaces its older one while it waits.
+A delivered finish leaves the store; a delivered question stays as a card until it is answered,
+dismissed or the task moves on, but isn't attached again.
 
 A registration asks for the chat to be woken by a task's next matching event:
 
@@ -196,6 +207,39 @@ schedule is a wake by nature, and the waiting events ride along with it too.
 To see what the listener would do right now, run `channels listen <channel> --once` (it records what
 it does). `channels pending <channel>` shows what waits for the chat's next message without taking
 it, and `channels seen <session>` clears a task's dot.
+
+### Task cards
+
+Every event that rides along also shows as a card in the chat, in the band directly above its prompt.
+Acting on a card never starts a turn of the chat, except **Tell chat**:
+
+| Card | Shows | Buttons |
+|---|---|---|
+| **A task asks something** (it ended its turn with a question) | The task's name and its question. If the question ends with a short list of choices (`1. Teal`, `- Coral`), they are in a Select, with *Something else…* for your own words; otherwise there is a text field. | **Send** gives the task your answer (`channels send <session> -`), and it carries on. **Open** shows the task in the tasks panel, as clicking it there does. |
+| **A task waits on a permission prompt** (or another dialog in its own session) | The task's name and what the prompt asks | **Open**, to answer it in the task's view |
+| **A task finished** | One quiet line: `✓ <name> finished` | **Dismiss** drops it. **Tell chat** submits the task's report, whole, to the chat, which starts a turn. |
+
+To reach a card from the keyboard, press `ctrl+x tab` to focus the band, `tab` to move between its
+controls, and `enter` to press one; `esc` goes back to the prompt. Clicking works too.
+
+Acting on a card marks its event handled in the store: it leaves the chat's inbox and the task's dot
+in the panel clears, so it doesn't also ride along with your next message. A card you don't act on
+still rides along; nothing is delivered twice. A question you answer in the task's own view goes
+away by itself once the task works again. More than four cards are counted on one line, and the rest
+ride along as usual. A registered wake (`--wake-on`, `channels watch`) still wakes the chat with a
+turn and shows no card, since the chat is waiting on that answer.
+
+The cards are a Claude Code mod in `mods/claude`. `channels chat` starts the chat's `claude` with
+`--plugin-dir` pointing at the installed copy, so only channel chats load it: not tasks, and not
+your other Claude Code sessions. Every two seconds it reads the store's `channels.json` and draws
+the channel's waiting events; its buttons run `channels`:
+
+```
+channels send <session> -          Send
+channels open <session>            Open: herdr's channels mod shows the task (herdr-app do channels.open-task)
+channels card dismiss <session>    Dismiss
+channels card tell <session>       Tell chat: prints the report the mod submits to the chat
+```
 
 ## Routines
 
@@ -272,6 +316,8 @@ channels seen <session>
 channels dismiss <session> [--by <who>]
 channels listen <channel> --once
 channels pending <channel> [--hook]
+channels card dismiss|tell <session>
+channels open <session>
 channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]
 channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->
@@ -305,6 +351,10 @@ is showing a permission prompt, fails; answer prompts in the task's view instead
 | `CHANNELS_CLAUDE` | `claude` | The Claude Code executable |
 | `CHANNELS_HC` | `hc` | The herdr-core executable |
 | `CHANNELS_STOP_WAIT_MS` | `30000` | How long `send` waits for a stopped task's process to exit |
+| `CHANNELS_CHAT_MOD` | `mods/claude` in the clone | The task cards mod a chat loads |
+| `CHANNELS_HERDR_APP` | `herdr-app` | The Herdr desktop app's command, for a card's Open |
+| `CHANNELS_HERDR_MOD` | `channels` | The name the herdr mod was installed under |
+| `CHANNELS_HERDR_HOME` | herdr's default | The herdr app home a card's Open talks to |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values
 given to the installer.
@@ -321,6 +371,13 @@ node --test test/*.test.mjs
 The tests use a temporary home folder with stand-ins for `claude` and `hc`, so they need neither.
 They never load a launchd agent: the installer's tests pass `--no-timer`, and the timer is tested
 with a stand-in for `launchctl`. CI runs them on Linux and macOS.
+
+The task cards mod has its own tests, run against Claude Code's plugin engine:
+
+```sh
+claude plugin validate mods/claude
+claude plugin test mods/claude
+```
 
 ### Trying a change in a sandbox
 
@@ -350,8 +407,8 @@ node ~/projects/herdr-channels/install.mjs --uninstall
 
 This unloads the routines timer and deletes its plist, and removes the `channels` command and the
 mod and layout this repository installed. Only files the installer marked as its own are removed;
-a mod or layout called `channels` that came from elsewhere is left alone. Pass `--label`, `--bin`
-or `--app-home` if you installed with them.
+a mod or layout called `channels` that came from elsewhere is left alone. The task cards mod is
+removed too. Pass `--label`, `--bin`, `--chat-mod` or `--app-home` if you installed with them.
 
 The channel store (`~/.local/state/herdr-channels`), the chats' terminals and any Claude Code
 sessions stay in place. Delete them separately if you no longer need them.

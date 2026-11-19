@@ -11,6 +11,8 @@
 //    the copy gets the next free name (channels-2, ...), in the folder, the layout and the mod's config.js. An
 //    earlier install of this repo (marked by .herdr-channels.json in the mod folder) is updated in place.
 // 3. Writes the mod's config.js: the command, the folders for PATH, the projects folder and the --by name.
+// 3b. Copies mods/claude, the task cards mod a channel's chat loads (`claude --plugin-dir`), to --chat-mod (default
+//    ~/.local/share/herdr-channels/chat-mod). Only the chats load it: not tasks, nor your other Claude Code sessions.
 // 4. Selects the layout: through the running herdr window, or, when none runs, for its next start.
 // 5. Adds the routines timer: a launchd user agent (~/Library/LaunchAgents/<label>.plist, label
 //    dev.herdr-channels.tick unless --label says otherwise) that runs `channels tick` every minute and once when the
@@ -30,12 +32,12 @@ const MOD_MARK = '.herdr-channels.json';
 // What herdr writes into a mod folder itself: never copied, and left alone in an installed copy.
 const GENERATED = new Set(['gpui-kit.d.ts', 'jsconfig.json', MOD_MARK, 'config.js']);
 
-const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--label <label>]';
+const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
 export const LABEL = 'dev.herdr-channels.tick';
 
 export function parse(argv, env = process.env, home = homedir()) {
-  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL };
-  const valued = { '--app-home': 'appHome', '--bin': 'bin', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label' };
+  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL };
+  const valued = { '--app-home': 'appHome', '--bin': 'bin', '--chat-mod': 'chatMod', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--no-switch') o.switch = false;
@@ -49,7 +51,7 @@ export function parse(argv, env = process.env, home = homedir()) {
     } else throw new Error(`Unknown option ${a}.\n${usage}`);
   }
   const expand = (p) => resolve(p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
-  for (const k of ['appHome', 'bin', 'store', 'projects']) o[k] = expand(o[k]);
+  for (const k of ['appHome', 'bin', 'store', 'projects', 'chatMod']) o[k] = expand(o[k]);
   if (!/^[a-z][a-z0-9_-]{0,31}$/.test(o.by)) throw new Error('--by is one short lowercase word, such as your first name.');
   if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(o.label)) throw new Error('--label is a launchd label: letters, digits, dots and dashes, e.g. dev.herdr-channels.tick.');
   return o;
@@ -66,7 +68,8 @@ export function findProgram(name, { env = process.env, home = homedir() } = {}) 
 
 const sq = (s) => `'${`${s}`.replace(/'/g, `'\\''`)}'`;
 
-export function wrapperText({ node, script, store, projects, path }) {
+export function wrapperText({ node, script, store, projects, path, chatMod = null, mod = null, appHome = null, app = null }) {
+  const keep = (name, value) => (value ? [`export ${name}="\${${name}:-${`${value}`.replace(/["\\$`]/g, '\\$&')}}"`] : []);
   return [
     '#!/bin/sh',
     MARK,
@@ -75,6 +78,11 @@ export function wrapperText({ node, script, store, projects, path }) {
     `export CHANNELS_DIR="\${CHANNELS_DIR:-${store.replace(/["\\$`]/g, '\\$&')}}"`,
     `export CHANNELS_PROJECTS="\${CHANNELS_PROJECTS:-${projects.replace(/["\\$`]/g, '\\$&')}}"`,
     'export CHANNELS_BIN="$0"',
+    // What the chats' task cards need: the mod they load, and how to reach the herdr window (a card's Open).
+    ...keep('CHANNELS_CHAT_MOD', chatMod),
+    ...keep('CHANNELS_HERDR_MOD', mod),
+    ...keep('CHANNELS_HERDR_HOME', appHome),
+    ...keep('CHANNELS_HERDR_APP', app),
     `exec ${sq(node)} ${sq(script)} "$@"`,
     '',
   ].join('\n');
@@ -98,6 +106,16 @@ export function pickNames(appHome) {
     if (modFree && layoutFree) return { name, update: Boolean(mine) };
   }
   throw new Error(`No free name for the mod in ${appHome}/mods.`);
+}
+
+// The chat's task cards mod: a copy, marked as this install's, without what Claude Code writes into a plugin
+// folder it loads (.claude-plugin/types).
+function copyChatMod(from, to) {
+  if (existsSync(to) && !existsSync(join(to, MOD_MARK))) throw new Error(`${to} exists and isn't from this install; it's left alone. Pass --chat-mod <another folder>.`);
+  rmSync(to, { recursive: true, force: true });
+  mkdirSync(to, { recursive: true });
+  cpSync(from, to, { recursive: true, filter: (f) => !f.startsWith(join(from, '.claude-plugin', 'types')) });
+  writeAtomic(join(to, MOD_MARK), `${JSON.stringify({ repo: REPO, at: new Date().toISOString() }, null, 2)}\n`);
 }
 
 function copyMod(from, to) {
@@ -190,6 +208,9 @@ export function uninstall(o, { home = homedir(), platform = process.platform, ru
   if (existsSync(wrapper)) {
     if (readFileSync(wrapper, 'utf8').includes(MARK)) { rmSync(wrapper, { force: true }); gone.push(wrapper); } else log(`${wrapper} isn't from this install; it's left alone.`);
   }
+  if (existsSync(o.chatMod)) {
+    if (existsSync(join(o.chatMod, MOD_MARK))) { rmSync(o.chatMod, { recursive: true, force: true }); gone.push(o.chatMod); } else log(`${o.chatMod} isn't from this install; it's left alone.`);
+  }
   let mods = [];
   try { mods = readdirSync(join(o.appHome, 'mods')); } catch { /* none */ }
   for (const name of mods) {
@@ -229,12 +250,13 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   rename(layout);
   const config = { mod: name, layout: name, command: wrapper, path, projects: o.projects, by: o.by };
 
-  if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null };
+  if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null, chatMod: o.chatMod };
 
   mkdirSync(o.bin, { recursive: true });
-  writeAtomic(wrapper, wrapperText({ node, script, store: o.store, projects: o.projects, path }));
+  writeAtomic(wrapper, wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home) }));
   spawnSync('chmod', ['755', wrapper]);
   copyMod(join(REPO, 'mods', 'channels'), modDir);
+  copyChatMod(join(REPO, 'mods', 'claude'), o.chatMod);
   writeAtomic(join(modDir, 'config.js'), configText(config));
   writeAtomic(join(modDir, MOD_MARK), `${JSON.stringify({ repo: REPO, layout: name, at: new Date().toISOString() }, null, 2)}\n`);
   mkdirSync(dirname(layoutFile), { recursive: true });
@@ -242,7 +264,7 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   mkdirSync(o.projects, { recursive: true });
   const selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
   const timer = o.timer ? installTimer({ label: o.label, wrapper, store: o.store, home, platform, run }) : { plist: null, state: 'not added (--no-timer)' };
-  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer };
+  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, chatMod: o.chatMod };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -260,6 +282,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`  command  ${r.wrapper}`);
     console.log(`  mod      ${r.modDir}${r.update ? ' (updated)' : ''}`);
     console.log(`  layout   ${r.layoutFile}${r.name !== 'channels' ? `  ("channels" was taken, so this is "${r.name}")` : ''}`);
+    console.log(`  cards    ${r.chatMod} (the task cards mod each channel's chat loads)`);
     console.log(`  store    ${o.store}`);
     console.log(`  projects ${o.projects}`);
     if (r.selected) console.log(`  The ${r.name} layout is ${r.selected}.`);

@@ -254,6 +254,27 @@ async function openTask(task, where) {
   showInPanel(task, address, where);
 }
 
+// A task card's Open: the chat's cards mod runs `channels open <task>`, which leaves the task in the store and sends
+// "open-task" here (a mod command carries no arguments). The task opens as a click on it in the panel does, in its
+// channel. A task filed a moment ago may not be in what the sidebar last read yet: read the store again for it.
+async function openRequested(cx, refresh) {
+  const want = JSON.parse((await store("channels open --take")).trim() || "null");
+  if (!want?.task) return;
+  const hit = () => {
+    for (const c of channels()) { const t = liveTasks(c).find((x) => x.id === want.task); if (t) return { c, t }; }
+    return null;
+  };
+  let found = hit();
+  for (let i = 0; !found && i < 20; i++) {
+    if (i === 0) refresh();
+    await cx.sleep(250);
+    found = hit();
+  }
+  if (!found) throw new Error(`${want.task} isn't a task in any channel here.`);
+  if (current()?.name !== found.c.name) openChannel(found.c);
+  await openTask(found.t, { channel: found.c });
+}
+
 // The panel follows the channel: it shows what this channel's panel showed last, a task (as if it
 // were clicked) or the list. A task resolved, gone or out of reach since gives the list.
 function followPanel(c) {
@@ -582,6 +603,8 @@ export default class Channels extends View {
           const at = list.findIndex(isShown);
           if (list.length) openTask(list[(at + (c === "task-next" ? 1 : -1) + list.length) % list.length]).catch(() => {});
         } else if (c === "tasks") showTasks();
+        // channels.open-task: a task card's Open, in the chat's Claude Code (see openRequested).
+        else if (c === "open-task") openRequested(cx, () => this.refresh(cx)).catch((err) => fail(`Couldn't open the task: ${String(err?.message ?? err)}`));
         // channels.rename / .instructions / .icon / .archive: that dialog for the selected channel.
         else if (DIALOGS[c] && c !== "new" && current()) openDialog(c, current().name);
         cx.notify();
