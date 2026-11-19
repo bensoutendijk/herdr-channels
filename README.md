@@ -213,6 +213,8 @@ it, and `channels seen <session>` clears a task's dot.
 Every event that rides along also shows as a card in the chat, in the band directly above its prompt.
 Acting on a card never starts a turn of the chat, except **Tell chat**:
 
+<img src="docs/task-cards.png" width="540" alt="The #website chat with three cards above its prompt: Build the site waits on a permission prompt, with Open; Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open; and a quiet line saying Write the release notes finished, with Dismiss and Tell chat">
+
 | Card | Shows | Buttons |
 |---|---|---|
 | **A task asks something** (it ended its turn with a question) | The task's name and its question. If the question ends with a short list of choices (`1. Teal`, `- Coral`), they are in a Select, with *Something else…* for your own words; otherwise there is a text field. | **Send** gives the task your answer (`channels send <session> -`), and it carries on. **Open** shows the task in the tasks panel, as clicking it there does. |
@@ -220,7 +222,11 @@ Acting on a card never starts a turn of the chat, except **Tell chat**:
 | **A task finished** | One quiet line: `✓ <name> finished` | **Dismiss** drops it. **Tell chat** submits the task's report, whole, to the chat, which starts a turn. |
 
 To reach a card from the keyboard, press `ctrl+x tab` to focus the band, `tab` to move between its
-controls, and `enter` to press one; `esc` goes back to the prompt. Clicking works too.
+controls, and `enter` to press one; `esc` goes back to the prompt. Clicking works too. On a
+question with choices, `enter` on the Select opens it, the arrows pick, and `enter` again keeps the
+pick for **Send**:
+
+<img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…">
 
 Acting on a card marks its event handled in the store: it leaves the chat's inbox and the task's dot
 in the panel clears, so it doesn't also ride along with your next message. A card you don't act on
