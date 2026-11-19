@@ -127,7 +127,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, channels: [] });
+  assert.deepEqual(list(), { machine: HERE, remote_control: false, channels: [] });
   assert.match(ok([]), /No channels yet/);
 });
 
@@ -753,4 +753,98 @@ test('renameJob writes the name again when the session\'s own write lost it', as
   assert.deepEqual([s.name, s.nameSource, s.detail], ['Mine', 'user', 'b']);
   assert.equal(await renameJob(deps, 'nope', 'Mine'), false);
   assert.equal(await renameJob(deps, '../j1', 'Mine'), false);
+});
+
+// ---------- Remote Control ----------
+
+const RC = { CHANNELS_REMOTE_CONTROL: '1' };
+const BRIDGE = '01AbCdEfGhIjKlMnOpQrStUv';
+const rewriteJob = (home, id, state) => writeFileSync(join(home, '.claude', 'jobs', id, 'state.json'), JSON.stringify(state));
+
+test('Remote Control on: start passes --remote-control with the task\'s name; send still passes no flags; off passes neither', (t) => {
+  const { home, ok, lines, live, list } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo'], '', RC);
+  assert.deepEqual(lines('claude-calls.jsonl')[0].args, ['--bg', '--remote-control', 'Draw the logo', '-n', 'Draw the logo', '--permission-mode', 'auto', 'Draw the logo']);
+  for (const off of ['', '0', 'off']) {
+    ok(['start', 'design', 'Write the tagline'], '', { CHANNELS_REMOTE_CONTROL: off });
+    assert.equal(lines('claude-calls.jsonl').at(-1).args.includes('--remote-control'), false, `CHANNELS_REMOTE_CONTROL=${off}`);
+  }
+  assert.equal(list().remote_control, false);
+  assert.equal(JSON.parse(ok(['list', '--json'], '', RC)).remote_control, true);
+  // send: Claude Code resumes a background session with the options it started with, so no flag is passed (a flag
+  // on a resume would start a copy).
+  ok(['file', 'design', 'aaaaaaaa']);
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  ok(['send', 'aaaaaaaa', 'Blue.'], '', RC);
+  assert.deepEqual(lines('claude-calls.jsonl').at(-1).args, ['--bg', '--resume', OLD, "From the user via #design's chat: Blue."]);
+  // A copy Claude Code starts in its place doesn't get the flag: send says so when Remote Control is on.
+  rewriteJob(home, 'aaaaaaaa', { sessionId: OLD, state: 'done', name: 'Fix the total' });
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'resume-copies'), '');
+  assert.match(ok(['send', OLD, 'Green.'], '', RC), /The copy isn't on claude\.ai unless Remote Control is on for all sessions in Claude Code's own settings/);
+});
+
+test('Remote Control on: the chat gets remoteControlAtStartup in its own settings and a claude.ai name with the machine', async (t) => {
+  const { ok, run, list, lines } = setup(t);
+  ok(['create', 'design']);
+  assert.equal(run(['chat', 'design'], '', { ...RC, HC_TERMINAL_ID: 't1' }).status, 0);
+  const c = list().channels[0];
+  const [on] = lines('chat-launches.jsonl');
+  assert.deepEqual(on.args.slice(0, 6), ['--session-id', c.chat.session_id, '-n', '#design', '--remote-control', `#design · ${HERE}`]);
+  const settings = JSON.parse(on.args[on.args.indexOf('--settings') + 1]);
+  assert.deepEqual([settings.remoteControlAtStartup, settings.disableAgentView], [true, true]);
+  assert.equal(run(['chat', 'design'], '', { HC_TERMINAL_ID: 't1' }).status, 0);
+  const off = lines('chat-launches.jsonl')[1];
+  assert.equal(off.args.includes('--remote-control'), false);
+  assert.equal('remoteControlAtStartup' in JSON.parse(off.args[off.args.indexOf('--settings') + 1]), false);
+  const { chatArgs, remoteChatName } = await import('../bin/channels.mjs');
+  assert.equal(remoteChatName('general', 'studio'), '#general · studio');
+  const args = chatArgs({ dir: '/s', name: 'general', id: 'x', resume: true, channelId: 'ch_1', projects: '/p', remote: true });
+  assert.deepEqual(args.slice(0, 5), ['--resume', 'x', '-n', '#general', '--remote-control']);
+  assert.match(args[5], /^#general · /);
+});
+
+test('a task\'s claude.ai link comes from its job record, its live record or its transcript; list, read, link and its card carry it', (t) => {
+  const { home, ok, run, list, job, transcript, live, store } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  ok(['file', 'design', GONE]);
+  const url = `https://claude.ai/code/session_${BRIDGE}`;
+  const tasks = () => Object.fromEntries(list().channels[0].tasks.map((x) => [x.session_id, x.remote_url]));
+  assert.deepEqual(tasks(), { [SID]: null, [GONE]: null }, 'none before Remote Control');
+  assert.match(run(['link', SID]).stderr, /has no claude\.ai link: it has never had Remote Control, which is off for channels on this Mac/);
+  // The job's record (cse_…), kept after the process exits.
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', bridgeSessionId: `cse_${BRIDGE}` }, 2);
+  transcript(SID, said('Which colour?\n\n1. Teal\n2. Coral'));
+  assert.equal(tasks()[SID], url);
+  // A session with no job: its running process's record (session_…), else its transcript's last bridge-session line.
+  const other = '02ZyXwVuTsRqPoNmLkJiHgFe';
+  transcript(GONE, [{ type: 'user', message: { content: 'hi' } }, { type: 'bridge-session', sessionId: GONE, bridgeSessionId: `cse_${other}` }]);
+  assert.equal(tasks()[GONE], `https://claude.ai/code/session_${other}`);
+  live(GONE, { status: 'idle', bridgeSessionId: `session_${BRIDGE}` });
+  assert.equal(tasks()[GONE], url);
+  // read and link.
+  assert.match(ok(['read', SID]), new RegExp(`^On claude\\.ai: ${url}$`, 'm'));
+  assert.equal(JSON.parse(ok(['read', SID, '--json'])).summary.remote_url, url);
+  assert.equal(ok(['link', SID]).trim(), url);
+  const opener = join(home, 'bin', 'open');
+  writeFileSync(opener, `#!/bin/sh\necho "$@" >> ${JSON.stringify(join(home, 'opened'))}\n`);
+  chmodSync(opener, 0o755);
+  assert.deepEqual(JSON.parse(ok(['link', SID, '--open', '--json'], '', { CHANNELS_OPEN: opener })), { id: `${HERE}/${SID}`, url, opened: true });
+  assert.equal(readFileSync(join(home, 'opened'), 'utf8').trim(), url);
+  // The waiting event's card carries the link, for its Open on claude.ai.
+  ok(['listen', 'design', '--once']);
+  assert.equal(store().channels[0].inbox.find((e) => e.task === `${HERE}/${SID}`).remote, url);
+});
+
+test('remoteLink and transcriptBridge take only Remote Control session ids', async () => {
+  const { remoteLink, transcriptBridge, remoteOn } = await import('../bin/channels.mjs');
+  assert.equal(remoteLink(`cse_${BRIDGE}`), `https://claude.ai/code/session_${BRIDGE}`);
+  assert.equal(remoteLink(`session_${BRIDGE}`), `https://claude.ai/code/session_${BRIDGE}`);
+  for (const bad of [null, '', BRIDGE, 'cse_', 'cse_abc', `cse_${BRIDGE}/../x`, `https://claude.ai/code/session_${BRIDGE}`]) assert.equal(remoteLink(bad), null, `${bad}`);
+  const text = [{ type: 'bridge-session', bridgeSessionId: 'cse_01aaaaaaaaaaaaaaaaaaaaaa' }, { type: 'user' }, { type: 'bridge-session', bridgeSessionId: `cse_${BRIDGE}` }].map((l) => JSON.stringify(l)).join('\n');
+  assert.equal(transcriptBridge(text), `cse_${BRIDGE}`, 'the last one');
+  assert.equal(transcriptBridge('{"type":"user"}'), null);
+  assert.deepEqual(['1', 'on', 'YES', 'true', '', '0', 'off', undefined].map((v) => remoteOn({ CHANNELS_REMOTE_CONTROL: v })), [true, true, true, true, false, false, false, false]);
 });

@@ -187,7 +187,22 @@ test('the store read into cards: an older entry without a card, other channels l
 })
 
 test('a question whose options are in the Select leaves their list out of its text', () => {
-  const card = { task: Q, name: 'n', state: 'question', at: AT, waiting: null, options: ['Calm', 'Playful'], message: 'Which tone?\n\n1. **Calm**\n2. Playful\n\nI lean calm.' } as const
+  const card = { task: Q, name: 'n', state: 'question', at: AT, waiting: null, remote: null, options: ['Calm', 'Playful'], message: 'Which tone?\n\n1. **Calm**\n2. Playful\n\nI lean calm.' } as const
   expect(questionOf({ ...card, options: [...card.options] })).toBe('Which tone?\n\nI lean calm.')
   expect(questionOf({ ...card, options: [] })).toBe(card.message)
+})
+
+test('a task with a claude.ai link gets Open on claude.ai on its card, which runs channels link --open; one without gets none', async ($, on) => {
+  const url = 'https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv'
+  const w = world(on, [{ ...question(), remote: url }, { ...permission, remote: url }, { ...finished, remote: 'https://example.com/session_01AbCdEfGhIjKlMnOpQrStUv' }])
+  await start($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: `remote:${Q}` })).toBeDefined()
+  expect(await ui.find({ key: `remote:${P}` })).toBeDefined()
+  expect(await ui.find({ key: `remote:${D}` })).toBeUndefined()
+  await ui.press({ key: `remote:${Q}` })
+  expect(w.ran).toEqual([{ argv: ['/bin/channels', 'link', Q, '--open'], stdin: undefined }])
+  expect(w.submitted).toEqual([])
+  expect(await ui.find({ key: `send:${Q}` })).toBeDefined()
+  await ui.unmount()
 })

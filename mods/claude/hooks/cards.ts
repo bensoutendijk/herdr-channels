@@ -8,7 +8,12 @@ type Entry = {
   at?: unknown
   text?: unknown
   card?: { state?: unknown; waiting?: unknown; message?: unknown; options?: unknown } | null
+  remote?: unknown
 }
+
+// A claude.ai/code session link, and nothing else, is one a card opens.
+const CLAUDE_AI = /^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]{8,64}$/
+export const remoteOf = (v: unknown): string | null => (typeof v === 'string' && CLAUDE_AI.test(v) ? v : null)
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v : null)
 
@@ -46,6 +51,7 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
       waiting: str(c.waiting),
       message: str(c.message),
       options: state === 'question' ? [...new Set(options)] : [],
+      remote: remoteOf(e.remote),
     })
   }
   // What waits on the user first, then what finished; oldest first within each.

@@ -56,7 +56,19 @@ const FRESH = "New session";
 // arrow on an empty prompt, /exit, ctrl+z), marks its terminal with the "herdr.back" label, which
 // the panel watches to return to the task list, and attaches again for the next visit. The file
 // says why it exists. It is sent as the program text, so only python3 is needed.
-const NO_AGENTS = ["--settings", '{"disableAgentView":true}'];
+// Remote Control: on when the installed `channels` has it on (install.mjs --remote-control), as `channels list`
+// says. Then a fresh session and an old session opened here also show at claude.ai/code.
+const remoteOn = () => shared(DATA)?.remote === true;
+const resumeSettings = () => ["--settings", JSON.stringify({ disableAgentView: true, ...(remoteOn() ? { remoteControlAtStartup: true } : {}) })];
+// A task's claude.ai/code link opens in the browser with macOS `open`: only a link of that shape.
+const CLAUDE_AI = /^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]{8,64}$/;
+const remoteLink = (task) => (CLAUDE_AI.test(task?.remote_url ?? "") ? task.remote_url : null);
+const openRemote = async (task) => {
+  const url = remoteLink(task);
+  if (!url) return;
+  const r = await exec("open", [url], { timeout: 20000 });
+  if (r.code !== 0) fail(`Couldn't open ${url}: ${(r.stderr.trim() || `open exited ${r.code}`).split("\n").pop()}`);
+};
 const BACK = "herdr.back";
 let viewerSource = null;
 async function attachTo(id) {
@@ -156,7 +168,7 @@ async function readStore() {
       t.standing = standing(a);
     }
   }
-  return { machine: JSON.parse(list).machine ?? null, channels };
+  return { machine: JSON.parse(list).machine ?? null, remote: JSON.parse(list).remote_control === true, channels };
 }
 
 // The channels in the user's order: the store's own (`position`) once it keeps one, else the order
@@ -247,7 +259,7 @@ async function openTask(task, where) {
     const there = (a) => (machine ? `${a}`.startsWith(`${machine}/`) : !`${a}`.includes("/"));
     const old = OLD_VIEWERS.map((prefix) => viewerName(prefix, task));
     for (const x of terminals()) if (old.includes(x.name) && there(x.address)) run("terminal.kill", { terminal: x.address });
-    const cmd = task.job || !UUID.test(task.session_id) ? await attachTo(shortId(task)) : ["claude", "--resume", task.session_id, ...NO_AGENTS];
+    const cmd = task.job || !UUID.test(task.session_id) ? await attachTo(shortId(task)) : ["claude", "--resume", task.session_id, ...resumeSettings()];
     const folder = task.folder ?? PROJECTS;
     const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", termName(task), "--cwd", folder,
       "--", "sh", "-c", 'PATH="$0:$PATH" exec "$@"', PATHS, ...cmd]);
@@ -446,9 +458,10 @@ function current() {
 const ask = (dialog, channel, width, height) => openOverlay({ mod: MOD, kind: "dialog", width, height, props: { dialog, channel } });
 const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], icon: [560, 560], routines: [640, 640], archive: [440, 190] };
 const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog]);
-// A task's menu (Rename, Resolve) opens at the pointer; its Rename dialog looks like a channel's.
+// A task's menu (Rename, Open on claude.ai when it has a link, Resolve) opens at the pointer; its Rename dialog looks
+// like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
-const taskMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: 180, height: task.dismissed ? 44 : 87, props: { taskmenu: task.id } });
+const taskMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: (task.dismissed ? 44 : 87) + (remoteLink(task) ? 34 : 0), props: { taskmenu: task.id } });
 const renameTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 240, props: { dialog: "rename-task", task: task.id } });
 const resolveTask = (id) => {
   const task = findTask(id);
@@ -632,7 +645,7 @@ export default class Channels extends View {
       const started = Date.now();
       let next;
       try { next = { ...(await readStore()), error: null, at: Date.now() }; }
-      catch (err) { next = { machine: shared(DATA)?.machine ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
+      catch (err) { next = { machine: shared(DATA)?.machine ?? null, remote: shared(DATA)?.remote ?? false, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
       // Something changed here while this read was out: what it brought back is older.
       if (shared(BUSY) || (shared(OP_AT) ?? 0) > started) return;
       setShared(DATA, next);
@@ -875,7 +888,8 @@ export default class Channels extends View {
     cx.spawn(async (cx) => {
       try {
         // `claude --bg` prints the commands for the new session; the id they name is its job.
-        const out = await store('cd "$1" && claude --bg 2>&1', [PROJECTS], 60000);
+        // With Remote Control on it shows at claude.ai/code too, titled from its first message.
+        const out = await store(`cd "$1" && claude --bg${remoteOn() ? " --remote-control" : ""} 2>&1`, [PROJECTS], 60000);
         task.job = out.match(/claude attach (\S+)/)?.[1] ?? null;
         if (!task.job) throw new Error(out.trim().split("\n").pop() || "claude --bg gave no session");
         await openTask(task, { channel: channels().find((c) => c.name === channel) ?? { name: channel } });
@@ -1043,6 +1057,7 @@ export default class Channels extends View {
           .child(h_flex().gap(8).items_center().text_size(12.5)
             .child(div().text_color(color).child(label))
             .child(this.where(task?.machine ?? localName(), t))))
+        .when(Boolean(remoteLink(task)), (el) => el.child(this.tool("th-remote", svg(ICON("external-link")).size(15), () => { openRemote(task); }, t)))
         .when(Boolean(task), (el) => el.child(this.tool("th-rename", svg(ICON("square-pen")).size(15), () => renameTask(task), t)))
         .when(Boolean(task) && !task.dismissed, (el) => el.child(this.tool("th-done", svg(ICON("check")).size(15), resolve, t)))
         .child(this.tool("th-close", svg(ICON("x")).size(16), () => { showTasks(); run("layout.hide", { id: "panel" }); }, t)));
@@ -1078,6 +1093,7 @@ export default class Channels extends View {
       .child(svg(ICON(icon)).size(15)).child(label);
     return v_flex().size_full().py(4).bg(t.popover)
       .child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); }))
+      .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
       .when(Boolean(task) && !task.dismissed, (el) => el
         .child(div().mx(8).my(4).h(1).bg(t.border))
         .child(item("resolve", "check", "Resolve", () => { resolveTask(task.id); if (isShown(task)) showTasks(); })));

@@ -8,6 +8,8 @@
 //   listed, or an Input), Send, which runs `channels send <task> -`, and Open;
 // - a prompt (a permission prompt or another dialog in the task's own session): Open only;
 // - a finish: one quiet line, with Dismiss and Tell chat.
+// A task with Remote Control on (its claude.ai/code link is in the inbox entry) also gets Open on claude.ai, which runs
+// `channels link <task> --open`: the session opens in the browser, with macOS `open`.
 // No button starts a turn of the chat but Tell chat, which submits the task's report to it. Acting on a card takes
 // it out of the inbox, so it doesn't ride along with the user's next message as well. What the user doesn't act on
 // still rides along: the chat's UserPromptSubmit hook (`channels pending --hook`) takes it.
@@ -98,6 +100,10 @@ async function open($: EngineInterface, card: Card) {
   await channels($, card.task, 'Opening…', ['open', card.task])
 }
 
+async function openRemote($: EngineInterface, card: Card) {
+  await channels($, card.task, 'Opening claude.ai…', ['link', card.task, '--open'])
+}
+
 async function dismiss($: EngineInterface, card: Card) {
   await hide($, card.task)
   if ((await channels($, card.task, null, ['card', 'dismiss', card.task])) === null) {
@@ -155,6 +161,9 @@ export const register: Register = on => {
       return null
     }
 
+    const remote = (card: Card) =>
+      card.remote ? <Button key={`remote:${card.task}`} label="Open on claude.ai" onPress={() => openRemote($, card)} /> : null
+
     const question = (card: Card) => {
       const options = card.options
       const draft = answers[card.task] ?? options[0] ?? ''
@@ -192,6 +201,7 @@ export const register: Register = on => {
             ) : null}
             <Button key={`send:${card.task}`} label="Send" variant="primary" onPress={() => send($, card, draft)} />
             <Button key={`open:${card.task}`} label="Open" onPress={() => open($, card)} />
+            {remote(card)}
           </Box>
           {status(card)}
         </Box>
@@ -212,6 +222,7 @@ export const register: Register = on => {
             {card.waiting ?? 'A prompt'}: answer it in the task's view.
           </Text>
           <Button key={`open:${card.task}`} label="Open" variant="primary" onPress={() => open($, card)} />
+          {remote(card)}
         </Box>
         {status(card)}
       </Box>
@@ -225,6 +236,7 @@ export const register: Register = on => {
           </Text>
           <Button key={`dismiss:${card.task}`} label="Dismiss" onPress={() => dismiss($, card)} />
           <Button key={`tell:${card.task}`} label="Tell chat" onPress={() => tell($, card)} />
+          {remote(card)}
         </Box>
         {status(card)}
       </Box>
