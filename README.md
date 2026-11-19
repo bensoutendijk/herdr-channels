@@ -158,6 +158,9 @@ same session, with its history.
   channel and back, and it shows the task you had open (or the list, if you went back to it), even
   after Herdr restarts. **+** starts a new session in the projects folder. The
   check mark resolves a task: it is hidden from the panel, and the session is not stopped or deleted.
+  A task's `···` menu (or a right-click on it), the pencil in an open task's header, or a click on
+  its name there renames it. The rename reaches Claude Code itself, so `claude agents` shows the same
+  name, and the task's copies and its cards above the chat take it too.
 
   <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: the task's Claude Code session asks which homepage headline to use, with three options to choose from">
 
@@ -319,6 +322,7 @@ channels read <session> [--limit <n>] [--json]
 channels send <session> [--wake-on <on>] <text | ->
 channels watch <session> --wake-on finish|question|any|none [--why <text>]
 channels seen <session>
+channels rename-task <session> <new-name>
 channels dismiss <session> [--by <who>]
 channels listen <channel> --once
 channels pending <channel> [--hook]
@@ -345,6 +349,15 @@ nothing. If Claude Code starts a copy of the session instead of continuing it, `
 the copy's session id, and files the copy into the original task's channel in its place; the original
 task is marked as superseded by the copy and resolved. Sending to a task that is still working, or
 is showing a permission prompt, fails; answer prompts in the task's view instead.
+
+`channels rename-task` renames a task the way Claude Code's own agents view (`claude agents`) does:
+the background session's job record gets the new name, marked as given by the user. A running
+session takes the name on at once without starting a turn, and Claude Code's automatic naming
+never replaces it. The task's copies are renamed with it, and so are its cards above the chat's
+prompt. A session that isn't a background job (an interactive one filed with `channels file`) can
+only be renamed from inside, with `/rename`, since Claude Code offers no way to do it from
+outside: for those the panel shows the new name and `claude agents` keeps the old one, and the
+command says so.
 
 ### Environment variables
 
