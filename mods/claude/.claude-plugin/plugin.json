@@ -1,0 +1,7 @@
+{
+  "name": "channels-cards",
+  "version": "0.1.0",
+  "description": "Task cards above a herdr-channels chat's prompt: answer a task's question, open it, or hear that it finished, without the chat taking a turn.",
+  "author": { "name": "Ben Soutendijk" },
+  "types": "./types/index.d.ts"
+}

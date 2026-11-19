@@ -3,3 +3,5 @@ node_modules/
 *.tmp
 mods/*/gpui-kit.d.ts
 mods/*/jsconfig.json
+mods/claude/.claude-plugin/types/
+mods/claude/tsconfig.json

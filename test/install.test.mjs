@@ -52,6 +52,29 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   assert.equal(JSON.parse(readFileSync(join(appHome, 'shared.json'), 'utf8')).layout, 'channels');
 });
 
+test('the task cards mod is copied for the chats, the command tells them where it is, and uninstall takes it out', (t) => {
+  const { home, appHome, env, install } = setup(t);
+  install();
+  const chatMod = join(home, '.local', 'share', 'herdr-channels', 'chat-mod');
+  assert.ok(existsSync(join(chatMod, '.claude-plugin', 'plugin.json')));
+  assert.ok(existsSync(join(chatMod, 'hooks', 'register.tsx')));
+  assert.ok(existsSync(join(chatMod, '.herdr-channels.json')));
+  const wrapper = readFileSync(join(home, '.local', 'bin', 'channels'), 'utf8');
+  assert.match(wrapper, new RegExp(`export CHANNELS_CHAT_MOD="\\$\\{CHANNELS_CHAT_MOD:-${chatMod}\\}"`));
+  assert.match(wrapper, /export CHANNELS_HERDR_MOD="\$\{CHANNELS_HERDR_MOD:-channels\}"/);
+  assert.match(wrapper, new RegExp(`export CHANNELS_HERDR_HOME="\\$\\{CHANNELS_HERDR_HOME:-${appHome}\\}"`));
+  // A folder there that this install didn't make is left alone.
+  const other = join(home, 'theirs');
+  mkdirSync(other);
+  const r = spawnSync(process.execPath, [script, '--no-timer', '--chat-mod', other], { encoding: 'utf8', env, cwd: home });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /isn't from this install; it's left alone/);
+  const out = spawnSync(process.execPath, [script, '--uninstall', '--no-timer'], { encoding: 'utf8', env, cwd: home });
+  assert.equal(out.status, 0, out.stderr);
+  assert.equal(existsSync(chatMod), false);
+  assert.ok(existsSync(other));
+});
+
 test('a name already taken is never overwritten: the copy is renamed everywhere; installing again updates it in place', (t) => {
   const { appHome, install, home } = setup(t);
   mkdirSync(join(appHome, 'mods', 'channels'));
@@ -140,7 +163,8 @@ test('--uninstall removes the timer, the command and this repo\'s mod and layout
   assert.equal(existsSync(join(home, '.local', 'bin', 'channels')), false);
   assert.equal(existsSync(join(appHome, 'mods', 'channels-2')), false);
   assert.equal(existsSync(join(appHome, 'layouts', 'channels-2.json')), false);
-  assert.equal(gone.length, 4);
+  assert.equal(existsSync(o.chatMod), false, "the chats' task cards mod");
+  assert.equal(gone.length, 5);
   // Left alone: someone else's mod, layout and agent, and the store.
   assert.ok(existsSync(join(appHome, 'mods', 'channels', 'main.js')));
   assert.ok(existsSync(join(appHome, 'layouts', 'channels.json')));

@@ -51,7 +51,7 @@ if (args[0] === '--bg') {
   process.stdout.write('backgrounded · ' + job + ' · x\\n  claude attach ' + job + '    open in this terminal\\n'); process.exit(0);
 }
 if (args[0] === '--session-id' || args[0] === '--resume') {
-  fs.appendFileSync(at('chat-launches.jsonl'), JSON.stringify({ args, cwd: process.cwd(), path: process.env.PATH, dir: process.env.CHANNELS_DIR, projects: process.env.CHANNELS_PROJECTS, claudecode: process.env.CLAUDECODE ?? null }) + '\\n');
+  fs.appendFileSync(at('chat-launches.jsonl'), JSON.stringify({ args, cwd: process.cwd(), path: process.env.PATH, dir: process.env.CHANNELS_DIR, projects: process.env.CHANNELS_PROJECTS, claudecode: process.env.CLAUDECODE ?? null, channel: process.env.CHANNELS_CHANNEL ?? null, argv: process.env.CHANNELS_ARGV ?? null }) + '\\n');
   // Stay up, as a chat does, until the listener has sent what the test waits for.
   const want = Number(process.env.FAKE_WAIT_SENDS || 0);
   const until = Date.now() + 15000;
@@ -527,6 +527,9 @@ test('chat launches claude with the prompt and its own hook; its listener wakes 
   const [{ hooks: [h] }] = settings.hooks.UserPromptSubmit;
   assert.equal(h.type, 'command');
   assert.ok(h.command.includes(`pending '${c.id}' --hook`), h.command);
+  // The task cards mod, for this session only, told which channel it draws and how to run channels.
+  assert.deepEqual(launch.args.slice(8), ['--plugin-dir', fileURLToPath(new URL('../mods/claude', import.meta.url))]);
+  assert.deepEqual([launch.channel, JSON.parse(launch.argv)], [c.id, [join(bin, 'channels')]]);
   // One wake: the registered task. The other rides along, and the hook, run as Claude Code runs it, attaches it.
   const sends = lines('hc-sends.jsonl');
   assert.equal(sends.length, 1);
@@ -558,4 +561,113 @@ test('a wake the chat can\'t take now is kept, with its registration, and arrive
   assert.equal(run(['chat', 'design'], '', { HC_TERMINAL_ID: 't42', FAKE_WAIT_SENDS: '1' }).status, 0);
   assert.match(lines('hc-sends.jsonl')[0].text, /Logo drawn\./);
   assert.equal(store().channels[0].tasks[0].wake, null);
+});
+
+// ---------- task cards: what the chat's cards mod reads and runs ----------
+
+test('a waiting event carries its card: a question with the options its message lists, a prompt, a finish', (t) => {
+  const { ok, store, job, transcript, live } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  transcript(SID, said('Which colour should the logo be?\n\n1. **Teal**\n2. Coral\n3. `Ink`\n\nI lean teal.'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 2);
+  ok(['listen', 'design', '--once']);
+  const [q] = store().channels[0].inbox;
+  assert.deepEqual([q.kind, q.card.state, q.card.waiting, q.card.options], ['needs', 'question', 'which colour?', ['Teal', 'Coral', 'Ink']]);
+  assert.match(q.card.message, /^Which colour should the logo be\?/);
+  live(SID, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
+  ok(['listen', 'design', '--once']);
+  assert.deepEqual(store().channels[0].inbox.map((e) => [e.card.state, e.card.waiting, e.card.options]), [['prompt', 'permission for Bash(rm -rf build)', []]]);
+  transcript(SID, said('Logo drawn.'));
+  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 4);
+  live('ffffffff-0000-4000-8000-000000000000', {}); // the task's own process record is gone
+  ok(['listen', 'design', '--once']);
+  assert.deepEqual(store().channels[0].inbox.map((e) => [e.kind, e.card.state, e.card.message]), [['done', 'done', 'Logo drawn.']]);
+});
+
+test('options: only a short list at the end of the message counts', async () => {
+  const { optionsOf } = await import('../bin/channels.mjs');
+  assert.deepEqual(optionsOf('Pick one:\n- Round\n- Square'), ['Round', 'Square']);
+  assert.deepEqual(optionsOf('a) Yes\nb) No'), ['Yes', 'No']);
+  assert.deepEqual(optionsOf('Done:\n- one thing'), [], 'one item is no choice');
+  assert.deepEqual(optionsOf('What should the tagline say?'), []);
+  assert.deepEqual(optionsOf(`- ${'x'.repeat(81)}\n- y`), [], 'too long to be an option');
+  assert.deepEqual(optionsOf(Array.from({ length: 7 }, (_, i) => `${i + 1}. o${i}`).join('\n')), [], 'too many');
+});
+
+test('a question stays a card after it rides along, marked delivered, and goes once the task moves on; a finish leaves with the ride', (t) => {
+  const { ok, list, store, job, transcript } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  transcript(SID, said('Which colour?'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 2);
+  ok(['listen', 'design', '--once']);
+  const id = list().channels[0].id;
+  assert.match(JSON.parse(hook(ok, id)).hookSpecificOutput.additionalContext, /which colour\?/);
+  const [q] = store().channels[0].inbox;
+  assert.ok(q.delivered_at, 'still a card, delivered');
+  assert.equal(hook(ok, id), '', 'not delivered twice');
+  assert.equal(ok(['pending', 'design']).trim(), "Nothing waits for #design's chat.");
+  // Answered in its view: it works again, and its card goes.
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
+  assert.match(ok(['listen', 'design', '--once']), /Drops testmac\/dddd0001\S*'s question: the task has moved on/);
+  assert.deepEqual(store().channels[0].inbox, []);
+});
+
+test('card dismiss takes a card quietly; card tell takes it and prints the whole report for the chat', (t) => {
+  const { ok, run, list, store, job, transcript } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  const report = `Logo drawn.\n${'Line of detail. '.repeat(400)}`;
+  transcript(SID, said(report));
+  job('dddd0001', { sessionId: SID, state: 'done', detail: 'drew it', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 2);
+  ok(['listen', 'design', '--once']);
+  assert.equal(list().channels[0].tasks[0].unread.kind, 'done');
+  const told = ok(['card', 'tell', SID]);
+  assert.match(told, /^\[task report\] #design · task "Draw the logo" \(testmac\/dddd0001[^)]*\) finished\.\n/);
+  assert.match(told, /The user pressed Tell chat on its card above the prompt/);
+  assert.ok(told.includes(report.trim()), 'whole, not cut as a ride-along is');
+  assert.deepEqual(store().channels[0].inbox, [], 'it won\'t ride along too');
+  assert.equal(list().channels[0].tasks[0].unread, null, 'seen');
+  assert.equal(hook(ok, list().channels[0].id), '');
+  transcript(SID, said('Redrawn.'));
+  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 3);
+  ok(['listen', 'design', '--once']);
+  assert.match(ok(['card', 'dismiss', SID]), /Dismissed testmac\/dddd0001\S*'s card in #design\./);
+  assert.deepEqual(store().channels[0].inbox, []);
+  assert.match(ok(['card', 'dismiss', SID]), /had no card waiting/);
+  assert.equal(hook(ok, list().channels[0].id), '');
+  assert.match(run(['card', 'flip', SID]).stderr, /channels card dismiss\|tell <session>/);
+  assert.match(run(['card', 'tell', 'ffffffff']).stderr, /No task testmac\/ffffffff in any channel/);
+});
+
+test('an answer sent to a task takes its question card with it', (t) => {
+  const { ok, store, job, transcript } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  transcript(SID, said('Which colour?\n- Teal\n- Coral'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', cwd: '/' }, 2);
+  ok(['listen', 'design', '--once']);
+  assert.equal(store().channels[0].inbox.length, 1);
+  assert.match(ok(['send', SID, '-'], 'Coral'), /It continues with this as its next message\./);
+  assert.deepEqual(store().channels[0].inbox, []);
+});
+
+test('open asks the herdr window to show the task, leaving the request for the mod to take once', (t) => {
+  const { home, ok, run, dir } = setup(t);
+  const app = join(home, 'bin', 'herdr-app');
+  writeFileSync(app, `#!/bin/sh\necho "$@" >> '${join(home, 'app-calls')}'\nif [ -f '${join(home, 'app-fail')}' ]; then echo 'no window' >&2; exit 1; fi\nexit 0\n`);
+  chmodSync(app, 0o755);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  const extra = { CHANNELS_HERDR_APP: app, CHANNELS_HERDR_MOD: 'channels-2' };
+  assert.match(ok(['open', SID], '', extra), /Asked herdr to show testmac\/dddd0001\S* in #design's tasks panel\./);
+  assert.equal(readFileSync(join(home, 'app-calls'), 'utf8'), 'do channels-2.open-task\n');
+  const want = JSON.parse(ok(['open', '--take']));
+  assert.deepEqual([want.task, want.channel], [`${HERE}/${SID}`, 'design']);
+  assert.equal(ok(['open', '--take']).trim(), 'null', 'taken once');
+  writeFileSync(join(home, 'app-fail'), '');
+  assert.match(run(['open', SID], '', extra).stderr, /The herdr window didn't take it: no window/);
+  assert.equal(existsSync(join(dir, 'open.json')), false);
 });
