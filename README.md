@@ -105,6 +105,10 @@ The installer:
 - adds the routines timer: a launchd user agent, `~/Library/LaunchAgents/dev.herdr-channels.tick.plist`,
   that runs `channels tick` every minute (see [Routines](#routines)).
 
+On a first install in a terminal, the installer asks whether to turn on [Remote Control](#remote-control);
+the answer is no unless you type `y`. An install with neither `--remote-control` nor `--no-remote-control`
+keeps what the Mac had.
+
 It never overwrites existing files. If a mod or layout named `channels` already exists and was not
 installed by this repository, the copy is installed under the next free name (`channels-2`, and so
 on). Running the installer again updates a previous installation in place.
@@ -118,6 +122,8 @@ on). Running the installer again updates a previous installation in place.
 | `--chat-mod <dir>` | `~/.local/share/herdr-channels/chat-mod` | Where the chats' task cards mod is copied |
 | `--app-home <dir>` | `$HERDR_APP_HOME` or `~/.config/herdr-app` | herdr configuration folder |
 | `--label <label>` | `dev.herdr-channels.tick` | The launchd label of the routines timer |
+| `--remote-control` | off | Show this Mac's channel chats and tasks at claude.ai/code and in the Claude app (see [Remote Control](#remote-control)) |
+| `--no-remote-control` | | Turn Remote Control off again |
 | `--no-timer` | | Install without the routines timer |
 | `--no-switch` | | Install without selecting the layout |
 | `--dry-run` | | Show what would be installed without writing anything |
@@ -252,6 +258,75 @@ channels card dismiss <session>    Dismiss
 channels card tell <session>       Tell chat: prints the report the mod submits to the chat
 ```
 
+## Remote Control
+
+Remote Control is off unless you turn it on, and it is set per Mac. When it is on, each channel's chat and every
+task `channels` starts also shows at [claude.ai/code](https://claude.ai/code) and in the Claude app on your phone,
+where you can follow it, answer its questions and send it messages. The sessions keep running on the Mac; Remote
+Control only lets claude.ai reach them.
+
+**What turning it on means.** While a session is connected, its transcript (your messages, Claude's replies and
+its tool activity, so code and command output too) goes through the claude.ai account this Mac's Claude Code is
+signed in to, and is kept under that account's data policy. Anyone who can see that account's session list sees
+the sessions' names. On a Team or Enterprise plan the organization has to allow Remote Control (an Owner turns it
+on in the admin settings, under Claude Code), and the sessions show in the organization's list, not a personal one.
+Remote Control needs a claude.ai sign-in (Pro, Max, Team or Enterprise): with an API key, Bedrock, Vertex or a
+gateway, sessions start with it off. Nothing breaks either way: a task still runs.
+
+**Check a Mac before turning it on**, the work laptop above all:
+
+```sh
+claude auth status                        # which account and organization this Mac uses
+claude --bg --remote-control -n "rc check" "Reply with only ok."
+grep bridgeSessionId ~/.claude/jobs/<job>/state.json   # present: allowed; absent: run /remote-control in a claude to see why
+claude stop <job>
+```
+
+`<job>` is the id `claude --bg` prints after `backgrounded ·`. Then turn it on, or off again:
+
+```sh
+node ~/projects/herdr-channels/install.mjs --remote-control      # on
+node ~/projects/herdr-channels/install.mjs --no-remote-control   # off
+```
+
+Pass the options you installed with as well (for example `--projects ~/code`). The setting lives in the
+installed `channels` command (`CHANNELS_REMOTE_CONTROL=1`). Your own Claude Code settings are never changed:
+`channels` passes the flags itself, to its own sessions only.
+
+**What `channels` does when it is on:**
+
+| Session | How | Name on claude.ai |
+|---|---|---|
+| A task (`channels start`) | `claude --bg --remote-control <task name> …` | The task's name |
+| A channel's chat | `remoteControlAtStartup: true` in the settings the chat is started with, and `--remote-control <name>` | `#<channel> · <machine>`, since the account's list doesn't say which machine a session runs on (`CHANNELS_MACHINE`, else the host name) |
+| The panel's **+** (new session) | `claude --bg --remote-control` | From its first message |
+| `channels send` | Nothing: Claude Code resumes a background session with the options it started with, Remote Control included. A flag on a resume would start a copy instead | Unchanged |
+
+A chat that is already running takes the change when it starts again: type `/exit` in it, and it starts again
+on the same session within seconds. Tasks keep what they started with: turning it on doesn't reach tasks
+already running, and turning it off doesn't disconnect them (stop them, or let them finish).
+
+**Copies.** When Claude Code starts a copy of a task instead of continuing it (see `channels send`), the copy
+gets only the options of the command that made it, and `send` passes none. So a copy isn't on claude.ai, unless
+Remote Control is on for all sessions in Claude Code's own settings (`/config`, "Enable Remote Control for all
+sessions"). `send` says so when it files a copy.
+
+**The claude.ai link.** Each session with Remote Control has a link of its own, the same across `send` and a
+chat's restart. `channels` reads it from Claude Code's records (the job's `state.json`, the running process's
+record in `~/.claude/sessions`, or the transcript). With a link, a task gets **Open on claude.ai** in its `···`
+menu, a button in its header when it is open in the panel, and a button on its card above the chat's prompt. Each
+opens the link in your browser with macOS `open`. `channels link <session>` prints it, `--open` opens it, and
+`channels read` shows it on its first lines.
+
+**Renaming.** `channels rename-task` (and Rename in the panel) renames the task in Claude Code's job record, which
+is how `claude agents` renames a session. Claude Code passes that name on to claude.ai, so the title there
+follows, and keeps it when the task is resumed.
+
+**Ending sessions.** A session that ends cleanly (it is stopped, or `/exit`) leaves the claude.ai list within
+seconds. One whose process dies without a clean stop (a crash, `kill -9`) stays listed as idle until it is
+resumed and stopped, or archived on claude.ai. A Mac that sleeps shows its sessions as idle or offline until it
+wakes; messages sent from the phone meanwhile wait.
+
 ## Routines
 
 A routine is a prompt that a channel's chat receives on its own, on a schedule: "every weekday at 9,
@@ -324,6 +399,7 @@ channels read <session> [--limit <n>] [--json]
 channels send <session> [--wake-on <on>] <text | ->
 channels watch <session> --wake-on finish|question|any|none [--why <text>]
 channels seen <session>
+channels link <session> [--open] [--json]
 channels rename-task <session> <new-name>
 channels dismiss <session> [--by <who>]
 channels listen <channel> --once
@@ -376,9 +452,11 @@ command says so.
 | `CHANNELS_HERDR_APP` | `herdr-app` | The Herdr desktop app's command, for a card's Open |
 | `CHANNELS_HERDR_MOD` | `channels` | The name the herdr mod was installed under |
 | `CHANNELS_HERDR_HOME` | herdr's default | The herdr app home a card's Open talks to |
+| `CHANNELS_REMOTE_CONTROL` | off | `1` turns on [Remote Control](#remote-control) for the chats and tasks `channels` starts; `install.mjs --remote-control` sets it |
+| `CHANNELS_OPEN` | `open` | What `channels link --open` opens a link with |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values
-given to the installer.
+given to the installer, and `CHANNELS_REMOTE_CONTROL=1` when it was installed with `--remote-control`.
 
 The mod's settings are in `~/.config/herdr-app/mods/channels/config.js`, which the installer writes.
 They are: the path to the command, extra `PATH` folders, the projects folder and the `--by` name.
