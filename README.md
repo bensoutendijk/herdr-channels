@@ -14,7 +14,7 @@ Everything is local: the channel store is a folder on disk, tasks run under your
 the herdr mod runs every command on the same machine. No server is involved, unless you turn on
 [cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
 
-![The channels layout in Herdr: the channel list on the left with a Herdr space, acme-website, under Spaces below it; the #website channel's Claude Code chat in the middle, summing up its tasks above two task cards; and the tasks panel on the right with one task that needs input, one working and one ready for review](preview.png)
+![The channels layout in Herdr: the channel list on the left with a Herdr space, acme-website, under Spaces below it; the #website channel's Claude Code chat in the middle, where a one-line notice says the Pick a hero headline task finished and the chat answers it in a sentence, above two task cards; and the tasks panel on the right with two tasks that need input, one working and two ready for review](preview.png)
 
 ## Contents
 
@@ -332,7 +332,7 @@ Every question that rides along also shows as a card in the chat, in the band di
 prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
 the chat:
 
-<img src="docs/task-cards.png" width="540" alt="TASK_CARDS_ALT">
+<img src="docs/task-cards.png" width="540" alt="The #website chat: a one-line notice, ← tasks: Task Pick a hero headline finished, and the chat's one-sentence answer; below it two cards above the prompt: Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open; and Build the site waits on a permission prompt, with Open">
 
 | Card | Shows | Buttons |
 |---|---|---|
