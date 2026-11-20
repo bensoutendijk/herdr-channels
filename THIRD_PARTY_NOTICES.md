@@ -18,7 +18,7 @@ This one is adapted from Lucide's `circle-alert` icon:
 
 Lucide's `check`, `chevron-left`, `plus` and `x` come from the Feather project, so the Feather MIT
 notice inside Lucide's license below covers them too. The other icons (`icons/monitor.svg`,
-`icons/server.svg`, `icons/spinner.svg`) were drawn for this repo and are under `LICENSE`.
+`icons/server.svg`, `icons/spinner.svg`, `icons/terminal.svg`) were drawn for this repo and are under `LICENSE`.
 
 Lucide's license, as published in its repository:
 
