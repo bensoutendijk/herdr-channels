@@ -61,7 +61,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { due, nextDue, parseSchedule, ScheduleError, shortWhen } from './schedule.mjs';
-import { checkRelease, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
+import { checkRelease, CLONE, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
 import { cloudId, cloudUrl, listCloudSessions, probeAttach, sendToCloudSession, startCloudSession } from './cloud.mjs';
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,79}$/;
@@ -2670,7 +2670,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
         return 0;
       } catch (err) {
         if (!(err instanceof UpdateRefused) && !/^install\.mjs failed/.test(err.message)) throw err;
-        console.log(opts.json ? JSON.stringify({ ok: false, error: err.message }) : err.message);
+        console.log(opts.json ? JSON.stringify({ ok: false, error: err.message }) : `${err.message}${/^The clone /.test(err.message) ? `\nThe clone: ${CLONE}` : ''}`);
         return 1;
       }
     }
