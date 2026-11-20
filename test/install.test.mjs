@@ -42,7 +42,7 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   assert.deepEqual([listed.machine, listed.channels.map((c) => c.name)], ['testmac', ['design']]);
   // The mod, without the files herdr writes itself, and its settings.
   const mod = join(appHome, 'mods', 'channels');
-  assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'chats.js', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'panels.js', 'spaces.js', 'viewer.py']);
+  assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'chats.js', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'panels.js', 'spaces.js', 'updates.js', 'viewer.py']);
   const config = loadConfig(join(mod, 'config.js'));
   assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels', layout: 'channels', command: wrapper, path: 'string', projects: join(home, 'projects'), by: 'sam' });
   assert.ok(config.path.split(':').includes(join(home, '.local', 'bin')));
@@ -50,6 +50,18 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   const layout = JSON.parse(readFileSync(join(appHome, 'layouts', 'channels.json'), 'utf8'));
   assert.equal(layout.id, 'root');
   assert.equal(JSON.parse(readFileSync(join(appHome, 'shared.json'), 'utf8')).layout, 'channels');
+  // The build the chats run is stamped, and the chats were refreshed (none runs here).
+  const build = JSON.parse(readFileSync(join(home, '.local', 'state', 'herdr-channels', 'build.json'), 'utf8'));
+  assert.match(build.id, /^[0-9a-f]{12}$/);
+  assert.equal(listed.updates.build.id, build.id);
+  assert.match(out, /chats {4}Every chat is up to date\./);
+});
+
+test('the build id changes with the code a chat runs and with the command\'s settings, not with the herdr mod', async () => {
+  const { buildId } = await import('../install.mjs');
+  const root = repo.replace(/\/$/, '');
+  assert.equal(buildId(root, 'w1'), buildId(root, 'w1'));
+  assert.notEqual(buildId(root, 'w1'), buildId(root, 'w2'), 'Remote Control or cloud turned on or off');
 });
 
 test('the task cards mod is copied for the chats, the command tells them where it is, and uninstall takes it out', (t) => {
@@ -108,7 +120,7 @@ test('Remote Control is off unless asked for; --remote-control turns it on, an i
   assert.match(install(), /remote {3}off \(--remote-control turns it on/);
   assert.equal(listed(), false);
   assert.doesNotMatch(readFileSync(wrapper, 'utf8'), /CHANNELS_REMOTE_CONTROL/);
-  assert.match(install('--remote-control'), /remote {3}on: new tasks and chats show at claude\.ai\/code[\s\S]*Remote Control is now on[\s\S]*type \/exit in it/);
+  assert.match(install('--remote-control'), /remote {3}on: new tasks and chats show at claude\.ai\/code[\s\S]*Remote Control is now on[\s\S]*Running chats have restarted with it/);
   assert.equal(listed(), true);
   assert.match(readFileSync(wrapper, 'utf8'), /^export CHANNELS_REMOTE_CONTROL="\$\{CHANNELS_REMOTE_CONTROL:-1\}"$/m);
   const again = install();
@@ -201,7 +213,7 @@ test('cloud tasks are off unless asked for and never asked about; --cloud turns 
   assert.match(install(), /cloud {4}off \(--cloud turns it on; see the README, "Cloud tasks"\)/);
   assert.equal(listed(), false);
   assert.doesNotMatch(readFileSync(wrapper, 'utf8'), /CHANNELS_CLOUD/);
-  assert.match(install('--cloud'), /cloud {4}on: channels start --cloud runs tasks at claude\.ai\/code[\s\S]*Cloud tasks are now on here[\s\S]*type \/exit in it[\s\S]*private API/);
+  assert.match(install('--cloud'), /cloud {4}on: channels start --cloud runs tasks at claude\.ai\/code[\s\S]*Cloud tasks are now on here[\s\S]*Running chats have restarted and watch their cloud tasks[\s\S]*private API/);
   assert.equal(listed(), true);
   assert.match(readFileSync(wrapper, 'utf8'), /^export CHANNELS_CLOUD="\$\{CHANNELS_CLOUD:-1\}"$/m);
   const again = install();

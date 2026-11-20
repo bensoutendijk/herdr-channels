@@ -25,10 +25,14 @@
 //    `channels start --cloud` runs tasks as Claude Code cloud sessions at claude.ai/code. It rides on Claude Code's
 //    private sessions API and reads Claude Code's stored claude.ai login (see the README, "Cloud tasks"). --no-cloud
 //    turns it off again; an install with neither keeps what the command had. Claude Code's settings are never touched.
+// 8. Stamps the build (build.json in the store: an id over the code and settings a channel's chat runs), and restarts
+//    the chats that run an older one: each idle chat at once, on the same session; one that is mid-turn when its turn
+//    ends (the timer's next tick). Nothing has to be restarted by hand. See "updates" in bin/channels.mjs.
 // --uninstall takes out what an install put in: the timer, the command and the mod and layout this repo installed
 // (a mod folder marked with .herdr-channels.json, and its layout). It never touches anything it didn't install, nor
 // the channel store or any Claude Code session.
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { accessSync, constants, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -165,6 +169,34 @@ function copyMod(from, to) {
   for (const f of readdirSync(from)) if (!GENERATED.has(f)) cpSync(join(from, f), join(to, f), { recursive: true });
 }
 
+// The build a chat runs: everything under bin/ and mods/claude, and the command's settings (the wrapper). The mod
+// (mods/channels) isn't in it: herdr reloads a mod whose files change, and no chat needs restarting for it.
+export function buildId(repo, wrapper) {
+  const h = createHash('sha256');
+  const walk = (d) => {
+    let names = [];
+    try { names = readdirSync(d).sort(); } catch { return; }
+    for (const n of names) {
+      const f = join(d, n);
+      if (n === 'types' || n === MOD_MARK || n === 'node_modules') continue;
+      if (statSync(f).isDirectory()) walk(f);
+      else h.update(`${f.slice(repo.length)}\n`).update(readFileSync(f)).update('\n');
+    }
+  };
+  walk(join(repo, 'bin'));
+  walk(join(repo, 'mods', 'claude'));
+  h.update(wrapper);
+  return h.digest('hex').slice(0, 12);
+}
+
+// The clone's commit, for people to read ("3f2a1bc", "3f2a1bc+" with changes not committed); null outside git.
+function commitLabel(repo) {
+  const r = spawnSync('git', ['-C', repo, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8', timeout: 10_000 });
+  if (r.status !== 0) return null;
+  const dirty = spawnSync('git', ['-C', repo, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8', timeout: 10_000 });
+  return `${r.stdout.trim()}${dirty.status === 0 && dirty.stdout.trim() ? '+' : ''}`;
+}
+
 function writeAtomic(file, text) {
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, text);
@@ -298,7 +330,8 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
 
   mkdirSync(o.bin, { recursive: true });
-  writeAtomic(wrapper, wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home), remote, cloud }));
+  const wrapperBody = wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home), remote, cloud });
+  writeAtomic(wrapper, wrapperBody);
   spawnSync('chmod', ['755', wrapper]);
   copyMod(join(REPO, 'mods', 'channels'), modDir);
   copyChatMod(join(REPO, 'mods', 'claude'), o.chatMod);
@@ -309,7 +342,19 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   mkdirSync(o.projects, { recursive: true });
   const selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
   const timer = o.timer ? installTimer({ label: o.label, wrapper, store: o.store, home, platform, run }) : { plist: null, state: 'not added (--no-timer)' };
-  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+  // 8. The build, last: a chat restarted from here on finds everything above in place.
+  const id = buildId(REPO, wrapperBody);
+  mkdirSync(o.store, { recursive: true });
+  writeAtomic(join(o.store, 'build.json'), `${JSON.stringify({ id, label: commitLabel(REPO) ?? id, at: new Date().toISOString() })}\n`);
+  const refreshed = refreshChats(wrapper);
+  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, refreshed, build: id, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+}
+
+// Restarts the chats that run an older build, through the command just written: { summary } or { error }. An idle
+// chat restarts in a few seconds; herdr-core may hold the /exit for up to a minute while someone has a draft typed.
+function refreshChats(wrapper) {
+  const r = spawnSync(wrapper, ['refresh', '--auto', '--json'], { encoding: 'utf8', timeout: 10 * 60_000 });
+  try { return { summary: JSON.parse(r.stdout).summary }; } catch { return { error: `${r.stderr || r.stdout || r.error?.message || `exit ${r.status}`}`.trim().split('\n').pop() }; }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -343,10 +388,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`  remote   ${r.remote ? 'on: new tasks and chats show at claude.ai/code (--no-remote-control turns it off)' : 'off (--remote-control turns it on; see the README, "Remote Control")'}`);
     console.log(`  cloud    ${r.cloud ? 'on: channels start --cloud runs tasks at claude.ai/code (--no-cloud turns it off)' : 'off (--cloud turns it on; see the README, "Cloud tasks")'}`);
     if (r.timer) console.log(`  timer    ${r.timer.plist ? `${r.timer.plist}: ` : ''}${r.timer.state}`);
+    if (r.refreshed) console.log(`  chats    ${r.refreshed.summary ?? `not refreshed: ${r.refreshed.error}. The Refresh row in the channels sidebar does it.`}`);
     if (missing.length) console.log(`\nNot found: ${missing.join(', ')}. Install ${missing.includes('hc') ? 'the herdr app (it brings hc), ' : ''}${missing.filter((m) => m !== 'hc').join(' and ') || ''} and run this again.`);
     if (!`${process.env.PATH}`.split(delimiter).includes(o.bin)) console.log(`\n${o.bin} isn't on your PATH. Add it to use \`channels\` in a terminal; the mod and chats find it without that.`);
-    if (!o.dryRun && o.remote != null && r.remote !== r.was) console.log(`\nRemote Control is now ${r.remote ? 'on' : 'off'} for what channels starts from here. A chat that is running takes it ${r.remote ? 'on' : 'off'} when it starts again: type /exit in it. Tasks keep what they started with.`);
-    if (!o.dryRun && o.cloud != null && r.cloud !== r.cloudWas) console.log(`\nCloud tasks are now ${r.cloud ? 'on' : 'off'} here. A chat that is running ${r.cloud ? 'learns of them and watches its cloud tasks' : 'stops watching its cloud tasks'} when it starts again: type /exit in it.${r.cloud ? ' They read Claude Code\'s stored claude.ai login and call its private API: see the README, "Cloud tasks".' : ''}`);
+    if (!o.dryRun && o.remote != null && r.remote !== r.was) console.log(`\nRemote Control is now ${r.remote ? 'on' : 'off'} for what channels starts from here. Running chats have restarted with it (or do when their turn ends). Tasks keep what they started with.`);
+    if (!o.dryRun && o.cloud != null && r.cloud !== r.cloudWas) console.log(`\nCloud tasks are now ${r.cloud ? 'on' : 'off'} here. Running chats have restarted ${r.cloud ? 'and watch their cloud tasks' : 'and stop watching cloud tasks'} (or do when their turn ends).${r.cloud ? ' They read Claude Code\'s stored claude.ai login and call its private API: see the README, "Cloud tasks".' : ''}`);
     console.log(`\nClaude Code starts background sessions only in a folder you trust: run \`claude\` once in ${o.projects} and accept, if you haven't.`);
   } catch (err) {
     console.error(err.message);

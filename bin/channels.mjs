@@ -22,6 +22,7 @@
 //   channels pending <channel> [--hook]       events waiting for the chat's next message; --hook is the chat's own hook
 //   channels chat <channel> --bg [--json]     make sure the chat runs, in a herdr-core terminal; prints that terminal
 //   channels routine list|add|edit|rm|run|on|off ...   prompts the chat gets on a schedule (see "routines" below)
+//   channels refresh [--auto] [--json]       restart idle chats on what is installed now (see "updates" below)
 //   channels tick                             what the launchd agent runs every minute: fires the routines that are due
 //
 // Cloud tasks (off unless CHANNELS_CLOUD is on: install.mjs --cloud): a task can also be a Claude Code cloud session at
@@ -78,7 +79,7 @@ const expand = (p, home) => (p === '~' ? home : p.startsWith('~/') ? join(home, 
 export const channelsDir = (home = homedir()) => (process.env.CHANNELS_DIR ? resolve(expand(process.env.CHANNELS_DIR, home)) : join(home, '.local', 'state', 'herdr-channels'));
 export const projectsDir = (home = homedir()) => (process.env.CHANNELS_PROJECTS ? resolve(expand(process.env.CHANNELS_PROJECTS, home)) : join(home, 'projects'));
 
-export const LISTEN = { pollMs: 3000, readyMs: 30_000, sendTimeoutMs: 10 * 60_000 };
+export const LISTEN = { pollMs: 3000, readyMs: 30_000, sendTimeoutMs: 10 * 60_000, refreshMs: 15_000 };
 // How long send waits for a stopped task's process to exit before it resumes the session (CHANNELS_STOP_WAIT_MS).
 const stopWaitMs = () => (Number(process.env.CHANNELS_STOP_WAIT_MS) > 0 ? Number(process.env.CHANNELS_STOP_WAIT_MS) : 30_000);
 
@@ -202,7 +203,7 @@ export function readLive(home) {
   for (const f of files) {
     const s = readJson(join(dir, f));
     if (!s?.sessionId || !Number.isInteger(s.pid) || !alive(s.pid)) continue;
-    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null, bridge: s.bridgeSessionId ?? null });
+    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null, bridge: s.bridgeSessionId ?? null, version: s.version ?? null });
   }
   return out;
 }
@@ -1660,6 +1661,7 @@ export function startListener({ dir, deps, channelId, terminal }) {
   let stopped = false;
   let busy = false;
   let ready = false;
+  let lastRefresh = Date.now();
   const startedAt = Date.now();
   // The chat's claude takes a moment to come up; a paste before then would be lost.
   const isReady = async () => {
@@ -1682,6 +1684,12 @@ export function startListener({ dir, deps, channelId, terminal }) {
         await listenTick({ dir, home: deps.home, channelId, deliver, look: () => cloudLook({ dir, deps }) });
         // With a cloud task open, whether `claude --cloud <id>` attaches here is asked now and then, in the background.
         if (cloudOn() && openCloudTasks(readStore(dir))) probeAttachLater({ dir, deps })?.then((state) => log(`claude --cloud attach: ${state}`));
+        // Behind what is installed (an install, or a Refresh while it was mid-turn) and idle now: restart this chat.
+        if (Date.now() - lastRefresh >= LISTEN.refreshMs) {
+          lastRefresh = Date.now();
+          const r = await refreshChats({ dir, deps, only: channelId, self: true });
+          for (const x of r.chats) if (x.did !== 'waits') log(x.did === 'restarted' ? `restarting on what is installed now (${x.behind.join(', ')})` : `couldn't restart: ${x.why}`);
+        }
       }
     } catch (err) { log(`look failed: ${err.message}`); }
     busy = false;
@@ -1836,11 +1844,15 @@ export const runsChat = (argv) => Array.isArray(argv) && argv.length >= 2 && arg
 
 export const chatTermName = (channelId) => `chat-${channelId}`.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
 
-// What a background chat runs: this same command, with the store and projects folder this one uses.
+// What a background chat runs: this same command, with the store and projects folder this one uses, in a loop that
+// runs it again when it exits with RESTART (a refresh, see refreshChats). Each round runs the command afresh, so the
+// chat comes back on whatever is installed by then, in the same terminal, and nothing else has to notice.
+export const RESTART = 75;
+export const CHAT_LOOP = `while :; do "$@"; s=$?; [ "$s" -eq ${RESTART} ] || exit "$s"; done`;
 function chatArgv(dir, deps, name) {
-  const pass = Object.entries(process.env).filter(([k]) => /^CHANNELS_/.test(k) && k !== 'CHANNELS_DIR' && k !== 'CHANNELS_PROJECTS').map(([k, v]) => `${k}=${v}`);
+  const pass = Object.entries(process.env).filter(([k]) => /^CHANNELS_/.test(k) && !['CHANNELS_DIR', 'CHANNELS_PROJECTS', 'CHANNELS_CHAT_LOOP'].includes(k)).map(([k, v]) => `${k}=${v}`);
   const self = process.env.CHANNELS_BIN ? [process.env.CHANNELS_BIN] : [process.execPath, fileURLToPath(import.meta.url)];
-  return ['/usr/bin/env', `CHANNELS_DIR=${dir}`, `CHANNELS_PROJECTS=${deps.projects}`, ...pass, ...self, 'chat', name];
+  return ['/bin/sh', '-c', CHAT_LOOP, 'channels-chat', '/usr/bin/env', 'CHANNELS_CHAT_LOOP=1', `CHANNELS_DIR=${dir}`, `CHANNELS_PROJECTS=${deps.projects}`, ...pass, ...self, 'chat', name];
 }
 
 // The channel's chat, running: the terminal it runs in now, or a new herdr-core terminal named chat-<channel id>,
@@ -1943,7 +1955,13 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
         }
       } catch (err) { tickLog(dir, `couldn't start #${c.name}'s chat: ${err.message}`); }
     }
-    return { skipped: false, runs };
+    // Chats left behind by an install or a Refresh while they were mid-turn: restarted now if their turn is over.
+    let refreshed = [];
+    try {
+      refreshed = (await refreshChats({ dir, deps, ensure })).chats.filter((x) => x.did !== 'waits');
+      for (const x of refreshed) tickLog(dir, x.did === 'restarted' ? `restarted #${x.channel}'s chat on what is installed now (${x.behind.join(', ')})` : `couldn't restart #${x.channel}'s chat: ${x.why}`);
+    } catch (err) { tickLog(dir, `refresh failed: ${err.message}`); }
+    return { skipped: false, runs, refreshed };
   } finally {
     rmSync(lock, { force: true });
   }
@@ -2020,10 +2038,12 @@ const shq = (s) => `'${`${s}`.replace(/'/g, `'\\''`)}'`;
 // The chat's own settings, given with --settings so they reach this session only, never the user's settings files:
 // no agent view, and the UserPromptSubmit hook that attaches the channel's waiting events to each message the
 // user sends. The hook runs this same script with this same node, so it needs nothing on PATH.
-// With Remote Control on, remoteControlAtStartup too: for this session only, like the rest.
+// With Remote Control on, remoteControlAtStartup too: for this session only, like the rest. No prompt suggestions: a
+// suggestion is drawn in the prompt like typed text, and a refresh (see restartChat) must tell an empty prompt from a
+// draft by the screen alone.
 export function chatSettings(dir, channelId, { remote = remoteOn() } = {}) {
   const command = `CHANNELS_DIR=${shq(dir)} ${shq(process.execPath)} ${shq(fileURLToPath(import.meta.url))} pending ${shq(channelId)} --hook`;
-  return { disableAgentView: true, ...(remote ? { remoteControlAtStartup: true } : {}), hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
+  return { disableAgentView: true, promptSuggestionEnabled: false, ...(remote ? { remoteControlAtStartup: true } : {}), hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
 }
 
 // The chat's claude arguments. With Remote Control on, its claude.ai name carries the machine (#general · studio);
@@ -2057,7 +2077,10 @@ async function chat({ dir, deps, name }) {
     console.error(`#${name}'s chat is already running (pid ${running.pid}${running.terminal ? `, terminal ${running.terminal}` : ''}).`);
     return 1;
   }
-  writeAtomic(chatFile(dir, channelId), `${JSON.stringify({ pid: process.pid, terminal, session_id: id, started_at: new Date().toISOString() })}\n`);
+  // What it runs on, for a refresh to compare with what is installed later: the build install.mjs stamped, and
+  // whether it runs in the restart loop (chatArgv), so that exiting with RESTART brings it back.
+  const loop = process.env.CHANNELS_CHAT_LOOP === '1';
+  writeAtomic(chatFile(dir, channelId), `${JSON.stringify({ pid: process.pid, terminal, session_id: id, started_at: new Date().toISOString(), build: readBuild(dir)?.id ?? null, loop, suggestions: false })}\n`);
   if (!existsSync(deps.projects)) mkdirSync(deps.projects, { recursive: true });
   const resume = !recorded && Boolean(findTranscript(deps.home, id));
   const args = chatArgs({ dir, name, id, resume, channelId, projects: deps.projects, mod: chatModDir() });
@@ -2072,11 +2095,224 @@ async function chat({ dir, deps, name }) {
   env.CHANNELS_ARGV = JSON.stringify(process.env.CHANNELS_BIN ? [process.env.CHANNELS_BIN] : [process.execPath, fileURLToPath(import.meta.url)]);
   const listener = startListener({ dir, deps, channelId, terminal });
   try {
-    return await runInTerminal(deps.claude, args, deps.projects, env);
+    const code = await runInTerminal(deps.claude, args, deps.projects, env);
+    // A refresh typed the /exit: the loop runs the chat again, on what is installed now.
+    const asked = readJson(restartFile(dir, channelId));
+    if (asked?.pid === process.pid) {
+      rmSync(restartFile(dir, channelId), { force: true });
+      if (loop) return RESTART;
+    }
+    return code;
   } finally {
     listener.stop();
     try { if (readJson(chatFile(dir, channelId))?.pid === process.pid) rmSync(chatFile(dir, channelId), { force: true }); } catch { /* gone */ }
   }
+}
+
+// ---------- updates: picking up a new herdr-channels or Claude Code ----------
+//
+// A chat runs what was installed when it started: this command's code (its listener, prompt and hook), the task
+// cards mod, the wrapper's settings, and the claude binary. Two things move under it:
+// - herdr-channels: install.mjs stamps a build (build.json in the store: an id over everything a chat runs) and
+//   runs `channels refresh --auto`. A chat whose recorded build differs is restarted as soon as it is idle: by that
+//   install, or, for one that was mid-turn, by its own listener (every LISTEN.refreshMs) once the turn is over. The
+//   launchd tick does the same for every chat, which covers a chat started by an earlier version (no such listener).
+// - Claude Code: it updates itself. A chat whose claude is older than the installed one is restarted only when asked
+//   (`channels refresh`, the mod's Refresh button); one that is mid-turn then restarts the same way after its turn.
+// A restart never interrupts a turn, nor loses a draft: it is made only while Claude Code says the chat's claude is
+// idle, herdr-core says its terminal isn't working, and the prompt on its screen is empty. Then the claude process is
+// stopped (SIGTERM: Claude Code saves and exits) at once, so no turn can start in between. Typing /exit instead would
+// be worse: herdr-core holds typed text while a person has a draft and delivers it the moment they send it, and a
+// /exit typed during a turn ends that turn. The chat's own process sees that the stop was asked for and exits with
+// RESTART; the loop around it (chatArgv) runs `channels chat` again, which resumes the same session on what is
+// installed now, in the same terminal. A chat started before the loop existed ends instead, and is started again with
+// ensureChat.
+// Tasks are left alone: `channels send` stops and resumes a task's process for every message, so a task runs the new
+// Claude Code from its next message on, and herdr-channels runs nothing inside a task.
+
+const buildFile = (dir) => join(dir, 'build.json');
+// The build install.mjs stamped: { id, label, at }, or null before an install wrote one.
+export const readBuild = (dir) => readJson(buildFile(dir));
+export function writeBuild(dir, build) {
+  mkdirSync(dir, { recursive: true });
+  writeAtomic(buildFile(dir), `${JSON.stringify(build)}\n`);
+}
+const restartFile = (dir, channelId) => join(dir, `restart-${channelId}.json`);
+const askedFile = (dir) => join(dir, 'refresh.json'); // { claude: version, at }: a Claude Code refresh asked for
+
+// Version strings compared part by part (2.1.330 > 2.1.329); null when either isn't one.
+export function compareVersions(a, b) {
+  const pa = /^(\d+)\.(\d+)\.(\d+)/.exec(`${a ?? ''}`);
+  const pb = /^(\d+)\.(\d+)\.(\d+)/.exec(`${b ?? ''}`);
+  if (!pa || !pb) return null;
+  for (let i = 1; i <= 3; i++) if (Number(pa[i]) !== Number(pb[i])) return Number(pa[i]) < Number(pb[i]) ? -1 : 1;
+  return 0;
+}
+
+function onPath(cmd) {
+  if (cmd.includes('/')) return existsSync(cmd) ? cmd : null;
+  for (const d of `${process.env.PATH ?? ''}`.split(':')) if (d && existsSync(join(d, cmd))) return join(d, cmd);
+  return null;
+}
+
+// The Claude Code version a new claude would run. The native installer's `claude` links into versions/<version>, which
+// says it without running anything; otherwise `claude --version`, remembered for that binary (path, size, mtime).
+export async function installedClaude({ dir, deps }) {
+  const path = onPath(deps.claude);
+  if (!path) return null;
+  const target = (() => { try { return realpathSync(path); } catch { return path; } })();
+  const named = /^(\d+\.\d+\.\d+[^/]*)$/.exec(target.split('/').pop());
+  if (named) return named[1];
+  let st;
+  try { st = statSync(target); } catch { return null; }
+  const key = `${target}:${st.size}:${st.mtimeMs}`;
+  const file = join(dir, 'claude-version.json');
+  const was = readJson(file);
+  if (was?.key === key) return was.version;
+  const r = await deps.run(deps.claude, ['--version'], { cwd: deps.home, env: cleanEnv(), timeout: 20_000 });
+  const version = (/(\d+\.\d+\.\d+)/.exec(r.out) || [])[1] ?? null;
+  if (version) { try { mkdirSync(dir, { recursive: true }); writeAtomic(file, `${JSON.stringify({ key, version })}\n`); } catch { /* not remembered */ } }
+  return version;
+}
+
+// Where each running chat stands against what is installed: `behind` lists what it is behind on ("channels",
+// "claude"), `state` is its claude's own status (idle, busy, waiting, ...; null while it starts). `asked` is the
+// Claude Code version a refresh was asked for, when one waits on chats that were mid-turn.
+export async function updateStatus({ dir, deps }) {
+  const build = readBuild(dir);
+  const claude = await installedClaude({ dir, deps });
+  const live = readLive(deps.home);
+  const asked = readJson(askedFile(dir));
+  const chats = [];
+  for (const c of readStore(dir).channels) {
+    if (c.archived_at) continue;
+    const info = chatRunning(dir, c.id);
+    if (!info) continue;
+    const l = live.get(info.session_id) ?? null;
+    const behind = [];
+    if (build?.id && info.build !== build.id) behind.push('channels');
+    if (claude && l?.version && compareVersions(l.version, claude) !== 0) behind.push('claude');
+    chats.push({ channel: c.name, id: c.id, terminal: info.terminal ?? null, pid: info.pid, session_id: info.session_id, claude_pid: l?.pid ?? null, loop: info.loop === true, suggestions: info.suggestions !== false, build: info.build ?? null, claude: l?.version ?? null, state: l?.status ?? null, behind });
+  }
+  return {
+    build: build ? { id: build.id, label: build.label ?? build.id, at: build.at ?? null } : null,
+    claude,
+    asked: asked?.claude && asked.claude === claude ? asked.claude : null,
+    behind: { channels: chats.filter((x) => x.behind.includes('channels')).length, claude: chats.filter((x) => x.behind.includes('claude')).length },
+    chats,
+  };
+}
+
+// What Claude Code's prompt holds on a terminal's screen (`hc read`): the text after its ❯ ('' when empty), or null when
+// no prompt is on screen.
+export function promptDraft(screen) {
+  const lines = `${screen ?? ''}`.split('\n').slice(-40);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\s*\u276f(.*)$/.exec(lines[i].replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''));
+    if (m) return m[1].replace(/\u00a0/g, ' ').trim();
+  }
+  return null;
+}
+
+// Restarts one idle chat on what is installed now (see above). Answers { did: 'restarted' | 'waits' | 'failed', why }.
+async function restartChat({ dir, deps, chat: x, ensure, self = false }) {
+  if (!x.terminal) return { did: 'failed', why: 'it runs outside herdr' };
+  if (!x.claude_pid) return { did: 'waits', why: 'it is starting' };
+  const term = await deps.run(deps.hc, ['get', x.terminal, '--json'], { timeout: 15_000 });
+  let busy = 'herdr-core can\'t see its terminal';
+  try { const st = JSON.parse(term.out).status?.state ?? null; busy = st === 'working' || st === 'blocked' ? `its terminal is ${st}` : null; } catch { /* busy stays */ }
+  if (busy) return { did: 'waits', why: busy };
+  const prompt = async () => { const r = await deps.run(deps.hc, ['read', x.terminal], { timeout: 15_000 }); return r.code === 0 ? promptDraft(r.out) : null; };
+  let draft = await prompt();
+  // A chat started with prompt suggestions on (by an earlier version) may show one, which reads like a draft. Typing a
+  // key replaces a suggestion but adds to a draft: a prompt that then holds just that key was empty. The key is taken
+  // back either way (and Claude Code shows its suggestion again).
+  if (draft && x.suggestions) {
+    await deps.run(deps.hc, ['keys', x.terminal, 'x'], { timeout: 30_000 });
+    const typed = await prompt();
+    await deps.run(deps.hc, ['keys', x.terminal, 'backspace'], { timeout: 30_000 });
+    if (typed === 'x') draft = '';
+  }
+  if (draft === null) return { did: 'waits', why: 'its prompt isn\'t on screen', draft: true };
+  if (draft) return { did: 'waits', why: 'a draft is typed in its prompt', draft: true };
+  // Claude Code's own word, read again the moment before: still idle, still the same process.
+  const now = readLive(deps.home).get(x.session_id);
+  if (now?.pid !== x.claude_pid || now.status !== 'idle') return { did: 'waits', why: `its claude is ${now?.status ?? 'gone'}` };
+  writeAtomic(restartFile(dir, x.id), `${JSON.stringify({ pid: x.pid, at: new Date().toISOString() })}\n`);
+  try { process.kill(x.claude_pid, 'SIGTERM'); } catch (err) {
+    rmSync(restartFile(dir, x.id), { force: true });
+    return { did: 'failed', why: `couldn't stop its claude (pid ${x.claude_pid}): ${err.code ?? err.message}` };
+  }
+  // From the chat's own listener: its process is the one that restarts.
+  if (self) return { did: 'restarted', terminal: x.terminal };
+  if (!(await exited(deps, x.pid, 30_000))) return { did: 'failed', why: `it still runs 30s after its claude was stopped (pid ${x.pid})` };
+  if (x.loop) {
+    // The loop starts it again in the same terminal: done once the new process has recorded itself.
+    for (let i = 0; i < 150; i++) {
+      const now = chatRunning(dir, x.id);
+      if (now && now.pid !== x.pid) return { did: 'restarted', terminal: now.terminal };
+      await deps.sleep(200);
+    }
+    return { did: 'failed', why: 'it ended and didn\'t start again within 30s' };
+  }
+  // A chat from before the loop: its terminal ended with it. Start it again, in the loop from now on.
+  rmSync(restartFile(dir, x.id), { force: true });
+  try {
+    const started = await ensure({ dir, deps, channel: x.channel });
+    return { did: 'restarted', terminal: started.address };
+  } catch (err) { return { did: 'failed', why: err.message }; }
+}
+
+// Restarts the chats that are behind and idle: those behind the build always; those behind Claude Code when `claude`
+// asks for it (the Refresh button), or a refresh asked for it earlier and they were mid-turn then. One refresh at a
+// time: another one running answers { busy: true }.
+export async function refreshChats({ dir, deps, claude = false, ensure = ensureChat, only = null, self = false }) {
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, 'refresh.lock');
+  try { closeSync(openSync(lock, 'wx')); } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    let stale = false;
+    try { stale = Date.now() - statSync(lock).mtimeMs > 10 * 60_000; } catch { stale = true; }
+    if (!stale) return { busy: true, chats: [] };
+    rmSync(lock, { force: true });
+    try { closeSync(openSync(lock, 'wx')); } catch { return { busy: true, chats: [] }; }
+  }
+  try {
+    let status = await updateStatus({ dir, deps });
+    if (claude && status.claude) {
+      writeAtomic(askedFile(dir), `${JSON.stringify({ claude: status.claude, at: new Date().toISOString() })}\n`);
+      status = { ...status, asked: status.claude };
+    }
+    const out = [];
+    for (const x of status.chats) {
+      if (only && x.id !== only) continue;
+      const why = x.behind.filter((b) => b === 'channels' || (b === 'claude' && status.asked));
+      if (!why.length) continue;
+      if (x.state !== 'idle') { out.push({ channel: x.channel, behind: why, did: 'waits', why: x.state ? `its claude is ${x.state}` : 'it is starting' }); continue; }
+      out.push({ channel: x.channel, behind: why, ...(await restartChat({ dir, deps, chat: x, ensure, self })) });
+    }
+    // The Claude Code refresh is done once no chat is behind it any more.
+    if (!only && status.asked && !out.some((r) => r.did !== 'restarted' && r.behind.includes('claude'))) rmSync(askedFile(dir), { force: true });
+    return { busy: false, build: status.build, claude: status.claude, chats: out };
+  } finally {
+    rmSync(lock, { force: true });
+  }
+}
+
+// What a refresh did, in a sentence or two: for the command line, the installer and the mod.
+export function refreshSummary(r) {
+  if (r.busy) return 'Another refresh is running.';
+  const list = (xs) => { const names = xs.map((x) => `#${x.channel}`); return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`; };
+  const done = r.chats.filter((x) => x.did === 'restarted');
+  const waits = r.chats.filter((x) => x.did === 'waits' && !x.draft);
+  const drafts = r.chats.filter((x) => x.did === 'waits' && x.draft);
+  const failed = r.chats.filter((x) => x.did === 'failed');
+  const parts = [];
+  if (done.length) parts.push(`Restarted ${list(done)}${r.claude && done.some((x) => x.behind.includes('claude')) ? ` on Claude Code ${r.claude}` : ''}.`);
+  if (waits.length) parts.push(`${list(waits)} ${waits.length === 1 ? 'restarts' : 'restart'} when ${waits.length === 1 ? 'its turn ends' : 'their turns end'}.`);
+  if (drafts.length) parts.push(`${list(drafts)} ${drafts.length === 1 ? 'restarts' : 'restart'} once ${drafts.length === 1 ? 'its prompt is' : 'their prompts are'} empty.`);
+  for (const x of failed) parts.push(`#${x.channel} couldn't restart: ${x.why}.`);
+  return parts.join(' ') || 'Every chat is up to date.';
 }
 
 // ---------- the command line ----------
@@ -2087,7 +2323,7 @@ export function parseArgs(args) {
   const pos = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud') opts[a.slice(2)] = true;
+    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto') opts[a.slice(2)] = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
       opts[a.slice(2).replace(/-(.)/g, (_, x) => x.toUpperCase())] = args[++i];
@@ -2099,7 +2335,7 @@ export function parseArgs(args) {
 
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
-const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | tick';
+const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | refresh [--auto] [--json] | tick';
 const ROUTINE_USAGE = [
   'channels routine list [<channel>] [--json]',
   'channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->',
@@ -2200,6 +2436,8 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       // Cloud tasks' states come from the sessions list: looked up first when the last look is older than a poll.
       if (cloudOn() && openCloudTasks(readStore(dir))) await cloudLook({ dir, deps });
       const out = listChannels({ dir, home: deps.home, all: opts.all, only: pos.length ? channelName(pos[0]) : null });
+      // What the running chats are behind on, for the mod's Refresh row.
+      out.updates = await updateStatus({ dir, deps });
       if (opts.json) console.log(JSON.stringify(out));
       else printList(out, opts.all);
       return 0;
@@ -2243,6 +2481,13 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       return await chat({ dir, deps, name: channelName(pos[0]) });
     }
     if (sub === 'routine' || sub === 'routines') return await routineCommand({ dir, deps, pos, opts });
+    if (sub === 'refresh') {
+      if (pos.length) fail('channels refresh [--auto] [--json]');
+      // --auto (the installer): only what a new build calls for. Without it (the mod's Refresh): Claude Code too.
+      const r = await refreshChats({ dir, deps, claude: !opts.auto });
+      console.log(opts.json ? JSON.stringify({ ...r, summary: refreshSummary(r) }) : refreshSummary(r));
+      return 0;
+    }
     if (sub === 'tick') {
       if (pos.length) fail('channels tick');
       const r = await tick({ dir, deps });

@@ -27,6 +27,7 @@ import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
 import { chatAlive, afterEnd, lastLine } from "./chats.js";
 import { remember, restore, keyOf } from "./panels.js";
+import { refreshRow } from "./updates.js";
 import { groups as spaceGroups, follow } from "./spaces.js";
 import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window } from "herdr";
 
@@ -184,7 +185,25 @@ async function readStore() {
     }
   }
   const head = JSON.parse(list);
-  return { machine: head.machine ?? null, remote: head.remote_control === true, cloud: head.cloud ?? null, channels };
+  return { machine: head.machine ?? null, remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, channels };
+}
+
+// Refresh: the running chats restart on what is installed now (a newer Claude Code, a new herdr-channels build), each
+// once it is idle and on the same session. The backend's `channels refresh` does it and says what it did; the sidebar
+// carries it out, since it lives as long as the layout.
+const REFRESHING = "channels.refreshing"; // when a refresh started, while it runs
+const REFRESHED = "channels.refreshed"; // what the last one did: { message, at, failed }
+async function refreshNow() {
+  if (shared(REFRESHING) && Date.now() - shared(REFRESHING) < 600000) return;
+  setShared(REFRESHING, Date.now());
+  try {
+    const out = JSON.parse(await store("channels refresh --json", [], 600000));
+    setShared(REFRESHED, { message: out.summary, at: Date.now() });
+  } catch (err) {
+    setShared(REFRESHED, { message: `Couldn't refresh: ${String(err?.message ?? err)}`, at: Date.now(), failed: true });
+  }
+  setShared(REFRESHING, null);
+  changed();
 }
 
 // The channels in the user's order: the store's own (`position`) once it keeps one, else the order
@@ -720,7 +739,7 @@ export default class Channels extends View {
       const started = Date.now();
       let next;
       try { next = { ...(await readStore()), error: null, at: Date.now() }; }
-      catch (err) { next = { machine: shared(DATA)?.machine ?? null, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
+      catch (err) { next = { machine: shared(DATA)?.machine ?? null, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, updates: shared(DATA)?.updates ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
       // Something changed here while this read was out: what it brought back is older.
       if (shared(BUSY) || (shared(OP_AT) ?? 0) > started) return;
       setShared(DATA, next);
@@ -901,7 +920,33 @@ export default class Channels extends View {
           .child(svg(ICON("plus")).size(14))
           .child(div().text_size(14).child("New channel")))
         .child(this.spacesList(t)))
+      .child(this.refreshRow(t, data))
       .child(this.footer(t, data));
+  }
+
+  // Above the footer, only while something is stale: a chat runs an older Claude Code or herdr-channels than is
+  // installed. Refresh restarts the idle ones now and the rest as their turns end; then the row says what it did.
+  refreshRow(t, data) {
+    const running = Boolean(shared(REFRESHING)) && Date.now() - shared(REFRESHING) < 600000;
+    const done = shared(REFRESHED);
+    const recent = Boolean(done) && Date.now() - done.at < 12000;
+    const row = running ? { offer: false, title: "Refreshing…", detail: "Each chat restarts once it's idle." }
+      : recent ? { offer: false, title: done.failed ? "Refresh failed" : "Refreshed", detail: done.message }
+      : refreshRow(data?.updates);
+    if (!row) return div();
+    const color = recent && done.failed ? t.blocked : row.offer || running || recent ? t.accent : t.dim;
+    return h_flex().id("refresh-row").mx(10).mb(10).px(12).py(10).gap(10).items_start().flex_none().rounded(10)
+      .border_1().border_color(t.border).bg(t.background)
+      .child(running ? svg(ICON("spinner")).size(15).mt(1).flex_none().text_color(color).spin(900)
+        : svg(ICON("rotate-cw")).size(15).mt(1).flex_none().text_color(color))
+      .child(v_flex().flex_1().min_w(0).gap(2)
+        .child(div().text_size(12.5).text_color(t.foreground).child(row.title))
+        .child(div().text_size(11.5).text_color(t.muted).child(row.detail)))
+      .when(row.offer, (el) => el.child(div().id("refresh-go").h(26).px(10).flex().flex_none().items_center().rounded(7)
+        .bg(t.accent).text_color(t.background).text_size(12.5).font_medium().cursor_pointer().hover((st) => st.opacity(0.85))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { refreshNow().finally(() => cx.notify()); cx.notify(); })
+        .child("Refresh")));
   }
 
   // Herdr's own spaces, under the channels: everything but the chats' space, by machine (this computer first). A
