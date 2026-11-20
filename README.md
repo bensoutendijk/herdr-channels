@@ -14,7 +14,7 @@ Everything is local: the channel store is a folder on disk, tasks run under your
 the herdr mod runs every command on the same machine. No server is involved, unless you turn on
 [cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
 
-![The channels layout in Herdr: the channel list on the left with Herdr's spaces list below it (channels, acme-website); the #website channel's Claude Code chat in the middle, where a one-line notice says the Add a page title task finished and the chat answers it in a few lines, above a task card asking for an answer; and the tasks panel on the right with one task that needs input, one working and two ready for review](preview.png)
+![The channels layout in Herdr: the channel list on the left with Herdr's spaces list below it (channels, acme-website); the #website channel's Claude Code chat in the middle, where a one-line notice from the Add a page title task is followed by the chat saying in a few lines that it finished, above a task card saying Pick a homepage headline waits on a permission prompt; and the tasks panel on the right with one task that needs input, one working and two ready for review](preview.png)
 
 ## Contents
 
@@ -193,11 +193,11 @@ once, and a chat in the middle of a turn by itself within seconds of that turn e
 installer's summary says which chats restarted and which wait. Nothing needs `/exit` by hand.
 
 Claude Code updates itself. A chat keeps running the version it started with, so when a newer one is
-installed, a **Refresh** row appears at the bottom of the sidebar, saying which version is new and
+installed, a **Refresh** row appears under the channels in the sidebar, saying which version is new and
 how many chats run an older one. Clicking Refresh restarts the idle chats on it now and the rest as
 their turns end, and the row then says what it did. The row shows only while a chat is behind.
 
-<img src="docs/refresh-row.png" width="280" alt="The bottom of the channels sidebar: a row with a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button, above the studio, on this Mac footer">
+<img src="docs/refresh-row.png" width="280" alt="The Refresh row in the channels sidebar: a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button">
 <img src="docs/refresh-done.png" width="280" alt="The same row after a click: Refreshed. Restarted #general on Claude Code 2.1.329. #research restarts when its turn ends.">
 
 A restart never interrupts a turn or loses a draft. A chat is restarted only while Claude Code
