@@ -393,6 +393,10 @@ it. A finish's text is claude.ai's one-line summary of the turn; the whole sessi
 (Claude Code hasn't refreshed the login yet) it waits a minute; any other failure shows state unknown until a
 call works again.
 
+<img src="docs/cloud-task-row.png" width="420" alt="The tasks panel of #website with one cloud task under Ready for review, Cloud probe: hello file, with a cloud glyph, an unread dot and its cost, $0.24">
+
+<img src="docs/cloud-task-card.png" width="420" alt="A card above the channel chat's prompt: Cloud probe: hello file, cloud, asks you, 1m. Approve or deny AskUserQuestion. Answer it on claude.ai, with an Open button">
+
 | | Local task | Cloud task |
 |---|---|---|
 | Open (click the row) | Its live session in the panel | On claude.ai in the browser. In the panel with `claude --cloud <id>` only once Claude Code can attach a terminal for the account, which `channels` asks Claude Code now and then |

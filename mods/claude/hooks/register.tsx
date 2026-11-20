@@ -255,12 +255,17 @@ export const register: Register = on => {
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Text dimColor wrap="truncate-end">
             <Text color="success">✓</Text> {card.name} {card.cloud ? '☁ ' : ''}finished · {ago(card.at, now)}
-            {card.cloud && card.message ? ` · ${card.message}` : ''}
           </Text>
           <Button key={`dismiss:${card.task}`} label="Dismiss" onPress={() => dismiss($, card)} />
           <Button key={`tell:${card.task}`} label="Tell chat" onPress={() => tell($, card)} />
           {card.cloud ? <Button key={`open:${card.task}`} label="Open" onPress={() => openRemote($, card)} /> : remote(card)}
         </Box>
+        {card.cloud && card.message ? (
+          <Text dimColor maxLines={2}>
+            {'  '}
+            {card.message}
+          </Text>
+        ) : null}
         {status(card)}
       </Box>
     )
