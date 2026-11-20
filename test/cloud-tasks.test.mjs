@@ -121,7 +121,7 @@ test('start --cloud refuses: off, no --repo, a folder that isn\'t a repo, a dirt
   assert.match(await err(['start', 'design', '--cloud', '--repo', 'site', 'x']), /Cloud tasks are off on this Mac\. Turn them on with `node install\.mjs --cloud`/);
 });
 
-test('the listener: working → asks you → done, each once, as a panel dot, a card and ride-along; a question\'s card goes once it is answered', async (t) => {
+test('the listener: working → asks you → done, each once: a question as a panel dot, a card and ride-along, gone once answered; a finish as a notice', async (t) => {
   const { ok, fake, store, session, tick } = setup(t);
   await ok(['create', 'design']);
   await ok(['start', 'design', '--cloud', '--repo', 'site', '--name', 'Fix the footer', 'Fix the footer links']);
@@ -149,10 +149,10 @@ test('the listener: working → asks you → done, each once, as a panel dot, a 
   assert.equal(store().channels[0].inbox.length, 0);
   fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:05:00Z', summary: 'Pointed /press at the media kit and opened PR #31', cost_usd: 0.41 })];
   did = await tick();
-  assert.deepEqual(did.map((e) => e.level), ['ride-along']);
-  assert.match(did[0].text, /finished at 2026-11-19T20:05:00Z[\s\S]*Its summary on claude\.ai:\n<task-report>\nPointed \/press at the media kit and opened PR #31\n<\/task-report>/);
+  assert.deepEqual(did.map((e) => e.level), ['notice']);
+  assert.equal(did[0].text, `Cloud task "Fix the footer" (${ref}) finished: Pointed /press at the media kit and opened PR #31`);
   c = store().channels[0];
-  assert.deepEqual(c.inbox[0].card, { state: 'done', message: 'Pointed /press at the media kit and opened PR #31' });
+  assert.deepEqual([c.inbox, c.notices.map((n) => n.task), c.tasks[0].unread, c.tasks[0].cloud.cost_usd], [[], [ref], null, 0.41]);
   // Seen on claude.ai later: last_event_at moves with the same summary. No new event.
   fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:09:00Z', summary: 'Pointed /press at the media kit and opened PR #31', cost_usd: 0.41 })];
   assert.deepEqual(await tick(), []);

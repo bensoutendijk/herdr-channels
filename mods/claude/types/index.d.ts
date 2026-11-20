@@ -1,5 +1,5 @@
 // A card: one event of the channel's tasks waiting in the store's inbox, as the cards mod draws it.
-export type CardState = 'question' | 'prompt' | 'done'
+export type CardState = 'question' | 'prompt'
 export type Card = {
   task: string
   name: string
