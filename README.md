@@ -227,8 +227,8 @@ installed, a **Refresh** row appears at the bottom of the sidebar, saying which 
 how many chats run an older one. Clicking Refresh restarts the idle chats on it now and the rest as
 their turns end, and the row then says what it did. The row shows only while a chat is behind.
 
-<img src="docs/refresh-row.png" width="280" alt="The bottom of the channels sidebar: a row with a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button, above the studio, on this Mac footer">
-<img src="docs/refresh-done.png" width="280" alt="The same row after a click: Refreshed. Restarted #general on Claude Code 2.1.329. #research restarts when its turn ends.">
+<img src="docs/refresh-row.png" width="280" alt="The bottom of the channels sidebar: a row with a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button, above the studio, on this Mac footer with v1.0.1 at its right">
+<img src="docs/refresh-done.png" width="280" alt="The same row after a click: Refreshed. Restarted #general and #design on Claude Code 2.1.329.">
 
 A restart never interrupts a turn or loses a draft. A chat is restarted only while Claude Code
 reports it idle, herdr-core reports its terminal not working, and its prompt is empty; then its
