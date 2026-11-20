@@ -9,8 +9,8 @@ const sp = (id, name, extra = {}) => ({ id, name, machine: null, active: false, 
 const show = (list, id) => list.map((s) => ({ ...s, active: s.id === id }));
 
 test("the chats' spaces aren't listed, on any machine", () => {
-  const all = [sp('a', 'acme'), sp('h', HOLD), sp('boris/h', HOLD, { machine: 'boris' }), sp('boris/x', 'agent-os', { machine: 'boris' })];
-  assert.deepEqual(groups(all, HOLD).map((g) => [g.machine, g.spaces.map((s) => s.id)]), [[null, ['a']], ['boris', ['boris/x']]]);
+  const all = [sp('a', 'acme'), sp('h', HOLD), sp('server/h', HOLD, { machine: 'server' }), sp('server/x', 'api', { machine: 'server' })];
+  assert.deepEqual(groups(all, HOLD).map((g) => [g.machine, g.spaces.map((s) => s.id)]), [[null, ['a']], ['server', ['server/x']]]);
 });
 
 test('this computer first, then the other machines by name, each keeping Herdr\'s order', () => {
@@ -25,15 +25,15 @@ test('no spaces, or only chats, gives no groups', () => {
   assert.deepEqual(groups([sp('h', HOLD)], HOLD), []);
 });
 
-const base = [sp('h', HOLD), sp('a', 'acme'), sp('b', 'shell'), sp('boris/x', 'agent-os', { machine: 'boris' })];
+const base = [sp('h', HOLD), sp('a', 'acme'), sp('b', 'shell'), sp('server/x', 'api', { machine: 'server' })];
 
 test('the sidebar follows Herdr to a space that is not a chats space (⌃1-9, a new space)', () => {
   let s = follow({ space: null, seen: 'h' }, show(base, 'h'), HOLD, 0);
   assert.equal(s.space, null, 'the chat is shown: a channel is selected');
   s = follow(s, show(base, 'a'), HOLD, 1);
   assert.equal(s.space, 'a');
-  s = follow(s, show(base, 'boris/x'), HOLD, 2);
-  assert.equal(s.space, 'boris/x', 'another machine\'s space too');
+  s = follow(s, show(base, 'server/x'), HOLD, 2);
+  assert.equal(s.space, 'server/x', 'another machine\'s space too');
   s = follow(s, show(base, 'h'), HOLD, 3);
   assert.equal(s.space, null, 'back to the chats space: the channel again');
 });
