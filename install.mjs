@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 // Installs herdr-channels on this Mac, from this clone:
 //   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--no-timer] [--no-switch] [--dry-run]
+//   node install.mjs --on <machine> --command <command> --local <name> --projects <dir> [--by <who>] [--name <name>] [--app-home <dir>] [--no-switch] [--dry-run]
 //   node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--label <label>]
+//
+// With --on, the store is another channels command on another Herdr machine (a home server that keeps the channels
+// and runs tasks on several machines), and only the mod and its layout are installed here: steps 2 to 4. --command
+// is that command (words, e.g. "hub channels"), --local what it calls this computer, --projects where a chat and a
+// fresh session start on that machine, and --name the mod and layout's name (to install beside another copy). The
+// mod asks the command what it can do and hides the rest (mods/channels/backend.js).
 //
 // 1. Writes `channels` into --bin (default ~/.local/bin): a small sh script that runs bin/channels.mjs in this
 //    clone with the node running this install, with the store and projects folder it was given. Keep the clone
@@ -44,12 +51,13 @@ const MOD_MARK = '.herdr-channels.json';
 // What herdr writes into a mod folder itself: never copied, and left alone in an installed copy.
 const GENERATED = new Set(['gpui-kit.d.ts', 'jsconfig.json', MOD_MARK, 'config.js']);
 
-const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
+const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--name <name>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --on <machine> --command <command> --local <name> --projects <dir> [--by <who>] [--name <name>] [--app-home <dir>] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
 export const LABEL = 'dev.herdr-channels.tick';
 
 export function parse(argv, env = process.env, home = homedir()) {
-  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL, remote: null, cloud: null };
-  const valued = { '--app-home': 'appHome', '--bin': 'bin', '--chat-mod': 'chatMod', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label' };
+  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL, remote: null, cloud: null, on: null, command: null, local: null, name: null };
+  const valued = { '--app-home': 'appHome', '--bin': 'bin', '--chat-mod': 'chatMod', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label', '--on': 'on', '--command': 'command', '--local': 'local', '--name': 'name' };
+  const given = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--no-switch') o.switch = false;
@@ -64,10 +72,21 @@ export function parse(argv, env = process.env, home = homedir()) {
     else if (valued[a]) {
       if (i + 1 >= argv.length) throw new Error(`${a} needs a value.\n${usage}`);
       o[valued[a]] = argv[++i];
+      given.add(a);
     } else throw new Error(`Unknown option ${a}.\n${usage}`);
   }
   const expand = (p) => resolve(p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
-  for (const k of ['appHome', 'bin', 'store', 'projects', 'chatMod']) o[k] = expand(o[k]);
+  // A store on another machine: its projects folder is that machine's, so it is taken as given.
+  for (const k of ['appHome', 'bin', 'store', 'chatMod', ...(o.on ? [] : ['projects'])]) o[k] = expand(o[k]);
+  if (o.on != null) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.on)) throw new Error('--on is a Herdr machine\'s name, as `hc machine ls` lists it.');
+    const words = `${o.command ?? ''}`.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) throw new Error('--on needs --command: the channels command on that machine, e.g. "hub channels".');
+    o.command = words;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(`${o.local ?? ''}`)) throw new Error('--on needs --local: what that store calls this computer (its tasks here are filed as <local>/<session>).');
+    if (!given.has('--projects') || !o.projects.startsWith('/')) throw new Error('--on needs --projects: the absolute folder on that machine where a chat and a fresh session start.');
+  } else if (o.command != null || o.local != null) throw new Error('--command and --local are for a store on another machine: give --on too.');
+  if (o.name != null && !/^[a-z][a-z0-9_-]{0,31}$/.test(o.name)) throw new Error('--name is one short lowercase word, e.g. channels-hc.');
   if (!/^[a-z][a-z0-9_-]{0,31}$/.test(o.by)) throw new Error('--by is one short lowercase word, such as your first name.');
   if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(o.label)) throw new Error('--label is a launchd label: letters, digits, dots and dashes, e.g. dev.herdr-channels.tick.');
   return o;
@@ -138,10 +157,10 @@ export function configText(c) {
 }
 
 // The mod folder and layout name to install as: "channels", or the next free name when "channels" is taken by
-// something this repo didn't install.
-export function pickNames(appHome) {
+// something this repo didn't install. `want` (--name) is the one name to use: it has to be free, or this repo's.
+export function pickNames(appHome, want = null) {
   for (let n = 1; n < 100; n++) {
-    const name = n === 1 ? 'channels' : `channels-${n}`;
+    const name = want ?? (n === 1 ? 'channels' : `channels-${n}`);
     const modDir = join(appHome, 'mods', name);
     const layoutFile = join(appHome, 'layouts', `${name}.json`);
     let mine = null;
@@ -149,6 +168,7 @@ export function pickNames(appHome) {
     const modFree = !existsSync(modDir) || Boolean(mine);
     const layoutFree = !existsSync(layoutFile) || mine?.layout === name;
     if (modFree && layoutFree) return { name, update: Boolean(mine) };
+    if (want) throw new Error(`${want} is taken in ${appHome} by a mod or layout this repo didn't install; it's left alone. Pass another --name.`);
   }
   throw new Error(`No free name for the mod in ${appHome}/mods.`);
 }
@@ -308,6 +328,7 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   const pathDirs = [...new Set([o.bin, dirname(node), ...Object.values(found).filter(Boolean).map((p) => dirname(p)), join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'])].filter((d) => !SYSTEM.includes(d));
   const path = pathDirs.join(':');
 
+  if (o.on) return installRemote(o, { home, log });
   // 1. The command.
   const wrapper = join(o.bin, 'channels');
   if (existsSync(wrapper) && !readFileSync(wrapper, 'utf8').includes(MARK)) {
@@ -315,12 +336,8 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   }
   // 2. The mod and layout.
   if (!existsSync(o.appHome)) log(`${o.appHome} doesn't exist yet; it is made now. Open the herdr app once to fill it in.`);
-  const { name, update } = pickNames(o.appHome);
-  const modDir = join(o.appHome, 'mods', name);
-  const layoutFile = join(o.appHome, 'layouts', `${name}.json`);
-  const layout = JSON.parse(readFileSync(join(REPO, 'layouts', 'channels.json'), 'utf8'));
-  const rename = (n) => { if (n?.content?.mod === 'channels') n.content.mod = name; for (const c of n?.children ?? []) rename(c); };
-  rename(layout);
+  const { name, update } = pickNames(o.appHome, o.name);
+  const { modDir, layoutFile, layout } = modFiles(o.appHome, name);
   const config = { mod: name, layout: name, command: wrapper, path, projects: o.projects, by: o.by };
 
   const was = installedRemote(o.bin);
@@ -333,12 +350,8 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   const wrapperBody = wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home), remote, cloud });
   writeAtomic(wrapper, wrapperBody);
   spawnSync('chmod', ['755', wrapper]);
-  copyMod(join(REPO, 'mods', 'channels'), modDir);
   copyChatMod(join(REPO, 'mods', 'claude'), o.chatMod);
-  writeAtomic(join(modDir, 'config.js'), configText(config));
-  writeAtomic(join(modDir, MOD_MARK), `${JSON.stringify({ repo: REPO, layout: name, at: new Date().toISOString() }, null, 2)}\n`);
-  mkdirSync(dirname(layoutFile), { recursive: true });
-  writeAtomic(layoutFile, `${JSON.stringify(layout, null, 2)}\n`);
+  writeMod({ modDir, layoutFile, layout, name, config });
   mkdirSync(o.projects, { recursive: true });
   const selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
   const timer = o.timer ? installTimer({ label: o.label, wrapper, store: o.store, home, platform, run }) : { plist: null, state: 'not added (--no-timer)' };
@@ -348,6 +361,40 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   writeAtomic(join(o.store, 'build.json'), `${JSON.stringify({ id, label: commitLabel(REPO) ?? id, at: new Date().toISOString() })}\n`);
   const refreshed = refreshChats(wrapper);
   return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, refreshed, build: id, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+}
+
+// The mod's folder and layout file under a name, and the layout with its mod blocks renamed to match.
+function modFiles(appHome, name) {
+  const layout = JSON.parse(readFileSync(join(REPO, 'layouts', 'channels.json'), 'utf8'));
+  const rename = (n) => { if (n?.content?.mod === 'channels') n.content.mod = name; for (const c of n?.children ?? []) rename(c); };
+  rename(layout);
+  return { modDir: join(appHome, 'mods', name), layoutFile: join(appHome, 'layouts', `${name}.json`), layout };
+}
+
+function writeMod({ modDir, layoutFile, layout, name, config }) {
+  copyMod(join(REPO, 'mods', 'channels'), modDir);
+  writeAtomic(join(modDir, 'config.js'), configText(config));
+  writeAtomic(join(modDir, MOD_MARK), `${JSON.stringify({ repo: REPO, layout: name, at: new Date().toISOString() }, null, 2)}\n`);
+  mkdirSync(dirname(layoutFile), { recursive: true });
+  writeAtomic(layoutFile, `${JSON.stringify(layout, null, 2)}\n`);
+}
+
+// A store on another machine (--on): the mod and its layout only. No command, cards mod, timer or build here: the
+// store, its chats and their schedule are that machine's.
+export function installRemote(o, { home = homedir(), log = console.log } = {}) {
+  if (!existsSync(o.appHome)) log(`${o.appHome} doesn't exist yet; it is made now. Open the herdr app once to fill it in.`);
+  const { name, update } = pickNames(o.appHome, o.name);
+  const { modDir, layoutFile, layout } = modFiles(o.appHome, name);
+  // PATH for what runs on this computer (hc, python3, and claude for this computer's own tasks).
+  const found = Object.fromEntries(['claude', 'hc', 'python3'].map((p) => [p, findProgram(p, { home })]));
+  const SYSTEM = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+  const path = [...new Set([...Object.values(found).filter(Boolean).map((p) => dirname(p)), join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'])].filter((d) => !SYSTEM.includes(d)).join(':');
+  const config = { mod: name, layout: name, command: o.command, on: o.on, local: o.local, path, projects: o.projects, by: o.by };
+  const result = { remoteStore: true, modDir, layoutFile, name, update, config, found, selected: null, timer: null, refreshed: null };
+  if (o.dryRun) return result;
+  writeMod({ modDir, layoutFile, layout, name, config });
+  result.selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
+  return result;
 }
 
 // Restarts the chats that run an older build, through the command just written: { summary } or { error }. An idle
@@ -376,6 +423,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.log('');
     }
     const r = install(o);
+    if (r.remoteStore) {
+      console.log(`${o.dryRun ? 'Would install' : 'Installed'} the herdr-channels mod from ${REPO}, for the store on ${o.on}:`);
+      console.log(`  mod      ${r.modDir}${r.update ? ' (updated)' : ''}`);
+      console.log(`  layout   ${r.layoutFile}`);
+      console.log(`  store    \`${o.command.join(' ')}\` on ${o.on}, which calls this computer ${o.local}`);
+      console.log(`  projects ${o.projects} on ${o.on}`);
+      if (r.selected) console.log(`  The ${r.name} layout is ${r.selected}.`);
+      if (!r.found.hc) console.log('\nNot found: hc. Install the herdr app (it brings hc) and run this again.');
+      process.exit(0);
+    }
     const missing = Object.entries(r.found).filter(([, p]) => !p).map(([n]) => n);
     console.log(`${o.dryRun ? 'Would install' : 'Installed'} herdr-channels from ${REPO}:`);
     console.log(`  command  ${r.wrapper}`);

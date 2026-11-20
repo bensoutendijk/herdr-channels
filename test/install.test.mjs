@@ -42,7 +42,7 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   assert.deepEqual([listed.machine, listed.channels.map((c) => c.name)], ['testmac', ['design']]);
   // The mod, without the files herdr writes itself, and its settings.
   const mod = join(appHome, 'mods', 'channels');
-  assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'chats.js', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'panels.js', 'spaces.js', 'updates.js', 'viewer.py']);
+  assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'backend.js', 'chats.js', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'panels.js', 'spaces.js', 'updates.js', 'viewer.py']);
   const config = loadConfig(join(mod, 'config.js'));
   assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels', layout: 'channels', command: wrapper, path: 'string', projects: join(home, 'projects'), by: 'sam' });
   assert.ok(config.path.split(':').includes(join(home, '.local', 'bin')));
@@ -227,4 +227,52 @@ test('cloud tasks are off unless asked for and never asked about; --cloud turns 
   assert.match(install('--cloud'), /remote {3}off/);
   assert.equal(existsSync(join(home, '.claude', 'settings.json')), false);
   assert.equal(existsSync(join(home, '.claude.json')), false);
+});
+
+test('a store on another machine: only the mod and its layout, beside a channels mod this repo didn\'t install', (t) => {
+  const { home, appHome, env, install } = setup(t);
+  // Another channels mod already has the name: it is never touched.
+  mkdirSync(join(appHome, 'mods', 'channels'));
+  writeFileSync(join(appHome, 'mods', 'channels', 'main.js'), '// theirs\n');
+  writeFileSync(join(appHome, 'layouts', 'channels.json'), '{"theirs":1}\n');
+  const args = ['--on', 'server', '--command', 'hub channels', '--local', 'laptop', '--projects', '/srv/projects', '--by', 'me', '--name', 'channels-hc', '--no-switch'];
+  assert.match(install(...args), /for the store on server/);
+  assert.equal(readFileSync(join(appHome, 'mods', 'channels', 'main.js'), 'utf8'), '// theirs\n');
+  assert.equal(readFileSync(join(appHome, 'layouts', 'channels.json'), 'utf8'), '{"theirs":1}\n');
+  const mod = join(appHome, 'mods', 'channels-hc');
+  const config = loadConfig(join(mod, 'config.js'));
+  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels-hc', layout: 'channels-hc', command: ['hub', 'channels'], on: 'server', local: 'laptop', path: 'string', projects: '/srv/projects', by: 'me' });
+  const layout = readFileSync(join(appHome, 'layouts', 'channels-hc.json'), 'utf8');
+  assert.ok(layout.includes('"mod": "channels-hc"') && !layout.includes('"mod": "channels"'));
+  // No command, cards mod or store here, and the layout isn't selected.
+  assert.equal(existsSync(join(home, '.local', 'bin', 'channels')), false);
+  assert.equal(existsSync(join(home, '.local', 'share', 'herdr-channels')), false);
+  assert.equal(existsSync(join(home, '.local', 'state', 'herdr-channels')), false);
+  assert.equal(existsSync(join(appHome, 'shared.json')), false);
+  // Again: updated in place. The name can't take theirs.
+  assert.match(install(...args), /\(updated\)/);
+  const r = spawnSync(process.execPath, [script, ...args.slice(0, -3), '--name', 'channels'], { encoding: 'utf8', env, cwd: home });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /channels is taken/);
+  // Uninstall takes out this repo's copy only.
+  const u = spawnSync(process.execPath, [script, '--uninstall'], { encoding: 'utf8', env, cwd: home });
+  assert.equal(u.status, 0, u.stderr);
+  assert.equal(existsSync(mod), false);
+  assert.equal(readFileSync(join(appHome, 'mods', 'channels', 'main.js'), 'utf8'), '// theirs\n');
+});
+
+test('a store on another machine needs its command, this computer\'s name in it and its projects folder', async () => {
+  const { parse } = await import('../install.mjs');
+  const base = ['--on', 'server', '--command', 'hub channels', '--local', 'laptop', '--projects', '/srv/projects'];
+  assert.deepEqual(parse(base, {}, '/h').command, ['hub', 'channels']);
+  assert.equal(parse(base, {}, '/h').projects, '/srv/projects');
+  assert.throws(() => parse(['--on', 'server', '--local', 'laptop', '--projects', '/p'], {}, '/h'), /needs --command/);
+  assert.throws(() => parse(['--on', 'server', '--command', 'x', '--projects', '/p'], {}, '/h'), /needs --local/);
+  assert.throws(() => parse(['--on', 'server', '--command', 'x', '--local', 'l'], {}, '/h'), /needs --projects/);
+  assert.throws(() => parse(['--on', 'server', '--command', 'x', '--local', 'l', '--projects', 'rel'], {}, '/h'), /needs --projects/);
+  assert.throws(() => parse(['--command', 'x'], {}, '/h'), /give --on too/);
+  assert.throws(() => parse([...base, '--name', 'Bad Name'], {}, '/h'), /--name/);
+  // Without --on, nothing changes: the projects folder is this computer's.
+  assert.equal(parse(['--projects', '~/p'], {}, '/h').projects, '/h/p');
+  assert.equal(parse([], {}, '/h').on, null);
 });
