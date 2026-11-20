@@ -1044,14 +1044,16 @@ export default class Channels extends View {
   releaseRow(t, data) {
     if (!has("update")) return div();
     const release = data?.updates?.release ?? null;
-    const clicked = Boolean(shared(UPDATING)) && Date.now() - shared(UPDATING) < 30000 && release?.update?.state !== "running";
+    // Between the click and the list saying the update runs: the update's own record is older than the click.
+    const at = shared(UPDATING);
+    const clicked = Boolean(at) && Date.now() - at < 30000 && !(Date.parse(release?.update?.at ?? "") >= at - 2000);
     const row = clicked ? { state: "running", title: `Updating to ${release?.latest ?? "the latest release"}…`, detail: "Starting.", button: null, notes: null } : releaseRow(release);
     if (!row) return div();
-    const color = row.state === "failed" ? t.blocked : t.accent;
+    const color = row.state === "failed" ? t.blocked : row.state === "done" ? t.ansi2 : t.accent;
     return h_flex().id("release-row").mx(10).mb(10).px(12).py(10).gap(10).items_start().flex_none().rounded(10)
       .border_1().border_color(t.border).bg(t.background)
       .child(row.state === "running" ? svg(ICON("spinner")).size(15).mt(1).flex_none().text_color(color).spin(900)
-        : svg(ICON("download")).size(15).mt(1).flex_none().text_color(color))
+        : svg(ICON(row.state === "done" ? "circle-check" : "download")).size(15).mt(1).flex_none().text_color(color))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(div().text_size(12.5).text_color(t.foreground).child(row.title))
         .child(div().text_size(11.5).text_color(t.muted).child(row.detail))

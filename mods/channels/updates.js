@@ -38,12 +38,14 @@ export function refreshRow(updates) {
 }
 
 // The release row, above the refresh row: a newer herdr-channels release than this Mac runs, from `updates.release`
-// (see bin/release.mjs). null when there is none; else { state, title, detail, button, notes }: `state` says how to
-// draw it (offer, running, failed), `button` is the button's word (Update, Retry; null while an update runs), and
-// `notes` the release notes' link.
-export function releaseRow(release) {
+// (see bin/release.mjs), or an update running or just done. null when there is none; else { state, title, detail,
+// button, notes }: `state` says how to draw it (offer, running, failed, done), `button` is the button's word (Update,
+// Retry; null otherwise), and `notes` the release notes' link.
+export const DONE_MS = 60000; // how long "Updated to X" stays
+export function releaseRow(release, now = Date.now()) {
   if (!release) return null;
   const u = release.update;
+  if (u?.state === "done" && !release.available && now - Date.parse(u.at) < DONE_MS) return { state: "done", title: `Updated to ${u.to}`, detail: u.message?.replace(/^Updated to \S+\.\s*/, "") || "Chats restart once they are idle.", button: null, notes: release.url ?? null };
   if (u?.state === "running") return { state: "running", title: `Updating to ${u.to ?? release.latest ?? "the latest release"}…`, detail: "Installing. Chats restart once they are idle.", button: null, notes: null };
   if (!release.available) return null;
   const notes = release.url ?? null;

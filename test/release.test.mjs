@@ -156,7 +156,10 @@ test('the sidebar\'s release row: offered, running, failed, and gone when curren
   assert.deepEqual(releaseRow({ ...release, update: { state: 'failed', to: '1.0.1', message: 'The clone has changes not committed.' } }),
     { state: 'failed', title: 'Update to 1.0.1 failed', detail: 'The clone has changes not committed.', button: 'Retry', notes: NOTES('1.0.1') });
   assert.equal(releaseRow({ ...release, update: { state: 'failed', to: '1.0.0', message: 'old' } }).state, 'offer', 'a failure for an older release is stale');
-  assert.equal(releaseRow({ ...release, available: false, update: { state: 'done', to: '1.0.1' } }), null);
+  const at = '2026-11-20T22:20:11.000Z';
+  const done = { ...release, current: '1.0.1', available: false, update: { state: 'done', to: '1.0.1', message: 'Updated to 1.0.1. Restarted #general and #design.', at } };
+  assert.deepEqual(releaseRow(done, Date.parse(at) + 5000), { state: 'done', title: 'Updated to 1.0.1', detail: 'Restarted #general and #design.', button: null, notes: NOTES('1.0.1') });
+  assert.equal(releaseRow(done, Date.parse(at) + 61000), null, 'gone after a minute');
   assert.equal(releaseRow(null), null);
   assert.equal(versionLabel('1.0.1'), 'v1.0.1');
   assert.equal(versionLabel(null), null);
