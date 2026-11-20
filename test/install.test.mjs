@@ -107,7 +107,7 @@ test('a name already taken is never overwritten: the copy is renamed everywhere;
   assert.deepEqual([config.mod, config.layout], ['channels-3', 'channels-3']);
   const layout = readFileSync(join(appHome, 'layouts', 'channels-3.json'), 'utf8');
   assert.doesNotMatch(layout, /"mod": "channels"/);
-  assert.equal(layout.match(/"mod": "channels-3"/g).length, 4);
+  assert.equal(layout.match(/"mod": "channels-3"/g).length, 5);
   assert.deepEqual(JSON.parse(readFileSync(join(appHome, 'shared.json'), 'utf8')), { layout: 'channels-3', other: 1 }, 'the rest of shared.json stays');
   // Again: the same copy, updated; files herdr wrote into it stay.
   writeFileSync(join(appHome, 'mods', 'channels-3', 'jsconfig.json'), '{}');

@@ -14,7 +14,7 @@ Everything is local: the channel store is a folder on disk, tasks run under your
 the herdr mod runs every command on the same machine. No server is involved, unless you turn on
 [cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
 
-![The channels layout in Herdr: the channel list on the left with a Herdr space, acme-website, under Spaces below it; the #website channel's Claude Code chat in the middle, where a one-line notice says the Pick a hero headline task finished and the chat answers it in a sentence, above two task cards; and the tasks panel on the right with two tasks that need input, one working and two ready for review](preview.png)
+![The channels layout in Herdr: the channel list on the left with Herdr's spaces list below it (channels, acme-website); the #website channel's Claude Code chat in the middle, where a one-line notice from the Add a page title task is followed by the chat saying in a few lines that it finished, above a task card saying Pick a homepage headline waits on a permission prompt; and the tasks panel on the right with one task that needs input, one working and two ready for review](preview.png)
 
 ## Contents
 
@@ -191,7 +191,7 @@ the clone it installs from, and the sidebar's footer shows it.
 
 The routines timer looks up the latest release every four hours: one unauthenticated request to
 `api.github.com/repos/bensoutendijk/herdr-channels/releases/latest`, with nothing in it about the
-Mac or its user. When a newer release is out, a row at the bottom of the sidebar says so, with a link
+Mac or its user. When a newer release is out, a row under the channels in the sidebar says so, with a link
 to its release notes and an **Update** button. Nothing is updated until the button is clicked.
 
 <img src="docs/release-row.png" width="280" alt="The bottom of the channels sidebar: a row with a download arrow, herdr-channels 1.0.1 available, This Mac runs 1.0.0, a Release notes link and an Update button, above the studio, on this Mac footer with v1.0.0 at its right">
@@ -223,12 +223,12 @@ once, and a chat in the middle of a turn by itself within seconds of that turn e
 installer's summary says which chats restarted and which wait. Nothing needs `/exit` by hand.
 
 Claude Code updates itself. A chat keeps running the version it started with, so when a newer one is
-installed, a **Refresh** row appears at the bottom of the sidebar, saying which version is new and
+installed, a **Refresh** row appears under the channels in the sidebar, saying which version is new and
 how many chats run an older one. Clicking Refresh restarts the idle chats on it now and the rest as
 their turns end, and the row then says what it did. The row shows only while a chat is behind.
 
-<img src="docs/refresh-row.png" width="280" alt="The bottom of the channels sidebar: a row with a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button, above the studio, on this Mac footer with v1.0.1 at its right">
-<img src="docs/refresh-done.png" width="280" alt="The same row after a click: Refreshed. Restarted #general and #design on Claude Code 2.1.329.">
+<img src="docs/refresh-row.png" width="280" alt="The Refresh row in the channels sidebar: a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button">
+<img src="docs/refresh-done.png" width="280" alt="The same row after a click: Refreshed. Restarted #general on Claude Code 2.1.329. #research restarts when its turn ends.">
 
 A restart never interrupts a turn or loses a draft. A chat is restarted only while Claude Code
 reports it idle, herdr-core reports its terminal not working, and its prompt is empty; then its
@@ -269,20 +269,26 @@ newest Claude Code from its next message on.
 
   <img src="docs/task-menu.png" width="420" alt="The tasks panel with Build pricing page working and two tasks ready for review, Pick a hero headline and Draft the launch notes; a task's menu is open over the first, offering Rename and Resolve">
 
-- **Spaces.** Everything that isn't a channel is under **Spaces**, below the channels: Herdr's own
-  spaces, for a shell, a plain Claude Code session or anything else Herdr runs, without leaving the
-  channels window. They are grouped by machine when some are on another machine. A dot shows a
-  space's agents (working, done, or needing you). Click a space to show it in the main area. The bar
-  above then shows its tabs: click one to show it, **×** to close it, **+** to add one. Herdr's own
-  keys work there too (new tab, split, close, and the space keys). The tasks panel folds away while
-  a space is shown and comes back when you select a channel again. **+** next to Spaces opens a new
-  space in the projects folder. Selecting a space with Herdr's keys selects it in the sidebar too,
-  and selecting the `channels` space (where the chats live) goes back to the channel. The spaces are
-  ordinary Herdr spaces: they keep running when you switch away, and Herdr's own layout
-  (`layout.switch`) shows them as well. A Claude Code session started there isn't a channel task;
-  `channels file <channel> <session>` files it into a channel.
+- **Spaces: plain Herdr.** Below the channels is Herdr's own **Spaces** list, the same one Herdr's
+  own layout shows, for a shell, a plain Claude Code session or anything else Herdr runs. It works as
+  it does in Herdr: click a space to show it, right-click it to rename or close it, drag to reorder,
+  and **+** makes a new one. The `channels` space in it is where the chats live; clicking it goes
+  back to the selected channel.
 
-  <img src="docs/spaces.png" width="720" alt="The channels window with a Herdr space selected under Spaces in the sidebar: the main area shows the acme-website space's claude tab, a Claude Code session beside a shell showing the repository's git log, and the bar above lists the space's tabs, claude and dev server, with a plus to add one">
+  While a space is shown, the window is plain Herdr: Herdr's own tab bar replaces the channel's bar,
+  with its **+** menu (a terminal, Claude Code or another installed agent, or a new space) and its
+  **Files** and **Changes** panels. The tasks panel folds away and comes back when you select a
+  channel again. Herdr's keys work as usual, and picking a space with them (⌃1-9) shows it the same
+  way.
+
+  How Herdr's spaces work: a space is a place to work on one machine, holding tabs, and each tab holds
+  terminals side by side. A new space starts where the space you were in is (else in that machine's
+  home folder), and a space nobody named is called after the folder its first terminal is in now, so
+  `cd` into a project and the space takes its name. Spaces keep running when you switch away, and
+  Herdr's own layout (`layout.switch`) shows the same ones. A Claude Code session started in a space
+  isn't a channel task; `channels file <channel> <session>` files it into a channel.
+
+  <img src="docs/spaces.png" width="720" alt="The channels window showing a Herdr space: Herdr's spaces list under the channels with channels and acme-website, acme-website selected; Herdr's tab bar above the main area with a zsh tab, a Claude Code tab and the plus, Files and Changes buttons; the Claude Code tab shows a plain Claude Code session beside a shell with the repository's git log">
 
 ### Task events
 
