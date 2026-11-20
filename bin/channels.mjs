@@ -502,20 +502,21 @@ export function defaultDeps(home = homedir()) {
     open: process.env.CHANNELS_OPEN || 'open',
     run: runProgram,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    cloud: cloudDeps(home),
+    cloud: cloudDeps(home, projectsDir(home)),
   };
 }
 
 // Cloud sessions, through bin/cloud.mjs. CHANNELS_CLOUD_API and CHANNELS_CLOUD_CREDENTIALS point the list somewhere
 // else (a test server, a login file); they are not for everyday use.
-function cloudDeps(home) {
+function cloudDeps(home, projects) {
   const claude = process.env.CHANNELS_CLAUDE || 'claude';
   const opts = { home, ...(process.env.CHANNELS_CLOUD_API ? { api: process.env.CHANNELS_CLOUD_API } : {}), ...(process.env.CHANNELS_CLOUD_CREDENTIALS ? { credentialsFile: process.env.CHANNELS_CLOUD_CREDENTIALS } : {}) };
   return {
     list: () => listCloudSessions(opts),
     start: ({ brief, title, cwd }) => startCloudSession({ brief, title, cwd, claude, env: cleanEnv() }),
     send: ({ id, text }) => sendToCloudSession({ id, text, claude, env: cleanEnv(), cwd: home }),
-    probe: () => probeAttach({ claude, env: cleanEnv(), cwd: home }),
+    // In the projects folder, which Claude Code trusts: elsewhere it may stop at the trust dialog first.
+    probe: () => probeAttach({ claude, env: cleanEnv(), cwd: existsSync(projects) ? projects : home }),
   };
 }
 
