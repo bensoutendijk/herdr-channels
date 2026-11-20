@@ -19,6 +19,7 @@ const fs = require('fs'); const path = require('path');
 const home = ${JSON.stringify(home)};
 const args = process.argv.slice(2);
 const at = (f) => path.join(home, f);
+if (args[0] === '--version') { process.stdout.write('2.1.329 (Claude Code)\\n'); process.exit(0); }
 fs.appendFileSync(at('claude-calls.jsonl'), JSON.stringify({ args, cwd: process.cwd(), claudecode: process.env.CLAUDECODE ?? null, child: process.env.CLAUDE_CODE_CHILD_SESSION ?? null, keep: process.env.CLAUDE_CONFIG_DIR ?? null }) + '\\n');
 const n = fs.readFileSync(at('claude-calls.jsonl'), 'utf8').split('\\n').filter(Boolean).length;
 if (args[0] === 'agents') { process.stdout.write(fs.existsSync(at('agents.json')) ? fs.readFileSync(at('agents.json'), 'utf8') : '[]'); process.exit(0); }
@@ -127,7 +128,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, channels: [] });
+  assert.deepEqual(list(), { machine: HERE, remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, channels: [], updates: { build: null, claude: '2.1.329', asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
   assert.match(ok([]), /No channels yet/);
 });
 
@@ -524,6 +525,7 @@ test('chat launches claude with the prompt and its own hook; its listener wakes 
   assert.equal(launch.args[6], '--settings');
   const settings = JSON.parse(launch.args[7]);
   assert.equal(settings.disableAgentView, true);
+  assert.equal(settings.promptSuggestionEnabled, false, 'a suggestion would look like a draft to a refresh');
   const [{ hooks: [h] }] = settings.hooks.UserPromptSubmit;
   assert.equal(h.type, 'command');
   assert.ok(h.command.includes(`pending '${c.id}' --hook`), h.command);

@@ -143,9 +143,27 @@ cd ~/projects/herdr-channels && git pull && node install.mjs
 Pass the same options as the first install (for example `--projects ~/code`). Installing again also
 adds the routines timer to an installation that doesn't have it yet.
 
-A chat loads the task cards mod when it starts. A chat that was already running before the update
-has no cards until it starts again: type `/exit` in it, and it starts again in a few seconds on the
-same session, with its history.
+That is the whole update. Herdr reloads the mod when its files change. The installer stamps the new
+build and restarts every running chat on it, on the same session with its history: an idle chat at
+once, and a chat in the middle of a turn by itself within seconds of that turn ending. The
+installer's summary says which chats restarted and which wait. Nothing needs `/exit` by hand.
+
+Claude Code updates itself. A chat keeps running the version it started with, so when a newer one is
+installed, a **Refresh** row appears at the bottom of the sidebar, saying which version is new and
+how many chats run an older one. Clicking Refresh restarts the idle chats on it now and the rest as
+their turns end, and the row then says what it did. The row shows only while a chat is behind.
+
+<img src="docs/refresh-row.png" width="280" alt="The bottom of the channels sidebar: a row with a circular arrow, Claude Code 2.1.329, 2 chats run 2.1.328, and a Refresh button, above the studio, on this Mac footer">
+<img src="docs/refresh-done.png" width="280" alt="The same row after a click: Refreshed. Restarted #general on Claude Code 2.1.329. #research restarts when its turn ends.">
+
+A restart never interrupts a turn or loses a draft. A chat is restarted only while Claude Code
+reports it idle, herdr-core reports its terminal not working, and its prompt is empty; then its
+`claude` is stopped and the chat starts again by itself in the same terminal. A chat with a draft
+typed in its prompt waits until the draft is sent or cleared.
+
+Refresh applies what is installed; it doesn't pull this repository or run `claude update`. Tasks are
+never restarted: `channels send` restarts a task's process for each message, so a task runs the
+newest Claude Code from its next message on.
 
 ## Usage
 
@@ -493,6 +511,7 @@ channels routine add <channel> <name> --schedule <schedule> [--catchup <window>]
 channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>]
 channels routine rm|run|on|off <channel> <name>
 channels routine preview <schedule> [--json]
+channels refresh [--auto] [--json]
 channels tick
 ```
 
@@ -500,6 +519,12 @@ A catch-up window is a number of minutes or a length such as `15m`, `2h` or `1d`
 <channel> --bg` makes sure the chat runs in its herdr-core terminal and prints that terminal.
 `channels routine preview` shows a schedule in words with its next three runs, or what is wrong
 with it.
+
+`channels refresh` restarts the idle chats that run an older herdr-channels build or an older Claude
+Code than is installed, on the same session, and says what it did; a chat in the middle of a turn is
+restarted when the turn ends. With `--auto`, as the installer runs it, only chats behind
+the herdr-channels build are restarted. `channels list --json` reports what each running chat is
+behind on, under `updates`.
 
 `channels send` can only reach a background task that has finished its turn. It stops the idle
 session, waits for its process to exit, and resumes the same session with the message. If the

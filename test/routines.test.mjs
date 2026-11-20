@@ -137,6 +137,7 @@ const fs = require('fs'); const path = require('path');
 const home = ${JSON.stringify(home)};
 const args = process.argv.slice(2);
 if (args[0] === 'agents') { process.stdout.write('[]'); process.exit(0); }
+if (args[0] === '--version') { process.stdout.write('2.1.329 (Claude Code)\\n'); process.exit(0); }
 fs.appendFileSync(path.join(home, 'chat-launches.jsonl'), JSON.stringify({ args, dir: process.env.CHANNELS_DIR }) + '\\n');
 const want = Number(process.env.FAKE_WAIT_SENDS || 0);
 const sends = () => { const f = path.join(home, 'hc-sends.jsonl'); return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\\n').filter(Boolean).length : 0; };
