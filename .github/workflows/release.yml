@@ -1,0 +1,41 @@
+# Every push to main (a merged PR) cuts a release when its commits call for one: semantic-release reads the
+# Conventional Commit titles since the last tag (feat: a minor, fix: a patch, feat!: a major), tags vX.Y.Z, writes
+# CHANGELOG.md and publishes a GitHub Release with the notes. Installed Macs learn about it from GitHub Releases
+# (bin/release.mjs). semantic-release and its plugins are fetched here only: the repo itself has no dependencies.
+name: release
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: release
+  cancel-in-progress: false
+permissions:
+  contents: write # the tag, the CHANGELOG.md commit and the Release
+  issues: write
+  pull-requests: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test test/*.test.mjs
+      - name: semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: herdr-channels release
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: herdr-channels release
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: >-
+          npx --yes
+          -p semantic-release@25.0.9
+          -p @semantic-release/changelog@7.0.0
+          -p @semantic-release/git@11.0.1
+          -p conventional-changelog-conventionalcommits@9.3.1
+          semantic-release

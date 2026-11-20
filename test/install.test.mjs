@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cloneVersion } from '../bin/release.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const script = join(repo, 'install.mjs');
@@ -44,7 +45,7 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   const mod = join(appHome, 'mods', 'channels');
   assert.deepEqual(readdirSync(mod).sort(), ['.herdr-channels.json', 'backend.js', 'chats.js', 'config.js', 'emoji.js', 'icons', 'main.js', 'mod.json', 'needs.svg', 'panels.js', 'spaces.js', 'updates.js', 'viewer.py']);
   const config = loadConfig(join(mod, 'config.js'));
-  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels', layout: 'channels', command: wrapper, path: 'string', projects: join(home, 'projects'), by: 'sam' });
+  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels', layout: 'channels', command: wrapper, path: 'string', projects: join(home, 'projects'), by: 'sam', version: cloneVersion() });
   assert.ok(config.path.split(':').includes(join(home, '.local', 'bin')));
   assert.ok(existsSync(join(home, 'projects')));
   const layout = JSON.parse(readFileSync(join(appHome, 'layouts', 'channels.json'), 'utf8'));
@@ -55,6 +56,12 @@ test('a fresh install writes the command, copies the mod and layout, and selects
   assert.match(build.id, /^[0-9a-f]{12}$/);
   assert.equal(listed.updates.build.id, build.id);
   assert.match(out, /chats {4}Every chat is up to date\./);
+  // The version beside it, and the options an update installs with again (this install's, under the name it got).
+  assert.equal(build.version, cloneVersion());
+  assert.equal(listed.updates.release.current, cloneVersion());
+  const store = join(home, '.local', 'state', 'herdr-channels');
+  const recorded = JSON.parse(readFileSync(join(store, 'install.json'), 'utf8'));
+  assert.deepEqual(recorded.args, ['--app-home', appHome, '--bin', join(home, '.local', 'bin'), '--chat-mod', join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), '--store', store, '--projects', join(home, 'projects'), '--by', 'sam', '--name', 'channels', '--label', 'dev.herdr-channels.tick', '--no-timer']);
 });
 
 test('the build id changes with the code a chat runs and with the command\'s settings, not with the herdr mod', async () => {
@@ -241,7 +248,7 @@ test('a store on another machine: only the mod and its layout, beside a channels
   assert.equal(readFileSync(join(appHome, 'layouts', 'channels.json'), 'utf8'), '{"theirs":1}\n');
   const mod = join(appHome, 'mods', 'channels-hc');
   const config = loadConfig(join(mod, 'config.js'));
-  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels-hc', layout: 'channels-hc', command: ['hub', 'channels'], on: 'server', local: 'laptop', path: 'string', projects: '/srv/projects', by: 'me' });
+  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels-hc', layout: 'channels-hc', command: ['hub', 'channels'], on: 'server', local: 'laptop', path: 'string', projects: '/srv/projects', by: 'me', version: cloneVersion() });
   const layout = readFileSync(join(appHome, 'layouts', 'channels-hc.json'), 'utf8');
   assert.ok(layout.includes('"mod": "channels-hc"') && !layout.includes('"mod": "channels"'));
   // No command, cards mod or store here, and the layout isn't selected.

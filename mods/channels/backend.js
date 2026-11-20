@@ -71,13 +71,16 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - routines: `routine …`, and `routines` on each channel
 // - rename-task: `rename-task <task> <name>`
 // - refresh: `refresh --json`, and `updates` in the list
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
+// - update: `update --bg --json` installs the latest herdr-channels release, and `updates.release` in the list
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update"];
+// What this repo's command could do before it listed its features.
+const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
 // The features, from `list --json`: its `features` when it gives them. This repo's command from before it listed
 // them is known by its `remote_control` field, and had them all; any other command (a hub that lists none) has none.
 export function featuresOf(head) {
   if (Array.isArray(head?.features)) return head.features.filter((f) => typeof f === "string");
-  if (head && typeof head.remote_control === "boolean") return [...ALL_FEATURES];
+  if (head && typeof head.remote_control === "boolean") return [...UNLISTED];
   return [];
 }
 

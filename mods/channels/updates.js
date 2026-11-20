@@ -36,3 +36,22 @@ export function refreshRow(updates) {
   const waiting = chats.filter((x) => x.behind?.length);
   return { offer: false, title: "Updating", detail: restarts(waiting) };
 }
+
+// The release row, above the refresh row: a newer herdr-channels release than this Mac runs, from `updates.release`
+// (see bin/release.mjs), or an update running or just done. null when there is none; else { state, title, detail,
+// button, notes }: `state` says how to draw it (offer, running, failed, done), `button` is the button's word (Update,
+// Retry; null otherwise), and `notes` the release notes' link.
+export const DONE_MS = 60000; // how long "Updated to X" stays
+export function releaseRow(release, now = Date.now()) {
+  if (!release) return null;
+  const u = release.update;
+  if (u?.state === "done" && !release.available && now - Date.parse(u.at) < DONE_MS) return { state: "done", title: `Updated to ${u.to}`, detail: u.message?.replace(/^Updated to \S+\.\s*/, "") || "Chats restart once they are idle.", button: null, notes: release.url ?? null };
+  if (u?.state === "running") return { state: "running", title: `Updating to ${u.to ?? release.latest ?? "the latest release"}…`, detail: "Installing. Chats restart once they are idle.", button: null, notes: null };
+  if (!release.available) return null;
+  const notes = release.url ?? null;
+  if (u?.state === "failed" && (!u.to || u.to === release.latest)) return { state: "failed", title: `Update to ${release.latest} failed`, detail: u.message ?? "It stopped before it finished.", button: "Retry", notes };
+  return { state: "offer", title: `herdr-channels ${release.latest} available`, detail: release.current ? `This Mac runs ${release.current}.` : "This Mac runs a version from before releases.", button: "Update", notes };
+}
+
+// The installed version for the sidebar's footer: "v1.2.0", "v1.2.0+3.gabc1234"; null when it isn't known.
+export const versionLabel = (version) => (/^\d+\.\d+\.\d+/.test(`${version ?? ""}`) ? `v${version}` : null);
