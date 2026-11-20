@@ -9,6 +9,7 @@ type Entry = {
   text?: unknown
   card?: { state?: unknown; waiting?: unknown; message?: unknown; options?: unknown } | null
   remote?: unknown
+  cloud?: unknown
 }
 
 // A claude.ai/code session link, and nothing else, is one a card opens.
@@ -52,6 +53,7 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
       message: str(c.message),
       options: state === 'question' ? [...new Set(options)] : [],
       remote: remoteOf(e.remote),
+      cloud: e.cloud === true || task.startsWith('cloud/'),
     })
   }
   // What waits on the user first, then what finished; oldest first within each.

@@ -193,3 +193,26 @@ test('--uninstall removes the timer, the command and this repo\'s mod and layout
   assert.ok(existsSync(join(appHome, 'layouts', 'channels.json')));
   assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.someone.else.plist')));
 });
+
+test('cloud tasks are off unless asked for and never asked about; --cloud turns them on, an install with neither keeps it, --no-cloud turns them off', (t) => {
+  const { home, env, install } = setup(t);
+  const wrapper = join(home, '.local', 'bin', 'channels');
+  const listed = () => JSON.parse(spawnSync(wrapper, ['list', '--json'], { encoding: 'utf8', env: { ...env, CHANNELS_MACHINE: 'testmac' } }).stdout).cloud.on;
+  assert.match(install(), /cloud {4}off \(--cloud turns it on; see the README, "Cloud tasks"\)/);
+  assert.equal(listed(), false);
+  assert.doesNotMatch(readFileSync(wrapper, 'utf8'), /CHANNELS_CLOUD/);
+  assert.match(install('--cloud'), /cloud {4}on: channels start --cloud runs tasks at claude\.ai\/code[\s\S]*Cloud tasks are now on here[\s\S]*type \/exit in it[\s\S]*private API/);
+  assert.equal(listed(), true);
+  assert.match(readFileSync(wrapper, 'utf8'), /^export CHANNELS_CLOUD="\$\{CHANNELS_CLOUD:-1\}"$/m);
+  const again = install();
+  assert.match(again, /cloud {4}on/, 'an update keeps it');
+  assert.doesNotMatch(again, /Cloud tasks are now/);
+  assert.match(install('--dry-run', '--no-cloud'), /cloud {4}off/);
+  assert.equal(listed(), true, 'a dry run changes nothing');
+  assert.match(install('--no-cloud'), /Cloud tasks are now off/);
+  assert.equal(listed(), false);
+  // Independent of Remote Control, and Claude Code's own settings are never written.
+  assert.match(install('--cloud'), /remote {3}off/);
+  assert.equal(existsSync(join(home, '.claude', 'settings.json')), false);
+  assert.equal(existsSync(join(home, '.claude.json')), false);
+});
