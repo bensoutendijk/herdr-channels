@@ -129,38 +129,16 @@ test('a permission prompt offers Open only, which asks herdr to show the task', 
   await ui.unmount()
 })
 
-test('a finish is one quiet line: Dismiss takes it quietly, Tell chat submits the report and starts a turn', async ($, on) => {
-  const w = world(on, [finished], argv => (argv[2] === 'tell' ? { exitCode: 0, stdout: '[task report] #design · task "Write the release notes" finished.\n' } : { exitCode: 0 }))
-  await start($, on)
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /Write the release notes finished/ }))?.text).toContain('· 2m')
-  await ui.press({ key: `tell:${D}` })
-  expect(w.ran.map(r => r.argv)).toEqual([['/bin/channels', 'card', 'tell', D]])
-  expect(w.submitted).toEqual(['[task report] #design · task "Write the release notes" finished.'])
-  expect(await ui.find({ key: `tell:${D}` })).toBeUndefined()
-  await ui.unmount()
-})
-
-test('Dismiss runs channels card dismiss and starts no turn', async ($, on) => {
-  const w = world(on, [finished])
-  await start($, on)
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  await ui.press({ key: `dismiss:${D}` })
-  expect(w.ran.map(r => r.argv)).toEqual([['/bin/channels', 'card', 'dismiss', D]])
-  expect(w.submitted).toEqual([])
-  expect(await ui.find({ key: `dismiss:${D}` })).toBeUndefined()
-  await ui.unmount()
-})
-
-test('several stack, questions first; past four the rest are counted; the store emptying clears the band', async ($, on) => {
-  const more = [1, 2, 3].map(i => ({ ...finished, task: `testmac/eeee000${i}-0000-4000-8000-000000000000`, name: `Task ${i}` }))
-  const w = world(on, [finished, ...more, permission, question()])
+test('several stack, oldest first; past four the rest are counted; a finish draws no card; the store emptying clears the band', async ($, on) => {
+  const later = (i: number) => new Date(Date.parse(AT) + i * 1000).toISOString()
+  const more = [1, 2, 3, 4].map(i => ({ ...question(), task: `testmac/eeee000${i}-0000-4000-8000-000000000000`, name: `Task ${i}`, at: later(i) }))
+  const w = world(on, [finished, ...more, permission])
   await start($, on)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   const buttons = (await ui.findAll({ type: 'Button' })).map(b => b.key)
-  expect(buttons.indexOf(`open:${P}`)).toBeLessThan(buttons.indexOf(`dismiss:${D}`))
-  expect(buttons.indexOf(`send:${Q}`)).toBeLessThan(buttons.indexOf(`dismiss:${D}`))
-  expect(await ui.find({ type: 'Text', text: /\+2 more/ })).toBeDefined()
+  expect(buttons.indexOf(`open:${P}`)).toBeLessThan(buttons.indexOf('send:testmac/eeee0001-0000-4000-8000-000000000000'))
+  expect(buttons.some(b => `${b}`.endsWith(D))).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /\+1 more/ })).toBeDefined()
   await w.setInbox([])
   expect(await ui.find({ type: 'Button' })).toBeUndefined()
   await ui.unmount()
@@ -182,7 +160,7 @@ test('the store read into cards: an older entry without a card, other channels l
   expect(cardsOf('not json', CH)).toEqual([])
   const old = { task: P, name: 'Old', kind: 'needs', at: AT, text: 'it shows a prompt; it waits on: permission' }
   const got = cardsOf(JSON.stringify({ channels: [{ id: CH, inbox: [finished, old] }, { id: 'x', inbox: [question()] }] }), CH)
-  expect(got.map(c => [c.task, c.state])).toEqual([[P, 'prompt'], [D, 'done']])
+  expect(got.map(c => [c.task, c.state])).toEqual([[P, 'prompt']], 'a finish from before notices is passed over')
   expect(got[0]?.options).toEqual([])
 })
 
@@ -194,12 +172,11 @@ test('a question whose options are in the Select leaves their list out of its te
 
 test('a task with a claude.ai link gets Open on claude.ai on its card, which runs channels link --open; one without gets none', async ($, on) => {
   const url = 'https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv'
-  const w = world(on, [{ ...question(), remote: url }, { ...permission, remote: url }, { ...finished, remote: 'https://example.com/session_01AbCdEfGhIjKlMnOpQrStUv' }])
+  const w = world(on, [{ ...question(), remote: url }, { ...permission, remote: url }])
   await start($, on)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ key: `remote:${Q}` })).toBeDefined()
   expect(await ui.find({ key: `remote:${P}` })).toBeDefined()
-  expect(await ui.find({ key: `remote:${D}` })).toBeUndefined()
   await ui.press({ key: `remote:${Q}` })
   expect(w.ran).toEqual([{ argv: ['/bin/channels', 'link', Q, '--open'], stdin: undefined }])
   expect(w.submitted).toEqual([])
@@ -207,13 +184,13 @@ test('a task with a claude.ai link gets Open on claude.ai on its card, which run
   await ui.unmount()
 })
 
-test('a cloud task: its question card has no Answer, only Open, which opens it on claude.ai; its finish says what it did, with Open', async ($, on) => {
+test('a cloud task: its question card has no Answer, only Open, which opens it on claude.ai; its finish draws no card', async ($, on) => {
   const C = 'cloud/session_01AbCdEfGhIjKlMnOpQrStUv'
   const F = 'cloud/session_02ZyXwVuTsRqPoNmLkJiHgFe'
   const url = 'https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv'
   const asks = { task: C, name: 'Fix the footer', kind: 'needs', at: AT, text: '…', cloud: true, remote: url, card: { state: 'question', waiting: 'Which page?', message: 'Should /press go, or point to the media kit?', options: [] } }
   const doneCloud = { task: F, name: 'Bump the deps', kind: 'done', at: AT, text: '…', cloud: true, remote: url, card: { state: 'done', message: 'Bumped 14 packages, PR #31 opened' } }
-  expect(cardsOf(JSON.stringify({ channels: [{ id: CH, inbox: [asks, doneCloud] }] }), CH).map(c => c.cloud)).toEqual([true, true])
+  expect(cardsOf(JSON.stringify({ channels: [{ id: CH, inbox: [asks, doneCloud] }] }), CH).map(c => c.cloud)).toEqual([true])
   const w = world(on, [asks, doneCloud])
   await start($, on)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -222,13 +199,9 @@ test('a cloud task: its question card has no Answer, only Open, which opens it o
   expect(await ui.find({ key: `pick:${C}` })).toBeUndefined()
   expect(await ui.find({ key: `remote:${C}` })).toBeUndefined()
   expect(await ui.find({ key: `remote:${F}` })).toBeUndefined()
-  expect(await ui.find({ key: `tell:${F}` })).toBeDefined()
+  expect(await ui.find({ key: `open:${F}` })).toBeUndefined()
   await ui.press({ key: `open:${C}` })
-  await ui.press({ key: `open:${F}` })
-  expect(w.ran).toEqual([
-    { argv: ['/bin/channels', 'link', C, '--open'], stdin: undefined },
-    { argv: ['/bin/channels', 'link', F, '--open'], stdin: undefined },
-  ])
+  expect(w.ran).toEqual([{ argv: ['/bin/channels', 'link', C, '--open'], stdin: undefined }])
   expect(w.submitted).toEqual([])
   await ui.unmount()
 })

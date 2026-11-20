@@ -259,20 +259,44 @@ newest Claude Code from its next message on.
 The chat's tab runs `channels chat <channel>`. This starts the chat's Claude Code session and a small
 listener alongside it. Every 3 seconds the listener reads Claude Code's records of the channel's
 tasks (`~/.claude/jobs` and `~/.claude/sessions`). A task finishing, or stopping to ask a question
-or show a permission prompt, is an *event*. Each event is delivered at one of three levels:
+or show a permission prompt, is an *event*.
+
+**A task that finished** reaches the chat as a one-line notice, the way a subagent's result reaches
+the session that started it:
+
+```
+← tasks: Task "Draft the launch notes" (studio/f131909d-…) finished: Drafted NOTES.md with the launch…
+⏺ The "Draft the launch notes" task is done: the checklist line is in acme-website/NOTES.md.
+```
+
+Claude Code holds the notice until the chat is idle, so it never cuts into an answer. Then the chat
+takes a short turn: it says what matters in a line or two, ties it to what you were talking about
+when it bears on it, and otherwise just acknowledges it. The task's full report stays in
+`channels read <session>`. A finish gets no card and no dot; the task shows as ready for review in
+the tasks panel.
+
+The notice travels through a Claude Code channel (an MCP server that pushes messages into a session): `channels chat`
+starts the chat with `--mcp-config` for `channels notices <channel id>`, a small MCP server that
+pushes each queued notice. Claude Code loads a channel server of your own only with
+`--dangerously-load-development-channels`, and asks to confirm that at every start; the chat's
+listener answers it. The listener then checks the chat's transcript for each notice it pushed. One
+that hasn't arrived a minute later, once the chat is idle (an older Claude Code, or an account where
+an administrator keeps channels off), is typed into the chat as a `[task notice]` line instead.
+
+**A task that asks something**, or shows a permission prompt, is delivered at one of three levels:
 
 | Level | When | What happens |
 |---|---|---|
-| **panel** | Every event | The task gets a dot in the tasks panel until you open it there. |
-| **ride-along** | The default, for finishes and questions | The chat takes no turn. The event shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
-| **wake** | Only when a registration exists for that task | The listener pastes a `[task report]` (with the task's final message in full) or a `[task question]` into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. |
+| **panel** | Every question | The task gets a dot in the tasks panel until you open it there. |
+| **ride-along** | The default | The chat takes no turn. The question shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
+| **wake** | Only when a registration exists for that task | The listener pastes a `[task question]` into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. |
 
 Ride-along uses a Claude Code `UserPromptSubmit` hook. `channels chat` passes it to the chat with
 `--settings`, so it applies to that session only and your own settings files are not touched. The
 hook runs `channels pending <channel> --hook`, which prints the waiting events as additional
 context and marks them delivered. A task's newer event replaces its older one while it waits.
-A delivered finish leaves the store; a delivered question stays as a card until it is answered,
-dismissed or the task moves on, but isn't attached again.
+A delivered question stays as a card until it is answered, dismissed or the task moves on, but
+isn't attached again.
 
 A registration asks for the chat to be woken by a task's next matching event:
 
@@ -282,14 +306,15 @@ channels start <channel> --wake-on finish|question|any <brief | ->
 channels send <session> --wake-on finish|question|any <text | ->
 ```
 
-`finish` matches a task finishing, `question` a question or permission prompt, and `any` either.
+`question` matches a question or permission prompt, `finish` a task finishing, and `any` either.
+A finish always reaches the chat as a notice; a registration for it adds its `--why` to the notice.
 A registration is used up when it fires; `--wake-on none` cancels one. `--why` is shown in the
 wake message (for example, the words the user used to ask to be told). The chat registers when it
 is waiting on a task's answer in order to report back, or when you ask it to tell you about a task.
 A message `send` delivers to a copy of the task carries the registration to the copy.
 
-An event identical to the last one recorded for its task is dropped at every level: no dot, no
-ride-along, no wake, and a registration keeps waiting. That covers a task that did more work but
+An event identical to the last one recorded for its task is dropped at every level: no notice, no
+dot, no ride-along, no wake, and a registration keeps waiting. That covers a task that did more work but
 ended with the same final message, the same question asked again, and a task stopped while it
 waited on a question (as `send` does). The store records what each task was last seen as, so
 events that happen while the chat is closed are delivered when it next opens, and none arrives twice.
@@ -303,16 +328,16 @@ it, and `channels seen <session>` clears a task's dot.
 
 ### Task cards
 
-Every event that rides along also shows as a card in the chat, in the band directly above its prompt.
-Acting on a card never starts a turn of the chat, except **Tell chat**:
+Every question that rides along also shows as a card in the chat, in the band directly above its
+prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
+the chat:
 
-<img src="docs/task-cards.png" width="540" alt="The #website chat with three cards above its prompt: Build the site waits on a permission prompt, with Open; Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open; and a quiet line saying Write the release notes finished, with Dismiss and Tell chat">
+<img src="docs/task-cards.png" width="540" alt="TASK_CARDS_ALT">
 
 | Card | Shows | Buttons |
 |---|---|---|
 | **A task asks something** (it ended its turn with a question) | The task's name and its question. If the question ends with a short list of choices (`1. Teal`, `- Coral`), they are in a Select, with *Something else…* for your own words; otherwise there is a text field. | **Send** gives the task your answer (`channels send <session> -`), and it carries on. **Open** shows the task in the tasks panel, as clicking it there does. |
 | **A task waits on a permission prompt** (or another dialog in its own session) | The task's name and what the prompt asks | **Open**, to answer it in the task's view |
-| **A task finished** | One quiet line: `✓ <name> finished` | **Dismiss** drops it. **Tell chat** submits the task's report, whole, to the chat, which starts a turn. |
 
 To reach a card from the keyboard, press `ctrl+x tab` to focus the band, `tab` to move between its
 controls, and `enter` to press one; `esc` goes back to the prompt. Clicking works too. On a
@@ -336,8 +361,6 @@ the channel's waiting events; its buttons run `channels`:
 ```
 channels send <session> -          Send
 channels open <session>            Open: herdr's channels mod shows the task (herdr-app do channels.open-task)
-channels card dismiss <session>    Dismiss
-channels card tell <session>       Tell chat: prints the report the mod submits to the chat
 ```
 
 ## Remote Control
@@ -563,6 +586,7 @@ channels dismiss <session> [--by <who>]
 channels listen <channel> --once
 channels pending <channel> [--hook]
 channels card dismiss|tell <session>
+channels notices <channel id>
 channels open <session>
 channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]

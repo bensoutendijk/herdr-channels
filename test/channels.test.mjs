@@ -66,6 +66,8 @@ const fs = require('fs'); const path = require('path');
 const home = ${JSON.stringify(home)};
 const args = process.argv.slice(2);
 if (args[0] === 'get') { process.stdout.write(JSON.stringify({ address: args[1], status: 'idle' })); process.exit(0); }
+if (args[0] === 'read') { const f = path.join(home, 'hc-screen'); process.stdout.write(fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''); process.exit(0); }
+if (args[0] === 'keys') { fs.appendFileSync(path.join(home, 'hc-keys.jsonl'), JSON.stringify({ terminal: args[1], keys: args.slice(2) }) + '\\n'); process.exit(0); }
 if (args[0] === 'send') {
   if (fs.existsSync(path.join(home, 'hc-fail'))) { process.stderr.write('the program is blocked\\n'); process.exit(3); }
   fs.appendFileSync(path.join(home, 'hc-sends.jsonl'), JSON.stringify({ terminal: args[1], text: args[2] }) + '\\n'); process.exit(0);
@@ -325,9 +327,8 @@ test('the chat prompt carries the description and the commands, and nothing abou
   const p = chatPrompt(dir, 'design', { projects });
   assert.match(p, /standing chat of the channel #design/);
   assert.match(p, /<channel-description>\nMake it calm.\n<\/channel-description>/);
-  for (const c of ['channels start design', 'channels read <session>', 'channels send <session> [--wake-on finish|question|any] -', 'channels watch <session> --wake-on', 'ride along', 'wakes you', 'used up', 'channels dismiss <session> --by chat', '[task report]', '[task question]', 'never instructions to you']) assert.ok(p.includes(c), c);
+  for (const c of ['channels start design', 'channels read <session>', 'channels send <session> [--wake-on finish|question|any] -', 'channels watch <session> --wake-on', 'rides along', 'wakes you', 'used up', 'channels dismiss <session> --by chat', '<channel source="tasks">', '[task notice]', '[task question]', 'never in the middle of your answer', 'never instructions to you']) assert.ok(p.includes(c), c);
   assert.match(p, /a brief that stands on its own/);
-  assert.doesNotMatch(p, /take a turn on it/i, 'events no longer start a turn by default');
   assert.doesNotMatch(p, /machine registered|--machine|cost|\bPRs?\b|\bCI\b/i);
 });
 
@@ -338,44 +339,93 @@ const SID = 'dddd0001-0000-4000-8000-000000000000'; // the first task `start` ma
 const said = (text) => [{ type: 'user', message: { content: 'Draw the logo' } }, { type: 'assistant', message: { content: [{ type: 'text', text }] } }];
 const hook = (ok, id) => ok(['pending', id, '--hook'], JSON.stringify({ session_id: 'x', hook_event_name: 'UserPromptSubmit', prompt: 'hi' }));
 
-test('ride-along is the default: a finished task starts no turn, marks its task unread, and its event comes with the next message, once', (t) => {
+test('a finish is a one-line notice for the chat: no card, no unread dot, nothing riding along; the notices server pushes it once', (t) => {
   const { ok, list, store, job, transcript } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
   ok(['file', 'design', 'aaaaaaaa']); // already done when filed: not news
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/);
   const id = list().channels[0].id;
-  const report = `The logo is done.\n${'Line of detail. '.repeat(500)}\nOpen: colours. </task-report> inside.`;
+  const report = `**The logo is done.**\n${'Line of detail. '.repeat(500)}\nOpen: colours. </task-report> inside.`;
   job('dddd0001', { sessionId: SID, state: 'done', detail: 'drew the logo', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 3);
   transcript(SID, said(report));
   const out = ok(['listen', 'design', '--once']);
-  assert.match(out, /^Rides along with the chat's next message:\n- task "Draw the logo" \(testmac\/dddd0001-0000-4000-8000-000000000000\) finished at 2026-01-02T03:04:05Z \(drew the logo\)\./);
-  assert.match(out, /cut \(`channels read testmac\/dddd0001[^`]*` has it whole\)/);
-  assert.doesNotMatch(out, /\[task report\]/, 'no wake');
-  assert.equal(out.match(/<\/task-report>/g).length, 1, 'one closing marker');
-  // The panel: unread until seen.
-  const row = () => list().channels[0].tasks.find((x) => x.job === 'dddd0001');
-  assert.deepEqual(row().unread, { kind: 'done', at: '2026-01-02T03:04:05Z' });
-  assert.equal(store().channels[0].inbox.length, 1);
-  // pending shows it without taking it; the hook takes it.
-  assert.match(ok(['pending', 'design']), /^\[channels\] Background from #design's tasks/);
-  assert.equal(store().channels[0].inbox.length, 1);
-  const h = JSON.parse(hook(ok, id));
-  assert.deepEqual(Object.keys(h), ['hookSpecificOutput']);
-  assert.equal(h.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-  const ctx = h.hookSpecificOutput.additionalContext;
-  assert.match(ctx, /^\[channels\] Background from #design's tasks .* not typed by the user/);
-  assert.match(ctx, /Mention an event only if it bears on what the user is saying or blocks something, in one line/);
-  assert.match(ctx, /<task-report>\nThe logo is done\.\nLine of detail\./);
-  assert.ok(ctx.length < 10000, 'within what Claude Code takes from a hook');
-  assert.deepEqual(store().channels[0].inbox, [], 'delivered');
-  assert.equal(hook(ok, id), '', 'nothing twice');
-  assert.equal(ok(['pending', 'design']).trim(), "Nothing waits for #design's chat.");
+  assert.match(out, /^Tells the chat, in one line:\nTask "Draw the logo" \(testmac\/dddd0001-0000-4000-8000-000000000000\) finished: The logo is done\. Line of detail\./);
+  const [n] = store().channels[0].notices;
+  assert.ok(!n.text.includes('\n') && n.text.length < 300, 'one short line');
+  assert.match(n.text, /…$/, 'cut');
+  assert.deepEqual([n.task, n.pushed_at], [`${HERE}/${SID}`, null]);
+  assert.match(n.id, /^n-[0-9a-f]{8}$/);
+  // No card, no dot, nothing for the next message.
+  assert.deepEqual(store().channels[0].inbox ?? [], []);
+  assert.equal(list().channels[0].tasks.find((x) => x.job === 'dddd0001').unread, null);
+  assert.equal(hook(ok, id), '');
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/, 'once');
-  assert.match(ok(['seen', SID]), /Marked .* seen/);
-  assert.equal(row().unread, null);
-  // A hook for a channel that isn't there prints nothing and never fails the message.
-  assert.equal(hook(ok, 'ch_nope'), '');
+});
+
+test('the notices server: a Claude Code channel that pushes each queued notice once, after initialize', async (t) => {
+  const { ok, dir, store, job, transcript, list } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
+  transcript(SID, said('Logo drawn.'));
+  ok(['listen', 'design', '--once']);
+  const id = list().channels[0].id;
+  process.env.CHANNELS_MACHINE = HERE;
+  const { noticeServer, NOTICE_INSTRUCTIONS } = await import('../bin/channels.mjs');
+  const { PassThrough } = await import('node:stream');
+  const input = new PassThrough();
+  const sent = [];
+  const output = { write: (line) => { for (const l of `${line}`.split('\n').filter(Boolean)) sent.push(JSON.parse(l)); } };
+  const server = noticeServer({ dir, channelId: id, input, output, pollMs: 20 });
+  t.after(() => server.stop());
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } })}\n`);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(sent[0].result.capabilities, { tools: {}, experimental: { 'claude/channel': {} } });
+  assert.equal(sent[0].result.instructions, NOTICE_INSTRUCTIONS);
+  assert.equal(sent.length, 1, 'nothing pushed before initialized');
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`);
+  await new Promise((r) => setTimeout(r, 120));
+  const pushes = sent.filter((m) => m.method === 'notifications/claude/channel');
+  assert.equal(pushes.length, 1, 'once');
+  const [n] = store().channels[0].notices;
+  assert.deepEqual(pushes[0].params, { content: n.text, meta: { notice: n.id, task: `${HERE}/${SID}` } });
+  assert.ok(n.pushed_at);
+  assert.deepEqual(sent.find((m) => m.id === 2).result, { tools: [] });
+});
+
+test('a notice the chat\'s transcript shows is settled; one it never got is typed in once the chat is idle', async (t) => {
+  const { ok, dir, home, store, job, transcript, list } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  ok(['start', 'design', 'Write the tagline']);
+  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
+  transcript(SID, said('Logo drawn.'));
+  job('dddd0002', { sessionId: 'dddd0002-0000-4000-8000-000000000000', state: 'done', name: 'Write the tagline' }, 2);
+  ok(['listen', 'design', '--once']);
+  process.env.CHANNELS_MACHINE = HERE;
+  const { settleNotices, takeNotices, NOTICE, updateStore } = await import('../bin/channels.mjs');
+  const c = list().channels[0];
+  const chatId = 'cccc0000-0000-4000-8000-000000000000';
+  updateStore(dir, (s) => { s.channels[0].chat = { machine: HERE, session_id: chatId }; });
+  const [a, b] = store().channels[0].notices;
+  takeNotices(dir, c.id); // both pushed now
+  // The chat got the first: Claude Code recorded it, with its id.
+  transcript(chatId, [{ type: 'user', message: { content: `<channel source="tasks" notice="${a.id}" task="${a.task}">\n${a.text}\n</channel>` } }]);
+  const typed = [];
+  const deliver = async (text) => { typed.push(text); return true; };
+  let idle = false;
+  const now = Date.now() + NOTICE.confirmMs + 1000;
+  let r = await settleNotices({ dir, home, channelId: c.id, idle: async () => idle, deliver, now });
+  assert.deepEqual(r, [{ id: a.id, how: 'confirmed' }]);
+  assert.deepEqual(typed, [], 'the other waits while the chat is busy');
+  idle = true;
+  r = await settleNotices({ dir, home, channelId: c.id, idle: async () => idle, deliver, now: Date.now() + 1000 });
+  assert.deepEqual(r, [], 'and while it may still arrive');
+  r = await settleNotices({ dir, home, channelId: c.id, idle: async () => idle, deliver, now });
+  assert.deepEqual(r, [{ id: b.id, how: 'typed' }]);
+  assert.deepEqual(typed, [`[task notice] ${b.text}`]);
+  assert.deepEqual(store().channels[0].notices, []);
 });
 
 test('an unregistered question rides along; a task\'s newer event replaces its older one in the inbox', (t) => {
@@ -398,7 +448,7 @@ test('an unregistered question rides along; a task\'s newer event replaces its o
   assert.doesNotMatch(ctx, /which colour\?\./);
 });
 
-test('a registration wakes the chat once, whole, saying why, and is used up; one that doesn\'t match leaves the event riding along', (t) => {
+test('a registration wakes the chat once on a question, saying why, and is used up; on a finish it adds its reason to the notice', (t) => {
   const { ok, run, list, store, job, transcript } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
@@ -411,20 +461,16 @@ test('a registration wakes the chat once, whole, saying why, and is used up; one
   job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'round or square?', name: 'Draw the logo' }, 2);
   assert.match(ok(['listen', 'design', '--once']), /^Rides along/);
   assert.equal(store().channels[0].tasks[0].wake.on, 'finish');
-  // The finish wakes the chat, with the whole message, and takes the task's waiting event with it.
-  const report = `Logo drawn.\n${'Line of detail. '.repeat(5000)}`;
-  transcript(SID, said(report));
+  // The finish is a notice that says why, uses the registration up, and takes the task's waiting question with it.
+  transcript(SID, said('Logo drawn.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 4);
-  const w = ok(['listen', 'design', '--once']);
-  assert.match(w, /^Wakes the chat with:\n\[task report\] #design · task "Draw the logo" \(testmac\/dddd0001[^)]*\) finished\.\n.*\nWhy you're woken: the user asked to be told when the logo is done\. That registration is now used up\./);
-  assert.ok(w.includes(report.trim()), 'a wake carries the whole message');
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\nTask "Draw the logo" \(testmac\/dddd0001[^)]*\) finished: Logo drawn\. \(you asked to hear: the user asked to be told when the logo is done\)/);
   assert.equal(store().channels[0].tasks[0].wake, null, 'used up');
   assert.deepEqual(store().channels[0].inbox, []);
-  assert.equal(list().channels[0].tasks[0].unread.kind, 'done', 'the panel shows it too');
-  // The next finish rides along.
+  // The next finish is a plain notice.
   transcript(SID, said('Redrawn.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 6);
-  assert.match(ok(['listen', 'design', '--once']), /^Rides along[\s\S]*Redrawn\./);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\n.*finished: Redrawn\.$/m);
   // question and any; none cancels.
   ok(['watch', SID, '--wake-on', 'question']);
   transcript(SID, said('Bigger?'));
@@ -434,7 +480,7 @@ test('a registration wakes the chat once, whole, saying why, and is used up; one
   assert.match(ok(['watch', SID, '--wake-on', 'none']), /won't be woken/);
   transcript(SID, said('Bigger it is.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 8);
-  assert.match(ok(['listen', 'design', '--once']), /^Rides along/);
+  assert.doesNotMatch(ok(['listen', 'design', '--once']), /you asked to hear/);
 });
 
 test('start --wake-on and send --wake-on register on the task, and on a copy Claude Code starts in its place', (t) => {
@@ -444,7 +490,7 @@ test('start --wake-on and send --wake-on register on the task, and on a copy Cla
   assert.deepEqual([store().channels[0].tasks[0].wake.on, store().channels[0].tasks[0].wake.why], ['any', 'you started it with --wake-on any']);
   transcript(SID, said('Done.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
-  assert.match(ok(['listen', 'design', '--once']), /^Wakes the chat with:\n\[task report\][\s\S]*Why you're woken: you started it with --wake-on any\./);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\n.*finished: Done\. \(you asked to hear: you started it with --wake-on any\)/);
   ok(['file', 'design', 'aaaaaaaa']);
   live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
   assert.match(ok(['send', 'aaaaaaaa', '--wake-on', 'finish', 'Also', 'the', 'tax']), /It continues with this as its next message\. The chat is woken when it finishes\./);
@@ -462,14 +508,14 @@ test('dedup: an event identical to the last one recorded for its task is dropped
   ok(['start', 'design', 'Draw the logo']);
   transcript(SID, said('Logo drawn.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
-  assert.match(ok(['listen', 'design', '--once']), /^Rides along/);
-  hook(ok, list().channels[0].id);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat/);
   ok(['seen', SID]);
   ok(['watch', SID, '--wake-on', 'any']);
-  // More work, the same last message: a repeat. No wake, no inbox, no unread, and the registration waits.
+  // More work, the same last message: a repeat. No notice, no inbox, no unread, and the registration waits.
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 5);
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/);
-  assert.deepEqual(store().channels[0].inbox, []);
+  assert.deepEqual(store().channels[0].inbox ?? [], []);
+  assert.equal(store().channels[0].notices.length, 1, 'only the first');
   assert.equal(list().channels[0].tasks[0].unread, null);
   assert.equal(store().channels[0].tasks[0].wake.on, 'any');
   // The same question twice, with work between: the second is a repeat.
@@ -492,7 +538,7 @@ test('dedup: an event identical to the last one recorded for its task is dropped
   // New words are news again.
   transcript(SID, said('Blue, then.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 10);
-  assert.match(ok(['listen', 'design', '--once']), /^Wakes the chat with:[\s\S]*Blue, then\./);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\n.*finished: Blue, then\. \(you asked to hear/);
   // Dismissed: no events.
   ok(['dismiss', SID]);
   transcript(SID, said('More.'));
@@ -500,17 +546,19 @@ test('dedup: an event identical to the last one recorded for its task is dropped
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/);
 });
 
-test('chat launches claude with the prompt and its own hook; its listener wakes it only on a registration, in its own terminal', (t) => {
-  const { home, ok, run, list, lines, job, transcript, projects, dir } = setup(t);
+test('chat launches claude with the prompt, its own hook and its notices server; its listener confirms the channel and types only registered questions', (t) => {
+  const { home, ok, run, list, lines, job, transcript, projects, dir, store, live } = setup(t);
   ok(['create', 'design', '--description', 'Calm.']);
   ok(['start', 'design', 'Draw the logo']);
-  ok(['start', 'design', '--wake-on', 'finish', 'Write the tagline']); // dddd0002
+  ok(['start', 'design', '--wake-on', 'question', 'Write the tagline']); // dddd0002
   const sid2 = 'dddd0002-0000-4000-8000-000000000000';
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
   transcript(SID, said('Logo drawn. Open: colours.'));
-  job('dddd0002', { sessionId: sid2, state: 'done', name: 'Write the tagline' }, 2);
+  job('dddd0002', { sessionId: sid2, state: 'blocked', needs: 'calm or bold?', name: 'Write the tagline' }, 2);
   mkdirSync(join(home, '.claude', 'projects', '-y'), { recursive: true });
-  writeFileSync(join(home, '.claude', 'projects', '-y', `${sid2}.jsonl`), said('Tagline: calm by design.').map((e) => JSON.stringify(e)).join('\n'));
+  writeFileSync(join(home, '.claude', 'projects', '-y', `${sid2}.jsonl`), said('Calm or bold?').map((e) => JSON.stringify(e)).join('\n'));
+  // Claude Code asks to confirm the development channel at start: the listener answers it.
+  writeFileSync(join(home, 'hc-screen'), '  WARNING: Loading development channels\n  Channels: server:tasks\n  ❯ 1. I am using this for local development\n    2. Exit\n');
   const bin = join(home, 'cmd');
   const r = run(['chat', 'design'], '', { HC_TERMINAL_ID: 't42', FAKE_WAIT_SENDS: '1', CHANNELS_BIN: join(bin, 'channels') });
   assert.equal(r.status, 0, r.stderr);
@@ -530,16 +578,20 @@ test('chat launches claude with the prompt and its own hook; its listener wakes 
   assert.equal(h.type, 'command');
   assert.ok(h.command.includes(`pending '${c.id}' --hook`), h.command);
   // The task cards mod, for this session only, told which channel it draws and how to run channels.
-  assert.deepEqual(launch.args.slice(8), ['--plugin-dir', fileURLToPath(new URL('../mods/claude', import.meta.url))]);
+  assert.deepEqual(launch.args.slice(8, 10), ['--plugin-dir', fileURLToPath(new URL('../mods/claude', import.meta.url))]);
   assert.deepEqual([launch.channel, JSON.parse(launch.argv)], [c.id, [join(bin, 'channels')]]);
-  // One wake: the registered task. The other rides along, and the hook, run as Claude Code runs it, attaches it.
+  // The notices server: this script's `notices <channel id>` under this node, and the channel flag for it.
+  assert.equal(launch.args[10], '--mcp-config');
+  const { tasks } = JSON.parse(launch.args[11]).mcpServers;
+  assert.deepEqual([tasks.command, tasks.args.slice(1), tasks.env.CHANNELS_DIR], [process.execPath, ['notices', c.id], dir]);
+  assert.deepEqual(launch.args.slice(12), ['--dangerously-load-development-channels', 'server:tasks']);
+  assert.deepEqual(lines('hc-keys.jsonl'), [{ terminal: 't42', keys: ['enter'] }], 'confirmed once');
+  // One wake: the registered question. The finish waits as a notice for the server.
   const sends = lines('hc-sends.jsonl');
   assert.equal(sends.length, 1);
   assert.equal(sends[0].terminal, 't42');
-  assert.match(sends[0].text, /^\[task report\] #design · task "Write the tagline"[\s\S]*Why you're woken: you started it with --wake-on finish\.[\s\S]*<task-report>\nTagline: calm by design\.\n<\/task-report>/);
-  const ran = spawnSync('sh', ['-c', h.command], { encoding: 'utf8', input: '{"prompt":"hi"}', env: { PATH: process.env.PATH, HOME: home, CHANNELS_MACHINE: HERE } });
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.match(JSON.parse(ran.stdout).hookSpecificOutput.additionalContext, /task "Draw the logo"[\s\S]*Logo drawn\. Open: colours\./);
+  assert.match(sends[0].text, /^\[task question\] #design · task "Write the tagline"[\s\S]*Why you're woken: you started it with --wake-on question\./);
+  assert.match(store().channels[0].notices[0].text, /Task "Draw the logo" .* finished: Logo drawn\. Open: colours\./);
   // The next launch resumes the same session once it has a transcript, and has nothing new to say.
   transcript(c.chat.session_id, [{ type: 'user', message: { content: 'hello' } }]);
   assert.equal(run(['chat', 'design'], '', { HC_TERMINAL_ID: 't42', FAKE_WAIT_SENDS: '1' }).status, 0);
@@ -552,22 +604,20 @@ test('chat launches claude with the prompt and its own hook; its listener wakes 
 test('a wake the chat can\'t take now is kept, with its registration, and arrives on a later look', (t) => {
   const { home, ok, run, lines, store, job, transcript } = setup(t);
   ok(['create', 'design']);
-  ok(['start', 'design', '--wake-on', 'finish', 'Draw the logo']);
-  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
-  transcript(SID, said('Logo drawn.'));
+  ok(['start', 'design', '--wake-on', 'question', 'Draw the logo']);
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'round or square?', name: 'Draw the logo' }, 2);
+  transcript(SID, said('Round or square?'));
   writeFileSync(join(home, 'hc-fail'), '');
   assert.equal(run(['chat', 'design'], '', { HC_TERMINAL_ID: 't42', FAKE_WAIT_SENDS: '0' }).status, 0);
   assert.equal(lines('hc-sends.jsonl').length, 0);
-  assert.equal(store().channels[0].tasks[0].wake.on, 'finish');
+  assert.equal(store().channels[0].tasks[0].wake.on, 'question');
   rmSync(join(home, 'hc-fail'));
   assert.equal(run(['chat', 'design'], '', { HC_TERMINAL_ID: 't42', FAKE_WAIT_SENDS: '1' }).status, 0);
-  assert.match(lines('hc-sends.jsonl')[0].text, /Logo drawn\./);
+  assert.match(lines('hc-sends.jsonl')[0].text, /Round or square\?/);
   assert.equal(store().channels[0].tasks[0].wake, null);
 });
 
-// ---------- task cards: what the chat's cards mod reads and runs ----------
-
-test('a waiting event carries its card: a question with the options its message lists, a prompt, a finish', (t) => {
+test('a waiting event carries its card: a question with the options its message lists, a prompt; a finish has none', (t) => {
   const { ok, store, job, transcript, live } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
@@ -585,7 +635,7 @@ test('a waiting event carries its card: a question with the options its message 
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 4);
   live('ffffffff-0000-4000-8000-000000000000', {}); // the task's own process record is gone
   ok(['listen', 'design', '--once']);
-  assert.deepEqual(store().channels[0].inbox.map((e) => [e.kind, e.card.state, e.card.message]), [['done', 'done', 'Logo drawn.']]);
+  assert.deepEqual(store().channels[0].inbox, [], 'the prompt\'s card goes with the finish, and the finish brings none');
 });
 
 test('options: only a short list at the end of the message counts', async () => {
@@ -617,24 +667,24 @@ test('a question stays a card after it rides along, marked delivered, and goes o
   assert.deepEqual(store().channels[0].inbox, []);
 });
 
-test('card dismiss takes a card quietly; card tell takes it and prints the whole report for the chat', (t) => {
+test('card dismiss takes a card quietly; card tell takes it and prints the whole question for the chat', (t) => {
   const { ok, run, list, store, job, transcript } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
-  const report = `Logo drawn.\n${'Line of detail. '.repeat(400)}`;
-  transcript(SID, said(report));
-  job('dddd0001', { sessionId: SID, state: 'done', detail: 'drew it', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 2);
+  const ask = `Which colour?\n${'Line of detail. '.repeat(400)}`;
+  transcript(SID, said(ask));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 2);
   ok(['listen', 'design', '--once']);
-  assert.equal(list().channels[0].tasks[0].unread.kind, 'done');
+  assert.equal(list().channels[0].tasks[0].unread.kind, 'needs');
   const told = ok(['card', 'tell', SID]);
-  assert.match(told, /^\[task report\] #design · task "Draw the logo" \(testmac\/dddd0001[^)]*\) finished\.\n/);
+  assert.match(told, /^\[task question\] #design · task "Draw the logo" \(testmac\/dddd0001[^)]*\) is waiting on the user\.\n/);
   assert.match(told, /The user pressed Tell chat on its card above the prompt/);
-  assert.ok(told.includes(report.trim()), 'whole, not cut as a ride-along is');
+  assert.ok(told.includes(ask.trim()), 'whole, not cut as a ride-along is');
   assert.deepEqual(store().channels[0].inbox, [], 'it won\'t ride along too');
   assert.equal(list().channels[0].tasks[0].unread, null, 'seen');
   assert.equal(hook(ok, list().channels[0].id), '');
-  transcript(SID, said('Redrawn.'));
-  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 3);
+  transcript(SID, said('Which shade, then?'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which shade?', name: 'Draw the logo' }, 3);
   ok(['listen', 'design', '--once']);
   assert.match(ok(['card', 'dismiss', SID]), /Dismissed testmac\/dddd0001\S*'s card in #design\./);
   assert.deepEqual(store().channels[0].inbox, []);

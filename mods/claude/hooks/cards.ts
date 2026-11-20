@@ -32,17 +32,11 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
   const out: Card[] = []
   for (const e of inbox) {
     const task = str(e?.task)
-    if (!task || (e.kind !== 'done' && e.kind !== 'needs')) continue
+    // A finish reaches the chat as a notice, not a card: an entry from before that is passed over.
+    if (!task || e.kind !== 'needs') continue
     const c = e.card ?? {}
     const text = str(e.text) ?? ''
-    const state =
-      c.state === 'question' || c.state === 'prompt' || c.state === 'done'
-        ? c.state
-        : e.kind === 'done'
-          ? 'done'
-          : /shows a prompt/.test(text)
-            ? 'prompt'
-            : 'question'
+    const state = c.state === 'question' || c.state === 'prompt' ? c.state : /shows a prompt/.test(text) ? 'prompt' : 'question'
     const options = Array.isArray(c.options) ? c.options.filter((o): o is string => typeof o === 'string' && o.trim() !== '') : []
     out.push({
       task,
@@ -56,9 +50,8 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
       cloud: e.cloud === true || task.startsWith('cloud/'),
     })
   }
-  // What waits on the user first, then what finished; oldest first within each.
-  const rank = (c: Card) => (c.state === 'done' ? 1 : 0)
-  return out.sort((a, b) => rank(a) - rank(b) || a.at.localeCompare(b.at))
+  // Oldest first.
+  return out.sort((a, b) => a.at.localeCompare(b.at))
 }
 
 // "now", "4m", "2h", "3d": how long ago, short enough for a card's first line.

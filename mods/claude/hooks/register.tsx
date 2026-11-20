@@ -6,14 +6,13 @@
 // with its tasks' events. Each event is a card:
 // - a question (the task ended its turn asking something): its question, an answer (a Select of the options it
 //   listed, or an Input), Send, which runs `channels send <task> -`, and Open;
-// - a prompt (a permission prompt or another dialog in the task's own session): Open only;
-// - a finish: one quiet line, with Dismiss and Tell chat.
+// - a prompt (a permission prompt or another dialog in the task's own session): Open only.
+// A finish has no card: it reaches the chat as a one-line notice (`channels notices`), and the chat takes a turn on it.
 // A task with Remote Control on (its claude.ai/code link is in the inbox entry) also gets Open on claude.ai, which runs
 // `channels link <task> --open`: the session opens in the browser, with macOS `open`.
 // A cloud task (a Claude Code session at claude.ai/code) has no Answer: text sent to it waits behind its question. Its
-// question card shows what it needs and one Open, and its finish card Dismiss, Tell chat and Open; Open runs
-// `channels link <task> --open`, so it opens on claude.ai.
-// No button starts a turn of the chat but Tell chat, which submits the task's report to it. Acting on a card takes
+// question card shows what it needs and one Open; Open runs `channels link <task> --open`, so it opens on claude.ai.
+// No button starts a turn of the chat. Acting on a card takes
 // it out of the inbox, so it doesn't ride along with the user's next message as well. What the user doesn't act on
 // still rides along: the chat's UserPromptSubmit hook (`channels pending --hook`) takes it.
 // Outside a channel's chat (no CHANNELS_CHANNEL) the mod draws nothing.
@@ -105,21 +104,6 @@ async function open($: EngineInterface, card: Card) {
 
 async function openRemote($: EngineInterface, card: Card) {
   await channels($, card.task, 'Opening claude.ai…', ['link', card.task, '--open'])
-}
-
-async function dismiss($: EngineInterface, card: Card) {
-  await hide($, card.task)
-  if ((await channels($, card.task, null, ['card', 'dismiss', card.task])) === null) {
-    await update($, gone, was => was.filter(t => t !== card.task))
-  }
-}
-
-// The one button that starts a turn: the task's report, whole, submitted to the chat.
-async function tell($: EngineInterface, card: Card) {
-  const text = await channels($, card.task, 'Telling the chat…', ['card', 'tell', card.task])
-  if (text === null) return
-  await hide($, card.task)
-  await $.prompt.submit({ text: text.trim() })
 }
 
 async function setDraft($: EngineInterface, task: string, value: string) {
@@ -250,31 +234,11 @@ export const register: Register = on => {
       </Box>
     )
 
-    const done = (card: Card) => (
-      <Box key={`card:${card.task}`} flexDirection="column" paddingX={1} width={width}>
-        <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Text dimColor wrap="truncate-end">
-            <Text color="success">✓</Text> {card.name} {card.cloud ? '☁ ' : ''}finished · {ago(card.at, now)}
-          </Text>
-          <Button key={`dismiss:${card.task}`} label="Dismiss" onPress={() => dismiss($, card)} />
-          <Button key={`tell:${card.task}`} label="Tell chat" onPress={() => tell($, card)} />
-          {card.cloud ? <Button key={`open:${card.task}`} label="Open" onPress={() => openRemote($, card)} /> : remote(card)}
-        </Box>
-        {card.cloud && card.message ? (
-          <Text dimColor maxLines={2}>
-            {'  '}
-            {card.message}
-          </Text>
-        ) : null}
-        {status(card)}
-      </Box>
-    )
-
     const shown = all.slice(0, SHOWN)
     return (
       <Box flexDirection="column">
         {shown.map(card =>
-          card.state === 'done' ? done(card) : card.cloud ? cloudQuestion(card) : card.state === 'prompt' ? prompt(card) : question(card),
+          card.cloud ? cloudQuestion(card) : card.state === 'prompt' ? prompt(card) : question(card),
         )}
         {all.length > SHOWN ? (
           <Text dimColor>
