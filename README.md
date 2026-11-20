@@ -26,6 +26,7 @@ the herdr mod runs every command on the same machine. No server is involved, unl
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
 | `bin/cloud.mjs` | [Cloud tasks](#cloud-tasks): every call to Claude Code's private sessions API, standalone |
+| `bin/release.mjs` | [Versions and updates](#updating): the installed version, the check against GitHub Releases, `channels update` |
 | `install.mjs` | Installer for the command, mod and layout |
 | `test/` | Tests for the command and the installer |
 | `preview.png`, `docs/` | Screenshots of the layout, taken in a sandbox with demo channels |
@@ -163,7 +164,10 @@ With a store on another machine:
 - The mod asks the command what it can do: `list --json` gives `features`. What the command lacks is
   hidden rather than offered and refused. A command that lists no features gets the basics only
   (channels, chats, tasks, resolve, rename, icon, instructions, archive): no routines, unread dots,
-  task renaming or Refresh row.
+  task renaming, Refresh row or release row.
+- No update check runs for such an install, since it has no `channels` command of its own here; the
+  footer still shows the version the mod was installed from. Update it by hand (`git pull`, then the
+  same `install.mjs --on …` line).
 - Without the `chat-bg` feature, a channel's chat is a tab named `#<channel id>` in the server's
   `channels` space, running `<command> chat <name>` there. A tab already running it is reused. One
   whose program ended is replaced, so the chat starts again on its session, unless it ended within
@@ -180,6 +184,32 @@ copies this repository installed.
 
 ### Updating
 
+herdr-channels is released on GitHub: every merge to `main` that adds a feature or a fix is tagged
+`vX.Y.Z` and published as a [GitHub Release](https://github.com/bensoutendijk/herdr-channels/releases)
+with its notes ([CHANGELOG.md](CHANGELOG.md) keeps them all). The installer records the version of
+the clone it installs from, and the sidebar's footer shows it.
+
+The routines timer looks up the latest release every four hours: one unauthenticated request to
+`api.github.com/repos/bensoutendijk/herdr-channels/releases/latest`, with nothing in it about the
+Mac or its user. When a newer release is out, a row at the bottom of the sidebar says so, with a link
+to its release notes and an **Update** button. Nothing is updated until the button is clicked.
+
+<img src="docs/release-row.png" width="280" alt="The bottom of the channels sidebar: a row with a download arrow, herdr-channels 1.0.1 available, This Mac runs 1.0.0, a Release notes link and an Update button, above the studio, on this Mac footer with v1.0.0 at its right">
+
+Update, or the same from a terminal:
+
+```sh
+channels update --check   # is there a newer release? (asks GitHub now)
+channels update           # install it
+```
+
+`channels update` fast-forwards the clone to the release's tag and runs the installer again with the
+options the last install was given (recorded in the store, as `install.json`). It changes nothing,
+and says why, when the clone has changes not committed or commits that aren't in the release. Set
+`CHANNELS_UPDATE_CHECK=off` in the command's environment to stop the timer's lookups.
+
+To update by hand instead, or from a clone without release tags:
+
 ```sh
 cd ~/projects/herdr-channels && git pull && node install.mjs
 ```
@@ -187,7 +217,7 @@ cd ~/projects/herdr-channels && git pull && node install.mjs
 Pass the same options as the first install (for example `--projects ~/code`). Installing again also
 adds the routines timer to an installation that doesn't have it yet.
 
-That is the whole update. Herdr reloads the mod when its files change. The installer stamps the new
+Either way, that is the whole update. Herdr reloads the mod when its files change. The installer stamps the new
 build and restarts every running chat on it, on the same session with its history: an idle chat at
 once, and a chat in the middle of a turn by itself within seconds of that turn ending. The
 installer's summary says which chats restarted and which wait. Nothing needs `/exit` by hand.
@@ -595,6 +625,7 @@ channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <windo
 channels routine rm|run|on|off <channel> <name>
 channels routine preview <schedule> [--json]
 channels refresh [--auto] [--json]
+channels update [--check] [--bg] [--json]
 channels tick
 ```
 
@@ -608,6 +639,11 @@ Code than is installed, on the same session, and says what it did; a chat in the
 restarted when the turn ends. With `--auto`, as the installer runs it, only chats behind
 the herdr-channels build are restarted. `channels list --json` reports what each running chat is
 behind on, under `updates`.
+
+`channels update` installs the latest herdr-channels release (see [Updating](#updating)); `--check`
+only asks GitHub for it, and `--bg` runs the update in a process of its own, as the sidebar's Update
+button does. `channels list --json` reports the installed version and the latest release under
+`updates.release`.
 
 `channels send` can only reach a background task that has finished its turn. It stops the idle
 session, waits for its process to exit, and resumes the same session with the message. If the
@@ -644,6 +680,7 @@ command says so.
 | `CHANNELS_REMOTE_CONTROL` | off | `1` turns on [Remote Control](#remote-control) for the chats and tasks `channels` starts; `install.mjs --remote-control` sets it |
 | `CHANNELS_OPEN` | `open` | What `channels link --open` opens a link with |
 | `CHANNELS_CLOUD` | off | `1` turns on [cloud tasks](#cloud-tasks); `install.mjs --cloud` sets it |
+| `CHANNELS_UPDATE_CHECK` | on | `off` stops the routines timer from looking up new releases on GitHub |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values
 given to the installer, `CHANNELS_REMOTE_CONTROL=1` when it was installed with `--remote-control`, and `CHANNELS_CLOUD=1` when it
@@ -668,6 +705,15 @@ The task cards mod has its own tests, run against Claude Code's plugin engine:
 claude plugin validate mods/claude
 claude plugin test mods/claude
 ```
+
+### Releases
+
+PR titles are [Conventional Commits](https://www.conventionalcommits.org/) (`feat: …`, `fix: …`,
+`docs: …`, `feat!: …`), checked by CI, because a PR is squash-merged under its title. On every push
+to `main`, `.github/workflows/release.yml` runs [semantic-release](https://semantic-release.gitbook.io/)
+(fetched with `npx`; the repository has no dependencies): `feat` cuts a minor release, `fix` and
+`perf` a patch, a `!` a major, and the rest none. It tags the release, adds it to `CHANGELOG.md` and
+publishes the GitHub Release.
 
 ### Trying a change in a sandbox
 

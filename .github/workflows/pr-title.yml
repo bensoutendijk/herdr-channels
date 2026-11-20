@@ -1,0 +1,22 @@
+# A PR is squash-merged under its title, and that title is the commit semantic-release reads to cut a release
+# (.github/workflows/release.yml). So the title has to be a Conventional Commit: `feat: …`, `fix: …`, `docs: …`,
+# `chore: …`, `feat!: …` for a breaking change, and so on (CLAUDE.md, "PR titles").
+name: pr-title
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+permissions: {}
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Conventional Commit title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s' "$TITLE" | grep -Eq '^(feat|fix|docs|chore|refactor|perf|test|build|ci|style|revert)(\([a-z0-9._-]+\))?!?: [^ ].*$'; then
+            echo "OK: $TITLE"
+          else
+            echo "::error title=PR title::The PR title has to be a Conventional Commit, e.g. 'feat: Releases and one-click updates' or 'fix: …' (CLAUDE.md, \"PR titles\"). It is: $TITLE"
+            exit 1
+          fi

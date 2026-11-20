@@ -30,7 +30,7 @@ import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
 import { chatAlive, afterEnd, lastLine, QUICK_MS } from "./chats.js";
 import { remember, restore, keyOf } from "./panels.js";
-import { refreshRow } from "./updates.js";
+import { refreshRow, releaseRow, versionLabel } from "./updates.js";
 import { groups as spaceGroups, follow } from "./spaces.js";
 import * as B from "./backend.js";
 import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window, machines } from "herdr";
@@ -226,6 +226,30 @@ async function refreshNow() {
   }
   setShared(REFRESHING, null);
   changed();
+}
+
+// Update: a newer herdr-channels release, installed when asked (the release row's button). The backend's
+// `channels update --bg` does it in its own process, which outlives this mod (the install copies a new one in), and
+// `channels list` says how it goes (`updates.release.update`).
+const UPDATING = K("updating"); // when Update was clicked, until the list says the update runs
+async function updateNow() {
+  if (shared(UPDATING) && Date.now() - shared(UPDATING) < 30000) return;
+  setShared(UPDATING, Date.now());
+  try {
+    const out = JSON.parse(await store("channels update --bg --json", [], 30000));
+    if (!out.started) note(out.why);
+  } catch (err) {
+    fail(`Couldn't start the update: ${String(err?.message ?? err)}`);
+    setShared(UPDATING, null);
+  }
+  changed();
+}
+// A release's notes open in the browser: only a link to this repo's releases.
+const RELEASE_NOTES = /^https:\/\/github\.com\/bensoutendijk\/herdr-channels\/releases\/tag\/v\d+\.\d+\.\d+$/;
+async function openNotes(url) {
+  if (!RELEASE_NOTES.test(url ?? "")) return;
+  const r = await exec("open", [url], { timeout: 20000 });
+  if (r.code !== 0) fail(`Couldn't open ${url}: ${(r.stderr.trim() || `open exited ${r.code}`).split("\n").pop()}`);
 }
 
 // The channels in the user's order: the store's own (`position`) once it keeps one, else the order
@@ -985,6 +1009,7 @@ export default class Channels extends View {
           .child(svg(ICON("plus")).size(14))
           .child(div().text_size(14).child("New channel")))
         .child(this.spacesList(t)))
+      .child(this.releaseRow(t, data))
       .child(this.refreshRow(t, data))
       .child(this.footer(t, data));
   }
@@ -1012,6 +1037,34 @@ export default class Channels extends View {
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { refreshNow().finally(() => cx.notify()); cx.notify(); })
         .child("Refresh")));
+  }
+
+  // Above the refresh row, only while a newer herdr-channels release is out (the tick looks every few hours) or an
+  // update runs. Nothing updates until Update is clicked.
+  releaseRow(t, data) {
+    if (!has("update")) return div();
+    const release = data?.updates?.release ?? null;
+    const clicked = Boolean(shared(UPDATING)) && Date.now() - shared(UPDATING) < 30000 && release?.update?.state !== "running";
+    const row = clicked ? { state: "running", title: `Updating to ${release?.latest ?? "the latest release"}…`, detail: "Starting.", button: null, notes: null } : releaseRow(release);
+    if (!row) return div();
+    const color = row.state === "failed" ? t.blocked : t.accent;
+    return h_flex().id("release-row").mx(10).mb(10).px(12).py(10).gap(10).items_start().flex_none().rounded(10)
+      .border_1().border_color(t.border).bg(t.background)
+      .child(row.state === "running" ? svg(ICON("spinner")).size(15).mt(1).flex_none().text_color(color).spin(900)
+        : svg(ICON("download")).size(15).mt(1).flex_none().text_color(color))
+      .child(v_flex().flex_1().min_w(0).gap(2)
+        .child(div().text_size(12.5).text_color(t.foreground).child(row.title))
+        .child(div().text_size(11.5).text_color(t.muted).child(row.detail))
+        .when(Boolean(row.notes), (el) => el.child(div().id("release-notes").text_size(11.5).text_color(t.accent).cursor_pointer()
+          .hover((st) => st.opacity(0.8))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click(() => { openNotes(row.notes); })
+          .child("Release notes"))))
+      .when(Boolean(row.button), (el) => el.child(div().id("release-go").h(26).px(10).flex().flex_none().items_center().rounded(7)
+        .bg(t.accent).text_color(t.background).text_size(12.5).font_medium().cursor_pointer().hover((st) => st.opacity(0.85))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { updateNow().finally(() => cx.notify()); cx.notify(); })
+        .child(row.button)));
   }
 
   // Herdr's own spaces, under the channels: everything but the chats' space, by machine (this computer first). A
@@ -1062,7 +1115,9 @@ export default class Channels extends View {
       .child(div().w(8).h(8).rounded(4).bg(color))
       .child(svg(ICON(ON ? "server" : "monitor")).size(13).text_color(t.muted))
       .child(div().text_size(13).text_color(t.muted).child(ON ?? data?.machine ?? "this Mac"))
-      .child(div().flex_1().text_size(12.5).text_color(t.dim).child(text));
+      .child(div().flex_1().text_size(12.5).text_color(t.dim).child(text))
+      // This herdr-channels install's version (install.mjs writes it into config.js).
+      .when(Boolean(versionLabel(CONFIG.version)), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(versionLabel(CONFIG.version))));
   }
 
   // ---------- the main area, while the channel's chat is down ----------

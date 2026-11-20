@@ -1,5 +1,22 @@
 # Working on herdr-channels
 
+## PR titles
+
+PRs are squash-merged under their title, and semantic-release reads that title to cut a release on
+every merge to main (`.github/workflows/release.yml`). So every PR title is a Conventional Commit, and
+the `pr-title` check refuses one that isn't:
+
+- `feat: …` for something new a person can use (a minor release), `fix: …` for a bug fixed (a patch),
+  `feat!: …` or `fix!: …` when it breaks how an existing install or command works (a major).
+- `docs: …`, `chore: …`, `refactor: …`, `test: …`, `ci: …`, `build: …`, `perf: …` for the rest
+  (`perf` cuts a patch; the others cut no release).
+- After the prefix, the title is the repo's usual plain sentence, capitalized, saying what changes
+  for the person using it: `feat: Releases on GitHub, and one-click updates from the sidebar`,
+  `fix: A chat mid-turn restarts after its turn, not during it`.
+
+A PR's own commits can be titled freely: only the squash commit (the PR title) reaches main. Merge
+with "Squash and merge" so it does.
+
 ## Screenshots with a contribution
 
 Every contribution (a PR, or a commit to a branch meant for one) is checked for whether it should come

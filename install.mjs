@@ -32,9 +32,11 @@
 //    `channels start --cloud` runs tasks as Claude Code cloud sessions at claude.ai/code. It rides on Claude Code's
 //    private sessions API and reads Claude Code's stored claude.ai login (see the README, "Cloud tasks"). --no-cloud
 //    turns it off again; an install with neither keeps what the command had. Claude Code's settings are never touched.
-// 8. Stamps the build (build.json in the store: an id over the code and settings a channel's chat runs), and restarts
-//    the chats that run an older one: each idle chat at once, on the same session; one that is mid-turn when its turn
-//    ends (the timer's next tick). Nothing has to be restarted by hand. See "updates" in bin/channels.mjs.
+// 8. Stamps the build (build.json in the store: an id over the code and settings a channel's chat runs, and the
+//    version, from the clone's release tag), and restarts the chats that run an older one: each idle chat at once, on
+//    the same session; one that is mid-turn when its turn ends (the timer's next tick). Nothing has to be restarted by
+//    hand. See "updates" in bin/channels.mjs. It also records the options it was given (install.json in the store),
+//    so `channels update` (and the sidebar's Update button) can install a newer release the same way: bin/release.mjs.
 // --uninstall takes out what an install put in: the timer, the command and the mod and layout this repo installed
 // (a mod folder marked with .herdr-channels.json, and its layout). It never touches anything it didn't install, nor
 // the channel store or any Claude Code session.
@@ -44,6 +46,7 @@ import { accessSync, constants, cpSync, existsSync, mkdirSync, readdirSync, read
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cloneVersion, writeInstall } from './bin/release.mjs';
 
 const REPO = dirname(fileURLToPath(import.meta.url));
 const MARK = '# herdr-channels: written by install.mjs';
@@ -338,7 +341,8 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   if (!existsSync(o.appHome)) log(`${o.appHome} doesn't exist yet; it is made now. Open the herdr app once to fill it in.`);
   const { name, update } = pickNames(o.appHome, o.name);
   const { modDir, layoutFile, layout } = modFiles(o.appHome, name);
-  const config = { mod: name, layout: name, command: wrapper, path, projects: o.projects, by: o.by };
+  const version = cloneVersion(REPO);
+  const config = { mod: name, layout: name, command: wrapper, path, projects: o.projects, by: o.by, version };
 
   const was = installedRemote(o.bin);
   const remote = o.remote ?? was ?? false;
@@ -358,9 +362,16 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   // 8. The build, last: a chat restarted from here on finds everything above in place.
   const id = buildId(REPO, wrapperBody);
   mkdirSync(o.store, { recursive: true });
-  writeAtomic(join(o.store, 'build.json'), `${JSON.stringify({ id, label: commitLabel(REPO) ?? id, at: new Date().toISOString() })}\n`);
+  writeAtomic(join(o.store, 'build.json'), `${JSON.stringify({ id, label: commitLabel(REPO) ?? id, version, at: new Date().toISOString() })}\n`);
+  writeInstall(o.store, { repo: REPO, args: installArgs(o, name), at: new Date().toISOString() });
   const refreshed = refreshChats(wrapper);
-  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, refreshed, build: id, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, refreshed, build: id, version, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+}
+
+// The options an update installs with again: this install's, with the name it got. Remote Control and cloud tasks
+// aren't in it: an install keeps what the command has.
+export function installArgs(o, name) {
+  return ['--app-home', o.appHome, '--bin', o.bin, '--chat-mod', o.chatMod, '--store', o.store, '--projects', o.projects, '--by', o.by, '--name', name, '--label', o.label, ...(o.timer ? [] : ['--no-timer'])];
 }
 
 // The mod's folder and layout file under a name, and the layout with its mod blocks renamed to match.
@@ -389,7 +400,7 @@ export function installRemote(o, { home = homedir(), log = console.log } = {}) {
   const found = Object.fromEntries(['claude', 'hc', 'python3'].map((p) => [p, findProgram(p, { home })]));
   const SYSTEM = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
   const path = [...new Set([...Object.values(found).filter(Boolean).map((p) => dirname(p)), join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'])].filter((d) => !SYSTEM.includes(d)).join(':');
-  const config = { mod: name, layout: name, command: o.command, on: o.on, local: o.local, path, projects: o.projects, by: o.by };
+  const config = { mod: name, layout: name, command: o.command, on: o.on, local: o.local, path, projects: o.projects, by: o.by, version: cloneVersion(REPO) };
   const result = { remoteStore: true, modDir, layoutFile, name, update, config, found, selected: null, timer: null, refreshed: null };
   if (o.dryRun) return result;
   writeMod({ modDir, layoutFile, layout, name, config });
@@ -435,6 +446,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     }
     const missing = Object.entries(r.found).filter(([, p]) => !p).map(([n]) => n);
     console.log(`${o.dryRun ? 'Would install' : 'Installed'} herdr-channels from ${REPO}:`);
+    console.log(`  version  ${r.config.version ?? 'none: this clone has no release tag (git fetch --tags)'}`);
     console.log(`  command  ${r.wrapper}`);
     console.log(`  mod      ${r.modDir}${r.update ? ' (updated)' : ''}`);
     console.log(`  layout   ${r.layoutFile}${r.name !== 'channels' ? `  ("channels" was taken, so this is "${r.name}")` : ''}`);

@@ -23,6 +23,7 @@
 //   channels chat <channel> --bg [--json]     make sure the chat runs, in a herdr-core terminal; prints that terminal
 //   channels routine list|add|edit|rm|run|on|off ...   prompts the chat gets on a schedule (see "routines" below)
 //   channels refresh [--auto] [--json]       restart idle chats on what is installed now (see "updates" below)
+//   channels update [--check] [--bg] [--json]   install the latest herdr-channels release; --check only looks (bin/release.mjs)
 //   channels tick                             what the launchd agent runs every minute: fires the routines that are due
 //
 // Cloud tasks (off unless CHANNELS_CLOUD is on: install.mjs --cloud): a task can also be a Claude Code cloud session at
@@ -60,6 +61,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { due, nextDue, parseSchedule, ScheduleError, shortWhen } from './schedule.mjs';
+import { checkRelease, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
 import { cloudId, cloudUrl, listCloudSessions, probeAttach, sendToCloudSession, startCloudSession } from './cloud.mjs';
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,79}$/;
@@ -505,6 +507,8 @@ export function defaultDeps(home = homedir()) {
     hc: process.env.CHANNELS_HC || 'hc',
     app: process.env.CHANNELS_HERDR_APP || 'herdr-app',
     open: process.env.CHANNELS_OPEN || 'open',
+    // The tick looks up herdr-channels releases (CHANNELS_UPDATE_CHECK=off stops it).
+    releases: process.env.CHANNELS_UPDATE_CHECK !== 'off',
     run: runProgram,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     cloud: cloudDeps(home, projectsDir(home)),
@@ -636,7 +640,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update'];
 
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
@@ -2099,6 +2103,14 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
       refreshed = (await refreshChats({ dir, deps, ensure })).chats.filter((x) => x.did !== 'waits');
       for (const x of refreshed) tickLog(dir, x.did === 'restarted' ? `restarted #${x.channel}'s chat on what is installed now (${x.behind.join(', ')})` : `couldn't restart #${x.channel}'s chat: ${x.why}`);
     } catch (err) { tickLog(dir, `refresh failed: ${err.message}`); }
+    // A newer herdr-channels release: looked up now and then (bin/release.mjs), never installed from here.
+    if (deps.releases) {
+      try {
+        const was = readJson(join(dir, 'release.json'));
+        const now = await checkRelease({ dir, fetchLatest: deps.fetchLatest });
+        if (now !== was && now?.latest?.version !== was?.latest?.version && now?.latest) tickLog(dir, `herdr-channels ${now.latest.version} is the latest release`);
+      } catch (err) { tickLog(dir, `release check failed: ${err.message}`); }
+    }
     return { skipped: false, runs, refreshed };
   } finally {
     rmSync(lock, { force: true });
@@ -2342,7 +2354,9 @@ export async function updateStatus({ dir, deps }) {
     chats.push({ channel: c.name, id: c.id, terminal: info.terminal ?? null, pid: info.pid, session_id: info.session_id, claude_pid: l?.pid ?? null, loop: info.loop === true, suggestions: info.suggestions !== false, build: info.build ?? null, claude: l?.version ?? null, state: l?.status ?? null, behind });
   }
   return {
-    build: build ? { id: build.id, label: build.label ?? build.id, at: build.at ?? null } : null,
+    build: build ? { id: build.id, label: build.label ?? build.id, version: build.version ?? null, at: build.at ?? null } : null,
+    // herdr-channels releases: the version installed, the latest on GitHub (as the tick last looked), an update's state.
+    release: releaseStatus({ dir, build }),
     claude,
     asked: asked?.claude && asked.claude === claude ? asked.claude : null,
     behind: { channels: chats.filter((x) => x.behind.includes('channels')).length, claude: chats.filter((x) => x.behind.includes('claude')).length },
@@ -2470,7 +2484,7 @@ export function parseArgs(args) {
   const pos = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto') opts[a.slice(2)] = true;
+    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check') opts[a.slice(2)] = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
       opts[a.slice(2).replace(/-(.)/g, (_, x) => x.toUpperCase())] = args[++i];
@@ -2482,7 +2496,7 @@ export function parseArgs(args) {
 
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
-const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | refresh [--auto] [--json] | tick';
+const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | refresh [--auto] [--json] | update [--check] [--bg] [--json] | tick';
 const ROUTINE_USAGE = [
   'channels routine list [<channel>] [--json]',
   'channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->',
@@ -2634,6 +2648,31 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       const r = await refreshChats({ dir, deps, claude: !opts.auto });
       console.log(opts.json ? JSON.stringify({ ...r, summary: refreshSummary(r) }) : refreshSummary(r));
       return 0;
+    }
+    if (sub === 'update') {
+      if (pos.length) fail('channels update [--check] [--bg] [--json]');
+      if (opts.check) {
+        const cache = await checkRelease({ dir, maxAgeMs: 0, fetchLatest: deps.fetchLatest });
+        const r = releaseStatus({ dir, build: readBuild(dir) });
+        if (opts.json) console.log(JSON.stringify(r));
+        else if (cache.error && !r.latest) console.log(`Couldn't look up the latest release: ${cache.error}.`);
+        else console.log(r.available ? `herdr-channels ${r.latest} is out (this Mac runs ${r.current ?? 'a version from before releases'}): ${r.url}\nchannels update installs it.` : `herdr-channels ${r.current} is the latest release.`);
+        return 0;
+      }
+      if (opts.bg) {
+        const r = updateInBackground({ dir, script: fileURLToPath(import.meta.url) });
+        console.log(opts.json ? JSON.stringify(r) : r.started ? 'Updating in the background: the sidebar says when it is done.' : r.why);
+        return 0;
+      }
+      try {
+        const r = await updateClone({ dir, ...(deps.fetchLatest ? { look: deps.fetchLatest } : {}) });
+        console.log(opts.json ? JSON.stringify({ ok: true, ...r }) : r.message);
+        return 0;
+      } catch (err) {
+        if (!(err instanceof UpdateRefused) && !/^install\.mjs failed/.test(err.message)) throw err;
+        console.log(opts.json ? JSON.stringify({ ok: false, error: err.message }) : err.message);
+        return 1;
+      }
     }
     if (sub === 'tick') {
       if (pos.length) fail('channels tick');
