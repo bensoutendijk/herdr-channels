@@ -187,7 +187,7 @@ test('the store read into cards: an older entry without a card, other channels l
 })
 
 test('a question whose options are in the Select leaves their list out of its text', () => {
-  const card = { task: Q, name: 'n', state: 'question', at: AT, waiting: null, remote: null, options: ['Calm', 'Playful'], message: 'Which tone?\n\n1. **Calm**\n2. Playful\n\nI lean calm.' } as const
+  const card = { task: Q, name: 'n', state: 'question', at: AT, waiting: null, remote: null, cloud: false, options: ['Calm', 'Playful'], message: 'Which tone?\n\n1. **Calm**\n2. Playful\n\nI lean calm.' } as const
   expect(questionOf({ ...card, options: [...card.options] })).toBe('Which tone?\n\nI lean calm.')
   expect(questionOf({ ...card, options: [] })).toBe(card.message)
 })
@@ -204,5 +204,31 @@ test('a task with a claude.ai link gets Open on claude.ai on its card, which run
   expect(w.ran).toEqual([{ argv: ['/bin/channels', 'link', Q, '--open'], stdin: undefined }])
   expect(w.submitted).toEqual([])
   expect(await ui.find({ key: `send:${Q}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a cloud task: its question card has no Answer, only Open, which opens it on claude.ai; its finish says what it did, with Open', async ($, on) => {
+  const C = 'cloud/session_01AbCdEfGhIjKlMnOpQrStUv'
+  const F = 'cloud/session_02ZyXwVuTsRqPoNmLkJiHgFe'
+  const url = 'https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv'
+  const asks = { task: C, name: 'Fix the footer', kind: 'needs', at: AT, text: '…', cloud: true, remote: url, card: { state: 'question', waiting: 'Which page?', message: 'Should /press go, or point to the media kit?', options: [] } }
+  const doneCloud = { task: F, name: 'Bump the deps', kind: 'done', at: AT, text: '…', cloud: true, remote: url, card: { state: 'done', message: 'Bumped 14 packages, PR #31 opened' } }
+  expect(cardsOf(JSON.stringify({ channels: [{ id: CH, inbox: [asks, doneCloud] }] }), CH).map(c => c.cloud)).toEqual([true, true])
+  const w = world(on, [asks, doneCloud])
+  await start($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: `send:${C}` })).toBeUndefined()
+  expect(await ui.find({ key: `answer:${C}` })).toBeUndefined()
+  expect(await ui.find({ key: `pick:${C}` })).toBeUndefined()
+  expect(await ui.find({ key: `remote:${C}` })).toBeUndefined()
+  expect(await ui.find({ key: `remote:${F}` })).toBeUndefined()
+  expect(await ui.find({ key: `tell:${F}` })).toBeDefined()
+  await ui.press({ key: `open:${C}` })
+  await ui.press({ key: `open:${F}` })
+  expect(w.ran).toEqual([
+    { argv: ['/bin/channels', 'link', C, '--open'], stdin: undefined },
+    { argv: ['/bin/channels', 'link', F, '--open'], stdin: undefined },
+  ])
+  expect(w.submitted).toEqual([])
   await ui.unmount()
 })

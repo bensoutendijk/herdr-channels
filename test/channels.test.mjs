@@ -127,7 +127,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, remote_control: false, channels: [] });
+  assert.deepEqual(list(), { machine: HERE, remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, channels: [] });
   assert.match(ok([]), /No channels yet/);
 });
 

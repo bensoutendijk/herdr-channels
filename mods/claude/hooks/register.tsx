@@ -10,6 +10,9 @@
 // - a finish: one quiet line, with Dismiss and Tell chat.
 // A task with Remote Control on (its claude.ai/code link is in the inbox entry) also gets Open on claude.ai, which runs
 // `channels link <task> --open`: the session opens in the browser, with macOS `open`.
+// A cloud task (a Claude Code session at claude.ai/code) has no Answer: text sent to it waits behind its question. Its
+// question card shows what it needs and one Open, and its finish card Dismiss, Tell chat and Open; Open runs
+// `channels link <task> --open`, so it opens on claude.ai.
 // No button starts a turn of the chat but Tell chat, which submits the task's report to it. Acting on a card takes
 // it out of the inbox, so it doesn't ride along with the user's next message as well. What the user doesn't act on
 // still rides along: the chat's UserPromptSubmit hook (`channels pending --hook`) takes it.
@@ -164,6 +167,25 @@ export const register: Register = on => {
     const remote = (card: Card) =>
       card.remote ? <Button key={`remote:${card.task}`} label="Open on claude.ai" onPress={() => openRemote($, card)} /> : null
 
+    // A cloud task asks: what it needs, and Open (on claude.ai), where it is answered.
+    const cloudQuestion = (card: Card) => (
+      <Box key={`card:${card.task}`} flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1} width={width}>
+        <Text>
+          <Text color="suggestion" bold>
+            ?{' '}
+          </Text>
+          <Text bold>{card.name}</Text>
+          <Text dimColor> ☁ asks you · {ago(card.at, now)}</Text>
+        </Text>
+        <Text maxLines={4}>{card.message ?? card.waiting ?? 'It asks you something: open it to see.'}</Text>
+        <Box flexDirection="row" gap={1}>
+          <Text dimColor>Answer it on claude.ai.</Text>
+          <Button key={`open:${card.task}`} label="Open" variant="primary" onPress={() => openRemote($, card)} />
+        </Box>
+        {status(card)}
+      </Box>
+    )
+
     const question = (card: Card) => {
       const options = card.options
       const draft = answers[card.task] ?? options[0] ?? ''
@@ -232,12 +254,18 @@ export const register: Register = on => {
       <Box key={`card:${card.task}`} flexDirection="column" paddingX={1} width={width}>
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Text dimColor wrap="truncate-end">
-            <Text color="success">✓</Text> {card.name} finished · {ago(card.at, now)}
+            <Text color="success">✓</Text> {card.name} {card.cloud ? '☁ ' : ''}finished · {ago(card.at, now)}
           </Text>
           <Button key={`dismiss:${card.task}`} label="Dismiss" onPress={() => dismiss($, card)} />
           <Button key={`tell:${card.task}`} label="Tell chat" onPress={() => tell($, card)} />
-          {remote(card)}
+          {card.cloud ? <Button key={`open:${card.task}`} label="Open" onPress={() => openRemote($, card)} /> : remote(card)}
         </Box>
+        {card.cloud && card.message ? (
+          <Text dimColor maxLines={2}>
+            {'  '}
+            {card.message}
+          </Text>
+        ) : null}
         {status(card)}
       </Box>
     )
@@ -245,7 +273,9 @@ export const register: Register = on => {
     const shown = all.slice(0, SHOWN)
     return (
       <Box flexDirection="column">
-        {shown.map(card => (card.state === 'question' ? question(card) : card.state === 'prompt' ? prompt(card) : done(card)))}
+        {shown.map(card =>
+          card.state === 'done' ? done(card) : card.cloud ? cloudQuestion(card) : card.state === 'prompt' ? prompt(card) : question(card),
+        )}
         {all.length > SHOWN ? (
           <Text dimColor>
             {'  '}+{all.length - SHOWN} more: the tasks panel has them, and they ride along with your next message.

@@ -11,7 +11,8 @@ the chat's prompt lets you answer or dismiss it without the chat taking a turn, 
 about it with your next message; it is interrupted only when it asked to be.
 
 Everything is local: the channel store is a folder on disk, tasks run under your own `claude`, and
-the herdr mod runs every command on the same machine. No server is involved.
+the herdr mod runs every command on the same machine. No server is involved, unless you turn on
+[cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
 
 ![The channels layout in Herdr: the channel list on the left, the #website channel's Claude Code chat in the middle, and the tasks panel on the right with one task that needs input, one working and one ready for review](preview.png)
 
@@ -24,6 +25,7 @@ the herdr mod runs every command on the same machine. No server is involved.
 | `layouts/channels.json` | The herdr layout that arranges the mod |
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
+| `bin/cloud.mjs` | [Cloud tasks](#cloud-tasks): every call to Claude Code's private sessions API, standalone |
 | `install.mjs` | Installer for the command, mod and layout |
 | `test/` | Tests for the command and the installer |
 | `preview.png`, `docs/` | Screenshots of the layout, taken in a sandbox with demo channels |
@@ -107,7 +109,8 @@ The installer:
 
 On a first install in a terminal, the installer asks whether to turn on [Remote Control](#remote-control);
 the answer is no unless you type `y`. An install with neither `--remote-control` nor `--no-remote-control`
-keeps what the Mac had.
+keeps what the Mac had. [Cloud tasks](#cloud-tasks) are never asked about: they stay off unless
+`--cloud` turns them on.
 
 It never overwrites existing files. If a mod or layout named `channels` already exists and was not
 installed by this repository, the copy is installed under the next free name (`channels-2`, and so
@@ -124,6 +127,8 @@ on). Running the installer again updates a previous installation in place.
 | `--label <label>` | `dev.herdr-channels.tick` | The launchd label of the routines timer |
 | `--remote-control` | off | Show this Mac's channel chats and tasks at claude.ai/code and in the Claude app (see [Remote Control](#remote-control)) |
 | `--no-remote-control` | | Turn Remote Control off again |
+| `--cloud` | off | Let channels run tasks as Claude Code cloud sessions; reads Claude Code's stored login and calls its private API (see [Cloud tasks](#cloud-tasks)) |
+| `--no-cloud` | | Turn cloud tasks off again |
 | `--no-timer` | | Install without the routines timer |
 | `--no-switch` | | Install without selecting the layout |
 | `--dry-run` | | Show what would be installed without writing anything |
@@ -331,6 +336,77 @@ seconds. One whose process dies without a clean stop (a crash, `kill -9`) stays 
 resumed and stopped, or archived on claude.ai. A Mac that sleeps shows its sessions as idle or offline until it
 wakes; messages sent from the phone meanwhile wait.
 
+## Cloud tasks
+
+Cloud tasks are off unless you turn them on, and they are set per Mac. When they are on, a channel can run a task
+as a Claude Code cloud session at [claude.ai/code](https://claude.ai/code) ("Claude Code on the web") instead of on
+this Mac, and track it beside its local tasks: in the tasks panel, on cards above the chat's prompt, and in the
+events the chat hears about. The Mac can sleep while a cloud task works.
+
+**Read this before turning them on, the work laptop above all.** Cloud tasks ride on Claude Code's **private API**,
+and they **read Claude Code's stored claude.ai login**:
+
+- Starting and messaging a cloud session use Claude Code's own CLI (`claude --cloud`, `claude -p --cloud`). But no
+  supported command lists cloud sessions with their state, so `channels` calls the same undocumented endpoint
+  Claude Code itself uses (`GET https://api.anthropic.com/v1/code/sessions`). It can change or go away without
+  notice. When it fails, a cloud task shows **state unknown** and keeps **Open on claude.ai**; nothing else breaks.
+- To call it, `channels` reads the claude.ai login Claude Code keeps: on macOS the login Keychain item
+  `Claude Code-credentials`, on Linux `~/.claude/.credentials.json`. It reads it fresh for each call (Claude Code
+  refreshes it), and never prints, logs or stores it. All of this lives in one file, `bin/cloud.mjs`.
+- A company Claude organization may turn cloud sessions off (`Cloud sessions are disabled by your organization's
+  policy`), and a managed Mac may forbid other programs from reading Claude Code's Keychain item, or prompt for it.
+  Either is a reason to leave cloud tasks off there. Ask first.
+- A cloud session works on a fresh clone of the repo's GitHub copy, under the claude.ai account's GitHub access
+  (the Claude GitHub App, or the `gh` login saved with `/web-setup`), and shares that account's rate limits.
+
+Claude Code's own settings and rollout flags are never touched. To turn cloud tasks on, or off again:
+
+```sh
+node ~/projects/herdr-channels/install.mjs --cloud      # on
+node ~/projects/herdr-channels/install.mjs --no-cloud   # off
+```
+
+Pass the options you installed with as well (for example `--projects ~/code`). The setting lives in the installed
+`channels` command (`CHANNELS_CLOUD=1`). A chat that is already running takes the change when it starts again:
+type `/exit` in it. With cloud tasks off, nothing calls the API or reads the login; cloud tasks filed earlier stay
+listed, as state unknown.
+
+**Starting one.** Ask the chat for a cloud task, or run:
+
+```sh
+channels start <channel> --cloud --repo <project> [--name <name>] [--wake-on finish|question|any] "<brief>"
+```
+
+The repo must be committed and pushed: the session starts from GitHub, so `start` refuses a tree with changes,
+a branch that isn't on the remote, or commits that aren't pushed ("push first"). It then runs `claude --cloud
+"<brief>" -n <name>` under a pty in the repo, reads the session's id and link from what it prints, and files the
+task as `cloud/<session id>`. `--model` doesn't apply: the cloud environment picks the model. `channels file
+<channel> <session_… | cse_… | claude.ai/code link>` adopts a cloud session started elsewhere (the phone,
+claude.ai, another Mac).
+
+**Tracking.** While a channel has an open cloud task, its listener asks for the account's session list every
+20 seconds: one call covers every session and every channel, and uses no model. A session that is running shows
+as Working, one waiting on you (`requires_action`) as Needs input, one whose turn ended as Ready for review. The
+row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a dot in the
+panel, a card above the chat's prompt, ride-along with your next message, or a wake when the chat registered for
+it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
+(Claude Code hasn't refreshed the login yet) it waits a minute; any other failure shows state unknown until a
+call works again.
+
+<img src="docs/cloud-task-row.png" width="420" alt="The tasks panel of #website with one cloud task under Ready for review, Cloud probe: hello file, with a cloud glyph, an unread dot and its cost, $0.24">
+
+<img src="docs/cloud-task-card.png" width="420" alt="A card above the channel chat's prompt: Cloud probe: hello file, cloud, asks you, 1m. Approve or deny AskUserQuestion. Answer it on claude.ai, with an Open button">
+
+| | Local task | Cloud task |
+|---|---|---|
+| Open (click the row) | Its live session in the panel | On claude.ai in the browser. In the panel with `claude --cloud <id>` only once Claude Code can attach a terminal for the account, which `channels` asks Claude Code now and then |
+| Its question, on a card | Answer (Select or field), Send, Open | What it asks, and **Open**: answer it on claude.ai |
+| Send | `channels send`, or type in its view | `channels send`, or **Send message…** in its `···` menu. Behind an open question the text waits until the question is answered on claude.ai, and both say so |
+| Rename | In Claude Code too | Here only: Claude Code has no supported way to rename a cloud session from outside, so claude.ai keeps its title (and a title changed on claude.ai shows here, until you rename it here) |
+| Resolve / dismiss | Hides the task | Hides the task. The session keeps running and stays on claude.ai: archive it there (`···` → Archive). There is no command for that |
+
+`channels read cloud/<id>` shows its state, summary, cost and link; `channels link cloud/<id> --open` opens it.
+
 ## Routines
 
 A routine is a prompt that a channel's chat receives on its own, on a schedule: "every weekday at 9,
@@ -398,6 +474,7 @@ channels icon <channel> <text>
 channels describe <name> [--set <text> | --set -]
 channels chat <channel>
 channels start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief | ->
+channels start <channel> --cloud --repo <project> [--name <name>] [--wake-on <on>] <brief | ->
 channels file <channel> <session> [--name <name>] [--folder <path>]
 channels read <session> [--limit <n>] [--json]
 channels send <session> [--wake-on <on>] <text | ->
@@ -458,9 +535,11 @@ command says so.
 | `CHANNELS_HERDR_HOME` | herdr's default | The herdr app home a card's Open talks to |
 | `CHANNELS_REMOTE_CONTROL` | off | `1` turns on [Remote Control](#remote-control) for the chats and tasks `channels` starts; `install.mjs --remote-control` sets it |
 | `CHANNELS_OPEN` | `open` | What `channels link --open` opens a link with |
+| `CHANNELS_CLOUD` | off | `1` turns on [cloud tasks](#cloud-tasks); `install.mjs --cloud` sets it |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values
-given to the installer, and `CHANNELS_REMOTE_CONTROL=1` when it was installed with `--remote-control`.
+given to the installer, `CHANNELS_REMOTE_CONTROL=1` when it was installed with `--remote-control`, and `CHANNELS_CLOUD=1` when it
+was installed with `--cloud`.
 
 The mod's settings are in `~/.config/herdr-app/mods/channels/config.js`, which the installer writes.
 They are: the path to the command, extra `PATH` folders, the projects folder and the `--by` name.

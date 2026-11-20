@@ -9,7 +9,8 @@
 //   one shows it live in the panel. + starts a fresh session in the projects folder.
 // - the menu ({ menu: channel }) and the dialogs ({ dialog: "new" | "rename" | "instructions" |
 //   "icon" | "routines" | "archive", channel }), opened as overlays; a task's menu ({ taskmenu:
-//   task id }) and its Rename dialog ({ dialog: "rename-task", task: task id }) too.
+//   task id }) and its Rename dialog ({ dialog: "rename-task", task: task id }) too, and a cloud task's Send
+//   dialog ({ dialog: "send-task", task: task id }).
 //
 // The main area is herdr's shown tab. A channel's chat runs in one herdr-core terminal, named
 // chat-<channel id>, which `channels chat <name> --bg` starts (a routine starts the same one when
@@ -69,6 +70,14 @@ const openRemote = async (task) => {
   const r = await exec("open", [url], { timeout: 20000 });
   if (r.code !== 0) fail(`Couldn't open ${url}: ${(r.stderr.trim() || `open exited ${r.code}`).split("\n").pop()}`);
 };
+// Cloud tasks (install.mjs --cloud): a task can be a Claude Code cloud session at claude.ai/code, filed as
+// cloud/<session_…>. `channels list` gives its state from the account's sessions list (`cloud` on the task). It opens
+// in a terminal (`claude --cloud <id>`) only when `channels list` says that attaches for this account; otherwise on
+// claude.ai.
+const isCloud = (task) => task?.machine === "cloud";
+const cloudAttach = () => shared(DATA)?.cloud?.attach === true;
+const NOTE = "channels.note"; // a word after something done here: { message, at }
+const note = (message) => setShared(NOTE, { message, at: Date.now() });
 const BACK = "herdr.back";
 let viewerSource = null;
 async function attachTo(id) {
@@ -161,6 +170,8 @@ async function readStore() {
   const agents = index(there);
   for (const c of channels) {
     for (const t of c.tasks ?? []) {
+      // A cloud task's state comes from the account's sessions list, through `channels list`.
+      if (isCloud(t)) { t.standing = t.cloud?.state ?? "ready"; continue; }
       const a = agents.get(t.session_id) ?? agents.get(t.job);
       // A copy keeps its task's name, and so does a session renamed here that Claude Code can't rename (see
       // `channels rename-task`): the list's name stands for those.
@@ -168,7 +179,8 @@ async function readStore() {
       t.standing = standing(a);
     }
   }
-  return { machine: JSON.parse(list).machine ?? null, remote: JSON.parse(list).remote_control === true, channels };
+  const head = JSON.parse(list);
+  return { machine: head.machine ?? null, remote: head.remote_control === true, cloud: head.cloud ?? null, channels };
 }
 
 // The channels in the user's order: the store's own (`position`) once it keeps one, else the order
@@ -187,6 +199,7 @@ const doneTasks = (channel) => (channel?.tasks ?? []).filter((t) => t.dismissed)
 // The herdr machine a task runs on: null is this computer, undefined is one we can't reach (a
 // task filed under another name: the store is this computer's only).
 function herdrMachine(task) {
+  if (isCloud(task)) return null; // opened here: in a terminal when it attaches, else on claude.ai
   return task.machine === localName() ? null : undefined;
 }
 
@@ -252,6 +265,7 @@ const showTasks = ({ remember: keep = true } = {}) => {
 // Opens a task in the panel: a background session is attached to; one from before tasks were all
 // background sessions (a plain `claude`, no job) is resumed.
 async function openTask(task, where) {
+  if (isCloud(task)) return openCloud(task, where);
   const machine = herdrMachine(task);
   if (machine === undefined) throw new Error(`${task.machine} can't be reached from this computer.`);
   let address = findTerm(task, machine);
@@ -263,6 +277,20 @@ async function openTask(task, where) {
     const folder = task.folder ?? PROJECTS;
     const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", termName(task), "--cwd", folder,
       "--", "sh", "-c", 'PATH="$0:$PATH" exec "$@"', PATHS, ...cmd]);
+    if (r.code !== 0) throw new Error((r.stderr.trim() || r.stdout.trim() || `hc exited ${r.code}`).split("\n").pop());
+    address = JSON.parse(r.stdout).address;
+  }
+  showInPanel(task, address, where);
+}
+
+// A cloud task: `claude --cloud <id>` in a terminal in the panel, when that attaches for this account; else on
+// claude.ai in the browser (and the panel stays on the list).
+async function openCloud(task, where) {
+  if (!cloudAttach()) return openRemote(task);
+  let address = findTerm(task, null);
+  if (!address) {
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", termName(task), "--cwd", task.folder ?? PROJECTS,
+      "--", "sh", "-c", 'PATH="$0:$PATH" exec "$@"', PATHS, "claude", "--cloud", task.session_id]);
     if (r.code !== 0) throw new Error((r.stderr.trim() || r.stdout.trim() || `hc exited ${r.code}`).split("\n").pop());
     address = JSON.parse(r.stdout).address;
   }
@@ -293,7 +321,7 @@ async function openRequested(cx, refresh) {
 // The panel follows the channel: it shows what this channel's panel showed last, a task (as if it
 // were clicked) or the list. A task resolved, gone or out of reach since gives the list.
 function followPanel(c) {
-  const want = restore(shared(PANELS), c, (x) => herdrMachine(x) !== undefined);
+  const want = restore(shared(PANELS), c, (x) => herdrMachine(x) !== undefined && (!isCloud(x) || cloudAttach()));
   const toList = () => { if (shared(TASK)) showTasks({ remember: false }); };
   if (!want) return toList();
   if (shared(TASK) === want.id) return;
@@ -461,13 +489,17 @@ const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog])
 // A task's menu (Rename, Open on claude.ai when it has a link, Resolve) opens at the pointer; its Rename dialog looks
 // like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
-const taskMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: (task.dismissed ? 44 : 87) + (remoteLink(task) ? 34 : 0), props: { taskmenu: task.id } });
+const taskMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: (task.dismissed ? 44 : 87) + (remoteLink(task) ? 34 : 0) + (isCloud(task) && !task.dismissed ? 34 : 0), props: { taskmenu: task.id } });
+const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
 const renameTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 240, props: { dialog: "rename-task", task: task.id } });
 const resolveTask = (id) => {
   const task = findTask(id);
   submit((all) => eachTask(all, id, (x) => { x.dismissed = true; x.dismissed_at = new Date().toISOString(); x.dismissed_by = BY; }),
     'channels dismiss "$1" --by "$2"', [id, BY], `resolve ${task?.name || "the task"}`);
+  if (isCloud(task)) archiveNote(task);
 };
+// Resolving a cloud task here doesn't touch the session, which stays on claude.ai until it is archived there.
+const archiveNote = (task) => note(`${task?.name || "The cloud task"} is resolved here. It stays on claude.ai: archive it there (··· → Archive).`);
 const TASK_NAME = 80; // the longest task name `channels rename-task` takes
 
 // ---------- routines: helpers for the dialog ----------
@@ -625,7 +657,7 @@ export default class Channels extends View {
         // channels.task-next / .task-prev open the selected channel's next task in the panel;
         // channels.tasks goes back to the list.
         else if (c === "task-next" || c === "task-prev") {
-          const list = liveTasks(current()).filter((x) => herdrMachine(x) !== undefined);
+          const list = liveTasks(current()).filter((x) => herdrMachine(x) !== undefined && (!isCloud(x) || cloudAttach()));
           const at = list.findIndex(isShown);
           if (list.length) openTask(list[(at + (c === "task-next" ? 1 : -1) + list.length) % list.length]).catch(() => {});
         } else if (c === "tasks") showTasks();
@@ -645,7 +677,7 @@ export default class Channels extends View {
       const started = Date.now();
       let next;
       try { next = { ...(await readStore()), error: null, at: Date.now() }; }
-      catch (err) { next = { machine: shared(DATA)?.machine ?? null, remote: shared(DATA)?.remote ?? false, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
+      catch (err) { next = { machine: shared(DATA)?.machine ?? null, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
       // Something changed here while this read was out: what it brought back is older.
       if (shared(BUSY) || (shared(OP_AT) ?? 0) > started) return;
       setShared(DATA, next);
@@ -693,7 +725,7 @@ export default class Channels extends View {
   // Which machine something runs on: a small icon and its name.
   where(machine, t) {
     return h_flex().gap(5).items_center().text_size(12).text_color(t.dim)
-      .child(svg(ICON(machine === localName() ? "monitor" : "server")).size(12)).child(machine ?? "");
+      .child(svg(ICON(machine === "cloud" ? "cloud" : machine === localName() ? "monitor" : "server")).size(12)).child(machine ?? "");
   }
 
   render() {
@@ -938,6 +970,7 @@ export default class Channels extends View {
     cx.timer.after(190, (cx) => {
       submit((all) => eachTask(all, task.id, (x) => { x.dismissed = true; x.dismissed_at = new Date().toISOString(); x.dismissed_by = BY; }),
         'channels dismiss "$1" --by "$2"', [task.id, BY], `resolve ${task.name || "the task"}`);
+      if (isCloud(task)) archiveNote(task);
       this.leaving.delete(task.id);
       cx.notify();
     });
@@ -978,6 +1011,7 @@ export default class Channels extends View {
       .text_color(this.tab === id ? t.foreground : t.muted).when(this.tab === id, (el) => el.bg(t.selected))
       .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.tab = id; this.known.ids = null; cx.notify(); }).child(label);
     const mark = {
+      unknown: () => svg(ICON("cloud-off")).size(15).text_color(t.dim),
       working: () => svg(ICON("spinner")).size(15).text_color(t.working).spin(900),
       needs: () => svg(`mods/${MOD}/needs.svg`).size(15).text_color(t.blocked),
       ready: () => svg(ICON("circle-check")).size(15).text_color(t.muted),
@@ -991,16 +1025,22 @@ export default class Channels extends View {
       const canResolve = kind !== "resolved" && filed.has(task.id);
       const unread = kind !== "resolved" && Boolean(task.unread) && !isShown(task);
       const canRename = filed.has(task.id); // a session still starting has no task to rename yet
+      // A cloud task: a cloud glyph after its name, its cost instead of its age, and, when its state can't be known
+      // now (the sessions list failed, or cloud tasks are off), a crossed-out cloud and "state unknown".
+      const cloud = isCloud(task) ? task.cloud ?? {} : null;
+      const unknown = Boolean(cloud?.unknown) && kind !== "resolved";
+      const right = kind === "resolved" ? ago(task.dismissed_at) : unknown ? "state unknown" : cloud?.cost_usd != null ? `$${cloud.cost_usd.toFixed(2)}` : ago(task.added_at);
       return h_flex().id(`tk-${task.id}`).mx(8).px(8).gap(12).items_center().rounded(8).overflow_hidden().flex_none()
         .h(closed ? 0 : TASK_H).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
         .when(reachable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(task, cx)))
         .when(canRename, (el) => el.on_mouse_down("right", () => taskMenu(task)))
         .on_hover(this.hovering(key))
-        .child(div().w(28).h(28).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().child(mark[kind]()))
-        .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(reachable ? t.foreground : t.dim).when(unread, (el) => el.font_medium()).child(task.name || shortId(task)))
+        .child(div().w(28).h(28).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().child(mark[unknown ? "unknown" : kind]()))
+        .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(reachable && !unknown ? t.foreground : t.dim).when(unread, (el) => el.font_medium()).child(task.name || shortId(task)))
+        .when(Boolean(cloud), (el) => el.child(svg(ICON("cloud")).size(13).flex_none().text_color(t.dim)))
         // A task with an event not seen yet (it finished, or asked something, since it was last opened) has a dot.
         .when(unread, (el) => el.child(div().id(`tk-new-${task.id}`).w(8).h(8).flex_none().rounded(4).bg(t.accent)))
-        .child(div().flex_none().text_size(12).text_color(t.dim).child(ago(kind === "resolved" ? task.dismissed_at : task.added_at)))
+        .child(div().flex_none().text_size(12).text_color(t.dim).child(right))
         // The menu and resolve buttons keep their place whether or not they show, so hovering moves nothing.
         .child(div().w(24).flex_none().opacity(canRename && this.hover === key ? 1 : 0).transition("opacity", 120)
           .when(canRename, (el) => el.child(this.tool(`tk-more-${task.id}`, "···", () => taskMenu(task), t))))
@@ -1027,6 +1067,7 @@ export default class Channels extends View {
           .child(this.tool("tp-close", svg(ICON("x")).size(16), () => run("layout.hide", { id: "panel" }), t)))
         .child(h_flex().px(8).pt(10).pb(4).flex_none().gap(2).child(pill("active", "Active")).child(pill("resolved", "Resolved")))
         .when(Boolean(this.failed), (el) => el.child(div().px(16).py(4).text_size(12).text_color(t.blocked).child(this.failed)))
+        .when(Boolean(shared(NOTE)) && Date.now() - (shared(NOTE)?.at ?? 0) < 12000, (el) => el.child(div().px(16).py(4).text_size(12).text_color(t.muted).child(shared(NOTE)?.message ?? "")))
         .child(div().id("tp-list").flex_1().min_h(0).pb(8).overflow_y_scrollbar()
           .child(div().relative().w_full()
             // The bar that follows the arrow keys glides between rows instead of jumping.
@@ -1093,6 +1134,7 @@ export default class Channels extends View {
       .child(svg(ICON(icon)).size(15)).child(label);
     return v_flex().size_full().py(4).bg(t.popover)
       .child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); }))
+      .when(isCloud(task) && !task?.dismissed, (el) => el.child(item("send", "send", "Send message…", () => sendTask(task))))
       .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
       .when(Boolean(task) && !task.dismissed, (el) => el
         .child(div().mx(8).my(4).h(1).bg(t.border))
@@ -1111,7 +1153,10 @@ export default class Channels extends View {
     this.original = "";
     this.arrived = false;
     cx.timer.after(20, (cx) => { this.arrived = true; cx.notify(); });
-    if (this.kind === "rename-task") {
+    if (this.kind === "send-task") {
+      this.task = findTask(p.task);
+      this.input = InputState.new({ placeholder: "Message", value: "" });
+    } else if (this.kind === "rename-task") {
       this.task = findTask(p.task);
       const name = this.task?.name ?? "";
       this.input = InputState.new({ placeholder: "Task name", value: name });
@@ -1180,6 +1225,13 @@ export default class Channels extends View {
     const was = props().channel;
     const typed = `${this.input?.value() ?? ""}`.trim().replace(/^#/, "").toLowerCase();
     const say = (message) => { this.failed = message; cx.notify(); };
+    if (kind === "send-task") {
+      const text = `${this.input.value() ?? ""}`.trim();
+      if (!text) return;
+      submit(() => {}, 'channels send "$1" "$2"', [props().task, text], `send to ${this.task?.name || "the task"}`);
+      note(this.task?.cloud?.state === "needs" ? `Sent to ${this.task?.name || "the task"}. It waits behind its open question until that is answered on claude.ai.` : `Sent to ${this.task?.name || "the task"}.`);
+      return this.close();
+    }
     if (kind === "rename-task") {
       const id = props().task;
       const name = `${this.input.value() ?? ""}`.replace(/\s+/g, " ").trim();
@@ -1218,8 +1270,8 @@ export default class Channels extends View {
     const t = theme();
     const p = props() ?? {};
     const kind = this.kind;
-    const title = { new: "New channel", rename: "Rename channel", "rename-task": "Rename task", instructions: "Instructions", icon: "Change icon", archive: `Archive ${p.channel}?` }[kind];
-    const go = { new: "Create", archive: "Archive" }[kind] ?? "Save";
+    const title = { new: "New channel", rename: "Rename channel", "rename-task": "Rename task", "send-task": `Send to ${this.task?.name || "the task"}`, instructions: "Instructions", icon: "Change icon", archive: `Archive ${p.channel}?` }[kind];
+    const go = { new: "Create", archive: "Archive", "send-task": "Send" }[kind] ?? "Save";
     // The button that carries the dialog's action is solid; on Archive it is the warning colour.
     const button = (id, text, primary, action) => h_flex().id(id).h(34).px(14).items_center().rounded(9)
       .bg(!primary ? t.raised : kind === "archive" ? t.blocked : t.solid)
@@ -1241,10 +1293,16 @@ export default class Channels extends View {
       .child(h_flex().pb(14).items_center()
         .child(div().flex_1().text_size(16).font_semibold().child(title))
         .child(this.tool("dg-x", svg(ICON("x")).size(16), () => this.close(), t)))
+      // A cloud task's question can't be answered with a message: the text waits behind it.
+      .when(kind === "send-task" && this.task?.cloud?.state === "needs", (el) => el.child(div().pb(10).text_size(12.5).text_color(t.working)
+        .child("It has a question open. This text waits behind it until the question is answered on claude.ai.")))
+      .when(kind === "send-task", (el) => el.child(label("Message")).child(field(Input.new(this.input).h(38)))
+        .child(div().pt(8).text_size(12.5).text_color(t.dim).child("Reaches the cloud session as its next message, with claude -p --cloud.")))
       .when(kind === "new" || kind === "rename" || kind === "rename-task", (el) => el.child(label("Name")).child(field(Input.new(this.input).h(38))))
       // A background session is renamed in Claude Code too; one that isn't can only be renamed from inside it.
       .when(kind === "rename-task", (el) => el.child(div().pt(8).text_size(12.5).text_color(t.dim)
-        .child(this.task?.job ? "Renames the Claude Code session too, so claude agents shows the same name."
+        .child(isCloud(this.task) ? "Claude Code has no supported way to rename a cloud session from here: the new name shows in this panel, and claude.ai keeps its title."
+          : this.task?.job ? "Renames the Claude Code session too, so claude agents shows the same name."
           : "This isn't a background session, so Claude Code can only rename it from inside, with /rename. The new name shows here; claude agents keeps the old one.")))
       .when(kind === "new", (el) => el.child(div().pt(8).text_size(12.5).text_color(t.dim)
         .child(`Lowercase letters, digits, - and _. It starts with the ${DEFAULT_ICON} icon; change that and add instructions from the channel's menu.`)))
