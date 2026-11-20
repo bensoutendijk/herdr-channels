@@ -1,29 +1,12 @@
-// Herdr's own spaces in the channels sidebar: which are listed, and which one the sidebar selects as Herdr's shown
-// space changes.
+// Plain Herdr inside the channels window: which Herdr space the window shows as Herdr's shown space changes, or whether
+// a channel is.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groups, follow } from '../mods/channels/spaces.js';
+import { follow } from '../mods/channels/spaces.js';
 
 const HOLD = 'channels';
 const sp = (id, name, extra = {}) => ({ id, name, machine: null, active: false, tabs: [], ...extra });
 const show = (list, id) => list.map((s) => ({ ...s, active: s.id === id }));
-
-test("the chats' spaces aren't listed, on any machine", () => {
-  const all = [sp('a', 'acme'), sp('h', HOLD), sp('server/h', HOLD, { machine: 'server' }), sp('server/x', 'api', { machine: 'server' })];
-  assert.deepEqual(groups(all, HOLD).map((g) => [g.machine, g.spaces.map((s) => s.id)]), [[null, ['a']], ['server', ['server/x']]]);
-});
-
-test('this computer first, then the other machines by name, each keeping Herdr\'s order', () => {
-  const all = [sp('z/1', 'one', { machine: 'zed' }), sp('b', 'b'), sp('a/1', 'x', { machine: 'alpha' }), sp('a', 'a'), sp('a/2', 'y', { machine: 'alpha' })];
-  assert.deepEqual(groups(all, HOLD).map((g) => [g.machine, g.spaces.map((s) => s.id)]),
-    [[null, ['b', 'a']], ['alpha', ['a/1', 'a/2']], ['zed', ['z/1']]]);
-});
-
-test('no spaces, or only chats, gives no groups', () => {
-  assert.deepEqual(groups([], HOLD), []);
-  assert.deepEqual(groups(undefined, HOLD), []);
-  assert.deepEqual(groups([sp('h', HOLD)], HOLD), []);
-});
 
 const base = [sp('h', HOLD), sp('a', 'acme'), sp('b', 'shell'), sp('server/x', 'api', { machine: 'server' })];
 
@@ -74,4 +57,25 @@ test('a space that is gone gives the channel back, unless Herdr moved on to anot
 test('the state is plain data, as shared state keeps it', () => {
   const s = follow({ space: null, seen: 'h', quiet: 0 }, show(base, 'a'), HOLD, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(s)), { space: 'a', seen: 'a', quiet: 0 });
+});
+
+test("the layout carries Herdr's own pieces under their own names, beside the channels' own", async () => {
+  const { readFileSync } = await import('node:fs');
+  const layout = JSON.parse(readFileSync(new URL('../layouts/channels.json', import.meta.url), 'utf8'));
+  const all = [];
+  const walk = (n) => { all.push(n); (n.children ?? []).forEach(walk); };
+  walk(layout);
+  const byId = Object.fromEntries(all.map((n) => [n.id, n]));
+  // Herdr's spaces list under the channels, its tab bar (hidden until a space is shown) and its Files/Changes panel,
+  // with the ids Herdr's tab bar looks for.
+  assert.equal(byId.spaces.content.mod, 'spaces');
+  assert.equal(byId['space-tabs'].content.mod, 'tabs');
+  assert.equal(byId['space-tabs'].hidden, true);
+  assert.equal(byId.panel.hidden, true);
+  assert.deepEqual(byId['panel-body'].children.map((c) => c.content.mod), ['files', 'changes']);
+  // The tasks panel isn't "panel" (Herdr's tab bar shows and hides that one per space).
+  assert.equal(byId['tasks-panel'].children[0].content.props.panel, true);
+  // The sidebar: channels, Herdr's spaces, then the channels' footer.
+  assert.deepEqual(byId.sidebar.children.map((c) => c.id), ['sidebar-head', 'sidebar-list', 'spaces', 'sidebar-foot']);
+  assert.equal(byId['sidebar-foot'].content.props.foot, true);
 });

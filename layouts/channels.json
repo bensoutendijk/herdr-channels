@@ -25,6 +25,34 @@
           "type": "block",
           "content": {
             "mod": "channels"
+          },
+          "size": {
+            "weight": 1
+          },
+          "min": 140
+        },
+        {
+          "id": "spaces",
+          "type": "block",
+          "content": {
+            "mod": "spaces"
+          },
+          "size": {
+            "weight": 1
+          },
+          "min": 90
+        },
+        {
+          "id": "sidebar-foot",
+          "type": "block",
+          "content": {
+            "mod": "channels",
+            "props": {
+              "foot": true
+            }
+          },
+          "size": {
+            "px": 44
           }
         }
       ],
@@ -40,6 +68,18 @@
       "id": "work",
       "type": "column",
       "children": [
+        {
+          "id": "space-tabs",
+          "type": "block",
+          "content": {
+            "mod": "tabs"
+          },
+          "size": {
+            "px": 52
+          },
+          "hidden": true,
+          "window_drag": true
+        },
         {
           "id": "bar",
           "type": "block",
@@ -78,6 +118,39 @@
     },
     {
       "id": "panel",
+      "type": "column",
+      "hidden": true,
+      "size": {
+        "px": 368
+      },
+      "min": 280,
+      "max": 900,
+      "children": [
+        {
+          "id": "panel-body",
+          "type": "stack",
+          "active": "files",
+          "children": [
+            {
+              "id": "files",
+              "type": "block",
+              "content": {
+                "mod": "files"
+              }
+            },
+            {
+              "id": "changes",
+              "type": "block",
+              "content": {
+                "mod": "changes"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tasks-panel",
       "type": "stack",
       "children": [
         {
