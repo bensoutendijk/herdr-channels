@@ -20,7 +20,7 @@ the herdr mod runs every command on the same machine. No server is involved, unl
 
 | Path | Purpose |
 |---|---|
-| `mods/channels/` | The herdr mod: sidebar (channels, and Herdr's own spaces), header bar, tasks panel and dialogs |
+| `mods/channels/` | The herdr mod: sidebar (channels, and Herdr's own spaces), header bar, tasks panel and dialogs; `backend.js` says where its store is ([on another machine](#a-store-on-another-machine)) |
 | `mods/claude/` | The Claude Code mod each channel's chat loads: the [task cards](#task-cards) above its prompt |
 | `layouts/channels.json` | The herdr layout that arranges the mod |
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
@@ -132,7 +132,48 @@ on). Running the installer again updates a previous installation in place.
 | `--no-timer` | | Install without the routines timer |
 | `--no-switch` | | Install without selecting the layout |
 | `--dry-run` | | Show what would be installed without writing anything |
+| `--name <name>` | `channels` (or the next free name) | The mod and layout's name, to install beside another channels mod |
 | `--uninstall` | | Remove what the installer added (see [Uninstalling](#uninstalling)) |
+
+### A store on another machine
+
+The mod can also front a channels store that lives on another machine Herdr reaches (one from
+`hc machine ls`): a home server whose own `channels`-style command keeps the channels, runs each
+channel's chat, and files tasks from several computers. Then only the mod and its layout are
+installed on this Mac; the store, its chats and their schedule stay on the server.
+
+```sh
+node install.mjs --on server --command "hub channels" --local laptop \
+  --projects /home/me/projects --by me --name channels-hc --no-switch
+```
+
+| Option | Meaning |
+|---|---|
+| `--on <machine>` | The Herdr machine the store's command runs on |
+| `--command <command>` | That command, as words (`hub channels`); it runs with the server's `~/.local/bin` on `PATH` |
+| `--local <name>` | What the store calls this computer: its tasks here are filed as `<name>/<session>`. Required, because the store's own `list --json` names the server, not this Mac |
+| `--projects <dir>` | The folder on the server where a chat and a fresh session start |
+| `--by <word>` | Who a task resolved from the panel is recorded as; use a word the store accepts |
+
+With a store on another machine:
+
+- Tasks open on the machine they run on: this Mac's in a local terminal, the server's and any other
+  machine's through Herdr (`hc run --on`), when Herdr reaches that machine. Their standing comes from
+  `claude agents` on the server and on this Mac.
+- The mod asks the command what it can do: `list --json` gives `features`. What the command lacks is
+  hidden rather than offered and refused. A command that lists no features gets the basics only
+  (channels, chats, tasks, resolve, rename, icon, instructions, archive): no routines, unread dots,
+  task renaming or Refresh row.
+- Without the `chat-bg` feature, a channel's chat is a tab named `#<channel id>` in the server's
+  `channels` space, running `<command> chat <name>` there. A tab already running it is reused. One
+  whose program ended is replaced, so the chat starts again on its session, unless it ended within
+  seconds of starting.
+- The sidebar's foot shows the server and whether Herdr reaches it.
+
+The mod keeps its state under its own name (`channels-hc.data`, ...), so a copy installed this way
+beside another channels mod never reads the other's. To go back, switch layouts (`⌘⇧L`, or
+`herdr-app do layout.switch --name channels`); `node install.mjs --uninstall` removes only the
+copies this repository installed.
 
 ### Updating
 

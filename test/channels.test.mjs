@@ -128,7 +128,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, channels: [], updates: { build: null, claude: '2.1.329', asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
+  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, channels: [], updates: { build: null, claude: '2.1.329', asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
   assert.match(ok([]), /No channels yet/);
 });
 

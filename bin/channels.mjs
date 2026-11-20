@@ -632,6 +632,8 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh'];
+
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
   if (only) channelOf(store, only, { archived: true });
@@ -641,6 +643,9 @@ export function listChannels({ dir, home = homedir(), all = false, only = null }
   const position = new Map(store.channels.filter((c) => !c.archived_at).map((c, i) => [c, i + 1]));
   return {
     machine: LOCAL,
+    // What this command can do beyond the commands every channels store has: the herdr mod hides what a store lacks
+    // (mods/channels/backend.js, which lists them).
+    features: FEATURES,
     remote_control: remoteOn(),
     // Cloud tasks: on or off here, and whether `claude --cloud <id>` attaches a terminal for this account.
     cloud: { on: cloudOn(), attach: cloudOn() && cache?.attach?.state === 'on', ok_at: cache?.ok_at ? new Date(cache.ok_at).toISOString() : null, error: cache?.error?.message ?? null },

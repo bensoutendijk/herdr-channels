@@ -18,41 +18,51 @@
 // The main area is herdr's shown tab. A channel's chat runs in one herdr-core terminal, named
 // chat-<channel id>, which `channels chat <name> --bg` starts (a routine starts the same one when
 // the chat is closed). It is shown as a tab in a herdr space called "channels", made on first use
-// and reused after. Everything runs on this machine: the
+// and reused after. By default everything runs on this machine: the
 // `channels` command (bin/channels.mjs in the herdr-channels repo) holds the store, and
-// config.js beside this file says where it is.
+// config.js beside this file says where it is. config.js can instead point at a store on another
+// machine (`hub channels` on a home server: see backend.js). Then the store's commands run
+// there, tasks can be on any machine Herdr knows, and, when that command can't start a chat in the
+// background, the chat is a tab in that machine's "channels" space running `<command> chat <name>`.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Switch, RadioGroup, Radio } from "gpui-base";
 import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
-import { chatAlive, afterEnd, lastLine } from "./chats.js";
+import { chatAlive, afterEnd, lastLine, QUICK_MS } from "./chats.js";
 import { remember, restore, keyOf } from "./panels.js";
 import { refreshRow } from "./updates.js";
 import { groups as spaceGroups, follow } from "./spaces.js";
-import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window } from "herdr";
+import * as B from "./backend.js";
+import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window, machines } from "herdr";
 
 // The settings, from config.js (install.mjs writes it). MOD and LAYOUT are this mod's folder and
 // its layout's name, which the install changes when "channels" is already taken.
 const MOD = CONFIG.mod || "channels";
 const LAYOUT = CONFIG.layout || "channels";
-const COMMAND = CONFIG.command || "channels"; // the channels command: a path, or a name on PATH
+// The store: which command, on which machine, and what it calls this computer (backend.js).
+const BACKEND = B.backendOf(CONFIG, home());
+const ON = BACKEND.on; // the Herdr machine the store's command runs on; null is this computer
 // Where it, node, claude, hc and python3 are: a program started from the app gets a short PATH.
 const PATHS = [CONFIG.path, "$HOME/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"].filter(Boolean).join(":");
-const PROJECTS = CONFIG.projects || `${home()}/projects`; // where a fresh session and a channel chat start
-const BY = CONFIG.by || "user"; // who a task resolved here is recorded as resolved by
+const PROJECTS = BACKEND.projects; // where a fresh session and a channel chat start, on the store's machine
+const LOCAL_PROJECTS = BACKEND.localProjects; // and where one starts on this computer
+const BY = BACKEND.by; // who a task resolved here is recorded as resolved by
 const HOLD = "channels"; // the herdr space that holds the chats' tabs
-const DATA = "channels.data"; // what the sidebar last read: { channels, error, at }
-const TICK = "channels.tick"; // bumped after a change so the sidebar reads the store again
-const CURRENT = "channels.current"; // the selected channel's name
-const ORDER = "channels.order"; // this computer's channel order (ids), until the store keeps one
-const TASK = "channels.task"; // the id of the task open in the tasks panel, if any
-const TASK_TERM = "channels.taskterm"; // and the address of the terminal showing it
-const LIST_FOCUS = "channels.listfocus"; // when the panel went back to the task list, so the list takes the keyboard
-const LAST_TASK = "channels.lasttask"; // the task that was open, so the list's cursor starts on it
-const OPENED = "channels.opened"; // when a task was last opened in the panel, so its prompt takes the keyboard
+// This mod's keys in herdr's shared state: "channels.data" and so on, under its own folder's name, so a second copy
+// installed beside it (mods/channels-hc) keeps its own.
+const K = (word) => B.keyOf(MOD, word);
+const DATA = K("data"); // what the sidebar last read: { channels, error, at }
+const TICK = K("tick"); // bumped after a change so the sidebar reads the store again
+const CURRENT = K("current"); // the selected channel's name
+const ORDER = K("order"); // this computer's channel order (ids), until the store keeps one
+const TASK = K("task"); // the id of the task open in the tasks panel, if any
+const TASK_TERM = K("taskterm"); // and the address of the terminal showing it
+const LIST_FOCUS = K("listfocus"); // when the panel went back to the task list, so the list takes the keyboard
+const LAST_TASK = K("lasttask"); // the task that was open, so the list's cursor starts on it
+const OPENED = K("opened"); // when a task was last opened in the panel, so its prompt takes the keyboard
 // What each channel's panel showed last: channel id -> null (the list) or { id, job } (a task), so coming back to
 // a channel shows it again (see panels.js). Shared state is saved to shared.json, so this outlasts a restart.
-const PANELS = "channels.panels";
+const PANELS = K("panels");
 const rememberPanel = (channel, task) => { if (channel) setShared(PANELS, remember(shared(PANELS), channel, task)); };
 const DEFAULT_ICON = "💬"; // every channel has an icon; this is the one a new channel starts with
 const iconOf = (channel) => channel?.icon || DEFAULT_ICON;
@@ -81,7 +91,7 @@ const openRemote = async (task) => {
 // claude.ai.
 const isCloud = (task) => task?.machine === "cloud";
 const cloudAttach = () => shared(DATA)?.cloud?.attach === true;
-const NOTE = "channels.note"; // a word after something done here: { message, at }
+const NOTE = K("note"); // a word after something done here: { message, at }
 const note = (message) => setShared(NOTE, { message, at: Date.now() });
 const BACK = "herdr.back";
 let viewerSource = null;
@@ -98,8 +108,14 @@ const SHOWN = 216; // emoji cells drawn at once: enough for a group, cheap to dr
 const ICON = (name) => `mods/${MOD}/icons/${name}.svg`;
 
 // What the store calls this computer (tasks are filed as `<name>/<session>`): `channels list`
-// says, from CHANNELS_MACHINE or the host name.
-const localName = () => shared(DATA)?.machine ?? null;
+// says, from CHANNELS_MACHINE or the host name; for a store on another machine, config.js's `local`.
+const localName = () => B.localName(BACKEND, shared(DATA));
+// The machine the store is on, by the store's own name for it: this computer's, or the other machine's.
+const storeName = () => shared(DATA)?.machine ?? ON ?? localName();
+// What the store's command can do (backend.js): a feature it lacks is hidden, not offered and then refused.
+// Until the store has answered once, a store on this computer is this repo's command, and one on another machine is
+// taken to have none of them.
+const has = (feature) => (shared(DATA)?.features ?? (ON ? [] : B.ALL_FEATURES)).includes(feature);
 
 function uuid() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -107,11 +123,11 @@ function uuid() {
   return `${hex(8)}-${hex(4)}-4${hex(3)}-${"89ab"[Math.floor(Math.random() * 4)]}${hex(3)}-${hex(12)}`;
 }
 
-// Runs a shell line on this machine. The folders for PATH arrive as $0 and the channels command as
-// $1, so no quoting can go wrong; `channels` in the line runs that command, and the line's own
-// args arrive as "$1", "$2", ...
-const sh = (script, args = [], { timeout = 30000 } = {}) =>
-  exec("sh", ["-c", `PATH="$0:$PATH"; CHANNELS_CMD="$1"; shift; channels() { "$CHANNELS_CMD" "$@"; }; ${script}`, PATHS, COMMAND, ...args], { timeout });
+// Runs a shell line on the store's machine (`on: null` runs it on this one). The folders for PATH
+// arrive as $0; `channels` in the line runs the store's command, quoted word by word, and the
+// line's own args arrive as "$1", "$2", ...
+const sh = (script, args = [], { timeout = 30000, on = ON } = {}) =>
+  exec("sh", ["-c", `${B.shellPrelude({ ...BACKEND, on })}${script}`, PATHS, ...args], { timeout, on });
 
 // The same for a command that must succeed: its output, or an Error with its last line.
 async function store(script, args, timeout) {
@@ -126,10 +142,10 @@ const changed = () => setShared(TICK, Date.now());
 // copy is showing and queues the command; the sidebar copy, which lives as long as the layout,
 // carries the queue out in order (a dialog can close before its command has run). While commands
 // are out, a read of the store that started earlier is ignored, so it can't put the old state back.
-const OPS = "channels.ops"; // queued commands: { script, args, what, at }
-const BUSY = "channels.busy"; // the sidebar is carrying the queue out
-const OP_AT = "channels.opAt"; // when something last changed here
-const FAIL = "channels.fail"; // the last command that failed: { message, at }
+const OPS = K("ops"); // queued commands: { script, args, what, at }
+const BUSY = K("busy"); // the sidebar is carrying the queue out
+const OP_AT = K("opAt"); // when something last changed here
+const FAIL = K("fail"); // the last command that failed: { message, at }
 const NAME = /^[a-z0-9][a-z0-9_-]{0,79}$/; // the store's rule for a channel name
 const fail = (message) => setShared(FAIL, { message, at: Date.now() });
 function submit(change, script, args, what) {
@@ -166,33 +182,39 @@ function standing(agent) {
 async function readStore() {
   const out = await store("channels list --json && printf '\\n@@\\n' && (claude agents --json 2>/dev/null || echo '[]')");
   const [list, there] = out.split("\n@@\n");
-  const channels = JSON.parse(list).channels ?? [];
-  const index = (text) => {
-    const by = new Map();
-    try { for (const a of JSON.parse(text)) { if (a.sessionId) by.set(a.sessionId, a); if (a.id) by.set(a.id, a); } } catch { /* none */ }
-    return by;
-  };
-  const agents = index(there);
+  const head = JSON.parse(list);
+  const channels = head.channels ?? [];
+  // Claude Code's list on the store's machine; for a store on another machine, this computer's too, each for the
+  // tasks filed under that machine's name. A task on a third machine stays "ready": its list isn't read.
+  const indexes = {};
+  let fallback = B.agentIndex(there);
+  if (ON) {
+    indexes[head.machine ?? ON] = fallback;
+    fallback = null;
+    const mine = localName();
+    if (mine) {
+      try { indexes[mine] = B.agentIndex((await sh("claude agents --json 2>/dev/null || echo '[]'", [], { on: null })).stdout); } catch { /* none here */ }
+    }
+  }
   for (const c of channels) {
     for (const t of c.tasks ?? []) {
       // A cloud task's state comes from the account's sessions list, through `channels list`.
       if (isCloud(t)) { t.standing = t.cloud?.state ?? "ready"; continue; }
-      const a = agents.get(t.session_id) ?? agents.get(t.job);
+      const a = B.agentOf(t, indexes, fallback);
       // A copy keeps its task's name, and so does a session renamed here that Claude Code can't rename (see
       // `channels rename-task`): the list's name stands for those.
       if (a?.name && t.how !== "copied" && !t.named) t.name = a.name;
       t.standing = standing(a);
     }
   }
-  const head = JSON.parse(list);
-  return { machine: head.machine ?? null, remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, channels };
+  return { machine: head.machine ?? null, features: B.featuresOf(head), remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, channels };
 }
 
 // Refresh: the running chats restart on what is installed now (a newer Claude Code, a new herdr-channels build), each
 // once it is idle and on the same session. The backend's `channels refresh` does it and says what it did; the sidebar
 // carries it out, since it lives as long as the layout.
-const REFRESHING = "channels.refreshing"; // when a refresh started, while it runs
-const REFRESHED = "channels.refreshed"; // what the last one did: { message, at, failed }
+const REFRESHING = K("refreshing"); // when a refresh started, while it runs
+const REFRESHED = K("refreshed"); // what the last one did: { message, at, failed }
 async function refreshNow() {
   if (shared(REFRESHING) && Date.now() - shared(REFRESHING) < 600000) return;
   setShared(REFRESHING, Date.now());
@@ -219,18 +241,17 @@ const active = (channel) => (channel?.routines ?? []).some((r) => r.enabled);
 const liveTasks = (channel) => (channel?.tasks ?? []).filter((t) => !t.dismissed).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`));
 const doneTasks = (channel) => (channel?.tasks ?? []).filter((t) => t.dismissed).sort((a, b) => `${b.dismissed_at}`.localeCompare(`${a.dismissed_at}`));
 
-// The herdr machine a task runs on: null is this computer, undefined is one we can't reach (a
-// task filed under another name: the store is this computer's only).
+// The herdr machine a task runs on: null is this computer, a name is another machine Herdr knows,
+// undefined is one we can't reach (backend.js).
 function herdrMachine(task) {
-  if (isCloud(task)) return null; // opened here: in a terminal when it attaches, else on claude.ai
-  return task.machine === localName() ? null : undefined;
+  return B.herdrMachine(task, { backend: BACKEND, data: shared(DATA), known: ON ? machines().map((m) => m.name).filter(Boolean) : [] });
 }
 
 // Herdr's own spaces in the sidebar (spaces.js). SPACE is { space, seen, quiet, folded }: the selected Herdr space
 // (null while a channel is), the space Herdr showed at the sidebar's last look, until when a choice made here
 // stands while Herdr catches up, and whether selecting a space folded the tasks panel away (so leaving it brings
 // the panel back).
-const SPACE = "channels.space";
+const SPACE = K("space");
 const QUIET_MS = 1500;
 const inSpace = () => Boolean(shared(SPACE)?.space);
 const selectedSpace = () => { const id = shared(SPACE)?.space; return id ? spaces().find((s) => s.id === id) ?? null : null; };
@@ -330,9 +351,11 @@ async function openTask(task, where) {
     const old = OLD_VIEWERS.map((prefix) => viewerName(prefix, task));
     for (const x of terminals()) if (old.includes(x.name) && there(x.address)) run("terminal.kill", { terminal: x.address });
     const cmd = task.job || !UUID.test(task.session_id) ? await attachTo(shortId(task)) : ["claude", "--resume", task.session_id, ...resumeSettings()];
-    const folder = task.folder ?? PROJECTS;
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", termName(task), "--cwd", folder,
-      "--", "sh", "-c", 'PATH="$0:$PATH" exec "$@"', PATHS, ...cmd]);
+    // A task on another machine runs its viewer there (sent as program text, so that machine needs only python3),
+    // with that machine's ~/.local/bin first on PATH, where Claude Code is.
+    const folder = task.folder ?? (machine ? PROJECTS : LOCAL_PROJECTS);
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", termName(task), "--cwd", folder, ...(machine ? ["--on", machine] : []),
+      "--", "sh", "-c", machine ? 'PATH="$HOME/.local/bin:$0:$PATH" exec "$@"' : 'PATH="$0:$PATH" exec "$@"', PATHS, ...cmd]);
     if (r.code !== 0) throw new Error((r.stderr.trim() || r.stdout.trim() || `hc exited ${r.code}`).split("\n").pop());
     address = JSON.parse(r.stdout).address;
   }
@@ -392,13 +415,13 @@ function followPanel(c) {
 // the same one in the background). Opening the channel shows that terminal: the tab already showing
 // it, else a new tab in the "channels" space made for it with terminal.keep. A chat an earlier
 // version opened as a tab of its own (named "#<channel id>") is shown as before until it ends.
-const CHATS = "channels.chats"; // channel id -> the address of its chat's terminal, as last found
-const chatOf = (c) => ({ machine: localName(), session_id: `#${c.id ?? c.name}`, job: `#${c.id ?? c.name}`, name: "", folder: PROJECTS });
+const CHATS = K("chats"); // channel id -> the address of its chat's terminal, as last found
+const chatOf = (c) => ({ machine: storeName(), session_id: `#${c.id ?? c.name}`, job: `#${c.id ?? c.name}`, name: "", folder: PROJECTS });
 const chatAddress = (c) => (shared(CHATS) ?? {})[c.id] ?? c.chat_terminal ?? null;
 const termOf = (address) => (address ? terminals().find((x) => x.address === address) ?? null : null);
 // Channels whose chat stopped right after it started: id -> { message, at }. The sidebar doesn't start those
 // again on its own; opening the channel (a click) does.
-const DOWN = "channels.down";
+const DOWN = K("down");
 const downOf = (c) => (c ? (shared(DOWN) ?? {})[c.id] ?? null : null);
 function setDown(c, value) {
   const all = { ...(shared(DOWN) ?? {}) };
@@ -410,7 +433,7 @@ function setDown(c, value) {
 // shown tab: that would be whatever tab herdr picked when the chat's closed, often another channel's
 // chat. The main block's own content is kept aside meanwhile and put back after. The sidebar's
 // timer calls this every second too, so the layout always ends up matching.
-const MAIN_SAVED = "channels.main";
+const MAIN_SAVED = K("main");
 // How the main area frames a tab's panes, as layouts/channels.json says: cards, drawn only when a tab is split (a
 // space's terminals side by side), so a chat alone shows bare.
 const MAIN_PANE = { gap: 6, radius: 6, border: { width: 1, color: "border" }, focus: { width: 1, color: "accent" } };
@@ -491,12 +514,13 @@ const finding = new Map();
 const findingNow = (id) => finding.has(id) && Date.now() - finding.get(id) < 60000;
 // A retry asked for by a view that goes away as the chat comes back (the main area's placeholder): the
 // sidebar, which lives as long as the layout, carries it out.
-const RETRY = "channels.retry"; // { channel, at }
+const RETRY = K("retry"); // { channel, at }
 function openChannel(c, { auto = false } = {}) {
   const leaving = current()?.name !== c.name;
   if (inSpace()) selectSpace(null); // back from a Herdr space to the channel
   setShared(CURRENT, c.name);
   if (leaving) followPanel(c);
+  if (!has("chat-bg")) return openChatTab(c, { auto });
   const was = chatAddress(c);
   if (chatAlive(termOf(was)) && selectChat(was)) { if (downOf(c)) setDown(c, null); return; }
   const old = oldChatTab(c);
@@ -522,12 +546,50 @@ function openChannel(c, { auto = false } = {}) {
     .finally(() => finding.delete(c.id));
 }
 
+// A store whose command can't start a chat in the background: the chat is a tab, named
+// "#<channel id>", in the "channels" space on the store's machine, running `<command> chat <name>` in the
+// foreground there. Herdr starts it, so it shows on this screen; a rename keeps it, since the tab is keyed by id. A
+// tab whose program has ended (only a shell is left: /exit, a crash) is replaced, so the chat starts again on its
+// session, unless it ended within seconds of starting: then it waits, with the reason, for a click (see afterEnd).
+const tabStarted = new Map(); // channel id -> when this copy last started its chat's tab
+const chatTab = (c) => { const space = holdSpace(ON); const tab = tabOf(space, chatOf(c)); return tab ? { space, tab } : null; };
+const tabDead = (tab) => panes().some((p) => p.tab === tab.id && p.program?.shell);
+function openChatTab(c, { auto }) {
+  const hit = chatTab(c);
+  if (hit && !tabDead(hit.tab)) {
+    run("space.select", { id: hit.space.id });
+    run("tab.select", { id: hit.tab.id });
+    if (downOf(c)) setDown(c, null);
+    return;
+  }
+  if (downOf(c)) { if (auto) return; setDown(c, null); }
+  const started = tabStarted.get(c.id);
+  // A tab asked for a moment ago may not be there yet (another machine answers in its own time): one at a time.
+  if (!hit && started && Date.now() - started < 8000) return;
+  if (hit && auto && started && Date.now() - started < QUICK_MS) {
+    const secs = Math.max(0, Math.round((Date.now() - started) / 1000));
+    return setDown(c, { message: `#${c.name}'s chat stopped ${secs}s after it started.`, last: null, at: Date.now() });
+  }
+  tabStarted.set(c.id, Date.now());
+  const argv = [...BACKEND.command, "chat", c.name];
+  const name = shortId(chatOf(c));
+  if (!hit?.space && !holdSpace(ON)) return run("space.new", { name: HOLD, machine: ON ?? "", folder: PROJECTS, tab: name, argv });
+  const space = hit?.space ?? holdSpace(ON);
+  run("space.select", { id: space.id });
+  run("tab.new", { space: space.id, name, folder: PROJECTS, argv });
+  if (hit) run("tab.close", { id: hit.tab.id, confirmed: true });
+}
+
 const isShown = (task) => shared(TASK) === task.id;
 
 // Whether the main area is showing this channel's chat. The main area is herdr's shown tab, which
 // every layout shares: another layout, or a key, can leave something else there.
 function chatShown(c) {
   const space = spaces().find((p) => p.active);
+  if (!has("chat-bg")) {
+    const hit = chatTab(c);
+    return Boolean(hit && space?.id === hit.space.id && hit.tab.active && !tabDead(hit.tab));
+  }
   if (!space || space.name !== HOLD || (space.machine ?? null) !== null) return false;
   const tab = space.tabs.find((x) => x.active);
   if (!tab) return false;
@@ -549,7 +611,10 @@ const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog])
 // A task's menu (Rename, Open on claude.ai when it has a link, Resolve) opens at the pointer; its Rename dialog looks
 // like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
-const taskMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: (task.dismissed ? 44 : 87) + (remoteLink(task) ? 34 : 0) + (isCloud(task) && !task.dismissed ? 34 : 0), props: { taskmenu: task.id } });
+// The menu's items above its line (Rename, Send, Open on claude.ai) and below it (Resolve), as render_taskmenu draws them.
+const menuTop = (task) => (has("rename-task") ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
+const menuItems = (task) => menuTop(task) + (task.dismissed ? 0 : 1);
+const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: 10 + 34 * menuItems(task) + (menuTop(task) && !task.dismissed ? 9 : 0), props: { taskmenu: task.id } });
 const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
 const renameTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 240, props: { dialog: "rename-task", task: task.id } });
 const resolveTask = (id) => {
@@ -724,11 +789,11 @@ export default class Channels extends View {
           if (list.length) openTask(list[(at + (c === "task-next" ? 1 : -1) + list.length) % list.length]).catch(() => {});
         } else if (c === "tasks") showTasks();
         // channels.rename-task: the Rename dialog for the task open in the panel.
-        else if (c === "rename-task") { const task = findTask(shared(TASK)); if (task) renameTask(task); }
+        else if (c === "rename-task" && has("rename-task")) { const task = findTask(shared(TASK)); if (task) renameTask(task); }
         // channels.open-task: a task card's Open, in the chat's Claude Code (see openRequested).
         else if (c === "open-task") openRequested(cx, () => this.refresh(cx)).catch((err) => fail(`Couldn't open the task: ${String(err?.message ?? err)}`));
         // channels.rename / .instructions / .icon / .archive: that dialog for the selected channel.
-        else if (DIALOGS[c] && c !== "new" && current()) openDialog(c, current().name);
+        else if (DIALOGS[c] && c !== "new" && (c !== "routines" || has("routines")) && current()) openDialog(c, current().name);
         cx.notify();
       }
     });
@@ -739,7 +804,7 @@ export default class Channels extends View {
       const started = Date.now();
       let next;
       try { next = { ...(await readStore()), error: null, at: Date.now() }; }
-      catch (err) { next = { machine: shared(DATA)?.machine ?? null, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, updates: shared(DATA)?.updates ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
+      catch (err) { next = { machine: shared(DATA)?.machine ?? null, features: shared(DATA)?.features, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, updates: shared(DATA)?.updates ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
       // Something changed here while this read was out: what it brought back is older.
       if (shared(BUSY) || (shared(OP_AT) ?? 0) > started) return;
       setShared(DATA, next);
@@ -849,7 +914,7 @@ export default class Channels extends View {
     const t = theme();
     const data = shared(DATA);
     const here = current();
-    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: 200, height: 190, props: { menu: c.name } });
+    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: 200, height: has("routines") ? 190 : 156, props: { menu: c.name } });
     const list = channels();
     const drag = this.drag?.moved ? this.drag : null;
     const fresh = new Set(this.knownChannels ? list.filter((c) => !this.knownChannels.has(c.name)).map((c) => c.name) : []);
@@ -955,7 +1020,7 @@ export default class Channels extends View {
     const list = spaceGroups(spaces(), HOLD);
     const chosen = shared(SPACE)?.space ?? null;
     const remote = list.some((g) => g.machine !== null);
-    const add = (machine) => () => run("space.new", machine ? { machine } : { machine: "", folder: PROJECTS });
+    const add = (machine) => () => run("space.new", machine ? { machine } : { machine: "", folder: LOCAL_PROJECTS });
     const row = (s) => {
       const selected = s.id === chosen;
       const tabs = s.tabs.filter((x) => !x.settled).length;
@@ -987,12 +1052,16 @@ export default class Channels extends View {
   }
 
   // The foot of the sidebar: this machine, which holds the channels, and whether the store answers.
+  // A store on another machine: that machine, and whether Herdr reaches it now.
   footer(t, data) {
-    const [color, text] = data?.error ? [t.blocked, "store unreadable"] : data ? [t.ansi2, "on this Mac"] : [t.dim, "reading…"];
+    const link = ON ? B.linkState(BACKEND, machines(), data?.error) : null;
+    const [color, text] = ON
+      ? { connected: [t.ansi2, "connected"], connecting: [t.dim, "connecting…"], unreachable: [t.blocked, "unreachable"], unreadable: [t.blocked, "store unreadable"] }[link]
+      : data?.error ? [t.blocked, "store unreadable"] : data ? [t.ansi2, "on this Mac"] : [t.dim, "reading…"];
     return h_flex().h(44).flex_none().px(18).gap(10).items_center().border_t(1).border_color(t.border)
       .child(div().w(8).h(8).rounded(4).bg(color))
-      .child(svg(ICON("monitor")).size(13).text_color(t.muted))
-      .child(div().text_size(13).text_color(t.muted).child(data?.machine ?? "this Mac"))
+      .child(svg(ICON(ON ? "server" : "monitor")).size(13).text_color(t.muted))
+      .child(div().text_size(13).text_color(t.muted).child(ON ?? data?.machine ?? "this Mac"))
       .child(div().flex_1().text_size(12.5).text_color(t.dim).child(text));
   }
 
@@ -1030,7 +1099,7 @@ export default class Channels extends View {
         .child(div().id("bar-channel").text_size(14).font_medium().cursor_pointer()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openChannel(here)).child(here.name)))
       .child(div().flex_1())
-      .when(Boolean(here) && Boolean(localName()), (el) => el.child(this.where(localName(), t)))
+      .when(Boolean(here) && Boolean(storeName()), (el) => el.child(this.where(storeName(), t)))
       .child(this.tool("bar-tasks", svg(ICON("panel-right")).size(16), () => run("layout.toggle", { id: "panel" }), t)
         .when(!find(layout(), "panel")?.hidden, (el) => el.bg(t.selected).text_color(t.foreground)));
   }
@@ -1072,7 +1141,7 @@ export default class Channels extends View {
   // --bg` picks the session's id itself, so it is filed by its job.
   startFresh(channel, cx) {
     const id = uuid();
-    const task = { id: `pending/${id}`, machine: localName(), session_id: id, job: null, name: FRESH, folder: PROJECTS, standing: "needs", added_at: new Date().toISOString() };
+    const task = { id: `pending/${id}`, machine: storeName(), session_id: id, job: null, name: FRESH, folder: PROJECTS, standing: "needs", added_at: new Date().toISOString() };
     this.pending.push({ channel, task });
     cx.notify();
     cx.spawn(async (cx) => {
@@ -1097,7 +1166,7 @@ export default class Channels extends View {
   open(task, cx) {
     this.keys.want = false;
     // Opening a task is seeing its events: its unread dot goes, and the store follows.
-    if (task.unread) submit((all) => eachTask(all, task.id, (x) => { x.unread = null; }), 'channels seen "$1"', [task.id], `mark ${task.name || "the task"} seen`);
+    if (task.unread && has("seen")) submit((all) => eachTask(all, task.id, (x) => { x.unread = null; }), 'channels seen "$1"', [task.id], `mark ${task.name || "the task"} seen`);
     cx.spawn(async (cx) => {
       try { await openTask(task); this.failed = null; } catch (err) { this.failed = String(err?.message ?? err); }
       cx.notify();
@@ -1182,7 +1251,8 @@ export default class Channels extends View {
       const closed = this.leaving.has(task.id) || fresh.has(task.id);
       const canResolve = kind !== "resolved" && filed.has(task.id);
       const unread = kind !== "resolved" && Boolean(task.unread) && !isShown(task);
-      const canRename = filed.has(task.id); // a session still starting has no task to rename yet
+      // A session still starting has no task to rename yet, nor a menu. A store that can't rename a task offers none.
+      const canMenu = filed.has(task.id) && menuItems(task) > 0;
       // A cloud task: a cloud glyph after its name, its cost instead of its age, and, when its state can't be known
       // now (the sessions list failed, or cloud tasks are off), a crossed-out cloud and "state unknown".
       const cloud = isCloud(task) ? task.cloud ?? {} : null;
@@ -1191,7 +1261,7 @@ export default class Channels extends View {
       return h_flex().id(`tk-${task.id}`).mx(8).px(8).gap(12).items_center().rounded(8).overflow_hidden().flex_none()
         .h(closed ? 0 : TASK_H).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
         .when(reachable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(task, cx)))
-        .when(canRename, (el) => el.on_mouse_down("right", () => taskMenu(task)))
+        .when(canMenu, (el) => el.on_mouse_down("right", () => taskMenu(task)))
         .on_hover(this.hovering(key))
         .child(div().w(28).h(28).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().child(mark[unknown ? "unknown" : kind]()))
         .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(reachable && !unknown ? t.foreground : t.dim).when(unread, (el) => el.font_medium()).child(task.name || shortId(task)))
@@ -1200,8 +1270,8 @@ export default class Channels extends View {
         .when(unread, (el) => el.child(div().id(`tk-new-${task.id}`).w(8).h(8).flex_none().rounded(4).bg(t.accent)))
         .child(div().flex_none().text_size(12).text_color(t.dim).child(right))
         // The menu and resolve buttons keep their place whether or not they show, so hovering moves nothing.
-        .child(div().w(24).flex_none().opacity(canRename && this.hover === key ? 1 : 0).transition("opacity", 120)
-          .when(canRename, (el) => el.child(this.tool(`tk-more-${task.id}`, "···", () => taskMenu(task), t))))
+        .child(div().w(24).flex_none().opacity(canMenu && this.hover === key ? 1 : 0).transition("opacity", 120)
+          .when(canMenu, (el) => el.child(this.tool(`tk-more-${task.id}`, "···", () => taskMenu(task), t))))
         .when(kind !== "resolved", (el) => el.child(div().w(24).flex_none().opacity(canResolve && this.hover === key ? 1 : 0).transition("opacity", 120)
           .when(canResolve, (e2) => e2.child(this.tool(`tk-done-${task.id}`, svg(ICON("check")).size(14), (_e, cx) => this.resolve(task, cx), t)))));
     };
@@ -1251,13 +1321,13 @@ export default class Channels extends View {
         .transition("left", 200).transition("opacity", 160).px(8).gap(8).items_center().text_color(t.foreground)
         .child(this.tool("th-back", svg(ICON("chevron-left")).size(16), () => showTasks(), t))
         .child(v_flex().flex_1().min_w(0).gap(2)
-          .child(div().id("th-name").truncate().text_size(14).font_medium().when(Boolean(task), (el) => el.cursor_pointer()
+          .child(div().id("th-name").truncate().text_size(14).font_medium().when(Boolean(task) && has("rename-task"), (el) => el.cursor_pointer()
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => renameTask(task))).child(task?.name || FRESH))
           .child(h_flex().gap(8).items_center().text_size(12.5)
             .child(div().text_color(color).child(label))
-            .child(this.where(task?.machine ?? localName(), t))))
+            .child(this.where(task?.machine ?? storeName(), t))))
         .when(Boolean(remoteLink(task)), (el) => el.child(this.tool("th-remote", svg(ICON("external-link")).size(15), () => { openRemote(task); }, t)))
-        .when(Boolean(task), (el) => el.child(this.tool("th-rename", svg(ICON("square-pen")).size(15), () => renameTask(task), t)))
+        .when(Boolean(task) && has("rename-task"), (el) => el.child(this.tool("th-rename", svg(ICON("square-pen")).size(15), () => renameTask(task), t)))
         .when(Boolean(task) && !task.dismissed, (el) => el.child(this.tool("th-done", svg(ICON("check")).size(15), resolve, t)))
         .child(this.tool("th-close", svg(ICON("x")).size(16), () => { showTasks(); run("layout.hide", { id: "panel" }); }, t)));
   }
@@ -1274,7 +1344,7 @@ export default class Channels extends View {
     return v_flex().size_full().py(4).bg(t.popover)
       .child(item("rename", "square-pen", "Rename", "rename"))
       .child(item("instructions", "file-text", "Instructions", "instructions"))
-      .child(item("routines", "clock", "Routines", "routines"))
+      .when(has("routines"), (el) => el.child(item("routines", "clock", "Routines", "routines")))
       .child(item("icon", "layers", "Change icon", "icon"))
       .child(div().mx(8).my(4).h(1).bg(t.border))
       .child(item("archive", "archive", "Archive", "archive"));
@@ -1291,11 +1361,11 @@ export default class Channels extends View {
       .on_click(() => { closeOverlay(p.overlay); action(); })
       .child(svg(ICON(icon)).size(15)).child(label);
     return v_flex().size_full().py(4).bg(t.popover)
-      .child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); }))
+      .when(has("rename-task"), (el) => el.child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); })))
       .when(isCloud(task) && !task?.dismissed, (el) => el.child(item("send", "send", "Send message…", () => sendTask(task))))
       .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
       .when(Boolean(task) && !task.dismissed, (el) => el
-        .child(div().mx(8).my(4).h(1).bg(t.border))
+        .when(menuTop(task) > 0, (e2) => e2.child(div().mx(8).my(4).h(1).bg(t.border)))
         .child(item("resolve", "check", "Resolve", () => { resolveTask(task.id); if (isShown(task)) showTasks(); })));
   }
 
