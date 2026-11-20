@@ -14,13 +14,13 @@ Everything is local: the channel store is a folder on disk, tasks run under your
 the herdr mod runs every command on the same machine. No server is involved, unless you turn on
 [cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
 
-![The channels layout in Herdr: the channel list on the left, the #website channel's Claude Code chat in the middle, and the tasks panel on the right with one task that needs input, one working and one ready for review](preview.png)
+![The channels layout in Herdr: the channel list on the left with a Herdr space, acme-website, under Spaces below it; the #website channel's Claude Code chat in the middle, summing up its tasks above two task cards; and the tasks panel on the right with one task that needs input, one working and one ready for review](preview.png)
 
 ## Contents
 
 | Path | Purpose |
 |---|---|
-| `mods/channels/` | The herdr mod: sidebar, header bar, tasks panel and dialogs |
+| `mods/channels/` | The herdr mod: sidebar (channels, and Herdr's own spaces), header bar, tasks panel and dialogs |
 | `mods/claude/` | The Claude Code mod each channel's chat loads: the [task cards](#task-cards) above its prompt |
 | `layouts/channels.json` | The herdr layout that arranges the mod |
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
@@ -176,6 +176,21 @@ same session, with its history.
   <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: its header has the task's name, Needs input, and Rename, Resolve and Close buttons; below, the task's Claude Code session asks which homepage headline to use, with three options to choose from">
 
   <img src="docs/task-menu.png" width="420" alt="The tasks panel with a task's menu open over the Watch the release build row, offering Rename and Resolve">
+
+- **Spaces.** Everything that isn't a channel is under **Spaces**, below the channels: Herdr's own
+  spaces, for a shell, a plain Claude Code session or anything else Herdr runs, without leaving the
+  channels window. They are grouped by machine when some are on another machine. A dot shows a
+  space's agents (working, done, or needing you). Click a space to show it in the main area. The bar
+  above then shows its tabs: click one to show it, **×** to close it, **+** to add one. Herdr's own
+  keys work there too (new tab, split, close, and the space keys). The tasks panel folds away while
+  a space is shown and comes back when you select a channel again. **+** next to Spaces opens a new
+  space in the projects folder. Selecting a space with Herdr's keys selects it in the sidebar too,
+  and selecting the `channels` space (where the chats live) goes back to the channel. The spaces are
+  ordinary Herdr spaces: they keep running when you switch away, and Herdr's own layout
+  (`layout.switch`) shows them as well. A Claude Code session started there isn't a channel task;
+  `channels file <channel> <session>` files it into a channel.
+
+  <img src="docs/spaces.png" width="720" alt="The channels window with a Herdr space selected under Spaces in the sidebar: the main area shows the acme-website space's claude tab, a Claude Code session beside a shell showing the repository's git log, and the bar above lists the space's tabs, claude and dev server, with a plus to add one">
 
 ### Task events
 

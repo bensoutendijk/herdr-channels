@@ -4,7 +4,10 @@
 // - the sidebar (no props): the channels, each with an icon and an L-shaped connector, a "…"
 //   menu on hover and "New channel" at the bottom. It also reads the `channels` store on this
 //   machine on a timer and shares the result, so the other copies never poll.
-// - the bar ({ bar: true }): what the main area is showing, and the button for the tasks panel.
+//   Under the channels, "Spaces": Herdr's own spaces (all but the chats' space), by machine. Clicking one shows it
+//   in the main area, with Herdr's keys for tabs and splits; the tasks panel folds away until a channel is picked.
+// - the bar ({ bar: true }): what the main area is showing (a channel, or a space and its tabs), and the button
+//   for the tasks panel.
 // - the panel ({ panel: true }): "Tasks in #channel". A task is one Claude Code session; clicking
 //   one shows it live in the panel. + starts a fresh session in the projects folder.
 // - the menu ({ menu: channel }) and the dialogs ({ dialog: "new" | "rename" | "instructions" |
@@ -24,6 +27,7 @@ import { EMOJI, GROUPS } from "./emoji.js";
 import CONFIG from "./config.js";
 import { chatAlive, afterEnd, lastLine } from "./chats.js";
 import { remember, restore, keyOf } from "./panels.js";
+import { groups as spaceGroups, follow } from "./spaces.js";
 import { exec, hc, readTextFile, appHome, spaces, panes, terminals, layout, theme, run, nextCommand, home, props, shared, setShared, openOverlay, closeOverlay, window } from "herdr";
 
 // The settings, from config.js (install.mjs writes it). MOD and LAYOUT are this mod's folder and
@@ -203,6 +207,39 @@ function herdrMachine(task) {
   return task.machine === localName() ? null : undefined;
 }
 
+// Herdr's own spaces in the sidebar (spaces.js). SPACE is { space, seen, quiet, folded }: the selected Herdr space
+// (null while a channel is), the space Herdr showed at the sidebar's last look, until when a choice made here
+// stands while Herdr catches up, and whether selecting a space folded the tasks panel away (so leaving it brings
+// the panel back).
+const SPACE = "channels.space";
+const QUIET_MS = 1500;
+const inSpace = () => Boolean(shared(SPACE)?.space);
+const selectedSpace = () => { const id = shared(SPACE)?.space; return id ? spaces().find((s) => s.id === id) ?? null : null; };
+// The tasks panel folds away while a space is shown, and comes back with the channel if it was open.
+function foldPanel(entering) {
+  const s = shared(SPACE) ?? {};
+  const panel = find(layout(), "panel");
+  if (!panel) return;
+  if (entering && !s.folded && !panel.hidden) { setShared(SPACE, { ...s, folded: true }); run("layout.hide", { id: "panel" }); }
+  else if (!entering && s.folded) { setShared(SPACE, { ...s, folded: false }); run("layout.show", { id: "panel" }); }
+}
+// A click here: a space (its id), or null for the selected channel. Herdr shows the space at once.
+function selectSpace(id) {
+  const was = shared(SPACE) ?? {};
+  setShared(SPACE, { ...was, space: id, quiet: Date.now() + QUIET_MS });
+  if (Boolean(id) !== Boolean(was.space)) foldPanel(Boolean(id));
+  if (id) run("space.select", { id });
+  syncMain();
+}
+// The sidebar's look at what Herdr shows (see follow in spaces.js).
+function followSpaces() {
+  const was = shared(SPACE) ?? {};
+  const next = follow(was, spaces(), HOLD, Date.now());
+  if (next.space === (was.space ?? null) && next.seen === (was.seen ?? null)) return;
+  setShared(SPACE, { ...was, ...next });
+  if (Boolean(next.space) !== Boolean(was.space)) { foldPanel(Boolean(next.space)); syncMain(); }
+}
+
 const shortId = (task) => task.job ?? task.session_id.split("-")[0];
 const holdSpace = (machine) => spaces().find((p) => (p.machine ?? null) === machine && p.name === HOLD) ?? null;
 const tabOf = (space, task) => space?.tabs.find((t) => t.name === shortId(task) || t.name.startsWith(`${shortId(task)} `)) ?? null;
@@ -355,18 +392,21 @@ function setDown(c, value) {
 // chat. The main block's own content is kept aside meanwhile and put back after. The sidebar's
 // timer calls this every second too, so the layout always ends up matching.
 const MAIN_SAVED = "channels.main";
+// How the main area frames a tab's panes, as layouts/channels.json says: cards, drawn only when a tab is split (a
+// space's terminals side by side), so a chat alone shows bare.
+const MAIN_PANE = { gap: 6, radius: 6, border: { width: 1, color: "border" }, focus: { width: 1, color: "accent" } };
 const isPlaceholder = (content) => content?.mod === MOD && content?.props?.down === true;
 function syncMain() {
   if (shared("layout") !== LAYOUT) return;
   const tree = layout();
   const main = find(tree, "main");
   if (!main) return;
-  const want = Boolean(downOf(current()));
+  const want = !inSpace() && Boolean(downOf(current())); // a Herdr space shown from the sidebar is never down
   if (want === isPlaceholder(main.content)) return;
   const next = JSON.parse(JSON.stringify(tree));
   const node = find(next, "main");
   if (want) { setShared(MAIN_SAVED, node.content); node.content = { mod: MOD, props: { down: true } }; }
-  else node.content = shared(MAIN_SAVED) ?? { tab: "active", pane: { gap: 0 } };
+  else node.content = shared(MAIN_SAVED) ?? { tab: "active", pane: MAIN_PANE };
   run("layout.set", { layout: next });
 }
 const paneOf = (address) => (address ? panes().find((p) => p.terminal === address) ?? null : null);
@@ -435,6 +475,7 @@ const findingNow = (id) => finding.has(id) && Date.now() - finding.get(id) < 600
 const RETRY = "channels.retry"; // { channel, at }
 function openChannel(c, { auto = false } = {}) {
   const leaving = current()?.name !== c.name;
+  if (inSpace()) selectSpace(null); // back from a Herdr space to the channel
   setShared(CURRENT, c.name);
   if (leaving) followPanel(c);
   const was = chatAddress(c);
@@ -621,6 +662,7 @@ export default class Channels extends View {
     cx.timer.every(40, (cx) => {
       if (this.settle) { this.settle = false; cx.notify(); }
       if (placing.length) settlePlacing();
+      if (shared("layout") === LAYOUT) followSpaces();
       const retry = shared(RETRY);
       if (retry && retry.at !== this.retryAt) {
         this.retryAt = retry.at;
@@ -635,12 +677,13 @@ export default class Channels extends View {
     cx.timer.every(1000, (cx) => {
       const now = shared(TICK) ?? 0;
       if (now !== this.tick) { this.tick = now; this.refresh(cx); }
-      // Put the selected channel's chat back if the main area is showing anything else, as it
-      // does after a visit to another layout, or if the chat ended (/exit): it starts again. Not
-      // more than once every few seconds: a chat's tab takes a moment to appear the first time.
+      // Put the selected channel's chat back if the main area is showing anything else, or if the
+      // chat ended (/exit): it starts again. Not while a Herdr space is selected in the sidebar
+      // (Herdr showing another space selects it there: see followSpaces). Not more than once every
+      // few seconds: a chat's tab takes a moment to appear the first time.
       const here = current();
       syncMain();
-      if (here && shared("layout") === LAYOUT && !downOf(here) && !chatShown(here) && Date.now() - this.restoredAt > 4000) {
+      if (here && shared("layout") === LAYOUT && !inSpace() && !downOf(here) && !chatShown(here) && Date.now() - this.restoredAt > 4000) {
         this.restoredAt = Date.now();
         openChannel(here, { auto: true });
       }
@@ -806,7 +849,7 @@ export default class Channels extends View {
 
     const row = (c, i) => {
       const key = `c:${c.name}`;
-      const selected = here?.name === c.name;
+      const selected = here?.name === c.name && !inSpace();
       const lifted = drag?.name === c.name;
       return h_flex().id(`ch-${c.name}`).absolute().left(0).right(0).h(ROW).pl(8).pr(8).items_center()
         .top(lifted ? drag.top : slot(i) * ROW)
@@ -856,8 +899,46 @@ export default class Channels extends View {
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click(() => openDialog("new", null))
           .child(svg(ICON("plus")).size(14))
-          .child(div().text_size(14).child("New channel"))))
+          .child(div().text_size(14).child("New channel")))
+        .child(this.spacesList(t)))
       .child(this.footer(t, data));
+  }
+
+  // Herdr's own spaces, under the channels: everything but the chats' space, by machine (this computer first). A
+  // click shows the space in the main area; + makes one (on that machine), which Herdr shows and the list selects.
+  spacesList(t) {
+    const list = spaceGroups(spaces(), HOLD);
+    const chosen = shared(SPACE)?.space ?? null;
+    const remote = list.some((g) => g.machine !== null);
+    const add = (machine) => () => run("space.new", machine ? { machine } : { machine: "", folder: PROJECTS });
+    const row = (s) => {
+      const selected = s.id === chosen;
+      const tabs = s.tabs.filter((x) => !x.settled).length;
+      const status = s.status && s.status !== "idle" ? s.status : null;
+      return h_flex().id(`sp-${s.id}`).ml(30).mr(8).h(36).flex_none().px(10).gap(10).items_center().rounded(8).cursor_pointer()
+        .when(selected, (el) => el.bg(t.selected))
+        .hover((st) => st.bg(selected ? t.selected : t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => selectSpace(s.id))
+        // The space's most urgent agent: a filled dot while one works, is done or needs the user; a ring otherwise.
+        .child(div().w(7).h(7).flex_none().rounded(4)
+          .when(Boolean(status), (el) => el.bg(t[status] ?? t.dim))
+          .when(!status, (el) => el.border_1().border_color(t.dim)))
+        .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(selected ? t.foreground : t.muted).child(s.name || "~"))
+        .when(status === "blocked", (el) => el.child(div().flex_none().text_size(12).text_color(t.blocked).child("needs you")))
+        .when(status !== "blocked" && tabs > 1, (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(`${tabs} tabs`)));
+    };
+    const label = (g) => h_flex().id(`sp-m-${g.machine ?? "here"}`).ml(30).mr(8).pl(10).pr(0).h(26).flex_none().items_center()
+      .child(div().flex_1().text_size(11.5).text_color(t.dim).child((g.machine ?? localName() ?? "this computer").toUpperCase()))
+      .when(g.machine !== null, (el) => el.child(this.tool(`sp-new-${g.machine}`, svg(ICON("plus")).size(13), add(g.machine), t)));
+    return v_flex().flex_none().pb(8)
+      .child(h_flex().px(18).pt(18).pb(4).gap(10).items_center()
+        .child(svg(ICON("terminal")).size(16).text_color(t.accent))
+        .child(div().flex_1().text_size(14).font_medium().child("Spaces"))
+        .child(this.tool("sp-new", svg(ICON("plus")).size(14), add(null), t)))
+      .when(!list.length, (el) => el.child(div().ml(40).mr(18).py(6).text_size(12.5).text_color(t.dim)
+        .child("Shells and sessions outside the channels. + opens one.")))
+      .children(list.flatMap((g) => [...(remote ? [label(g)] : []), ...g.spaces.map(row)]));
   }
 
   // The foot of the sidebar: this machine, which holds the channels, and whether the store answers.
@@ -895,6 +976,8 @@ export default class Channels extends View {
 
   render_bar() {
     const t = theme();
+    const space = selectedSpace();
+    if (space) return this.spaceBar(space, t);
     const here = current();
     return h_flex().size_full().px(16).gap(8).items_center().bg(t.background).border_b(1).border_color(t.border).text_color(t.foreground)
       .when(Boolean(here), (el) => el
@@ -903,6 +986,36 @@ export default class Channels extends View {
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openChannel(here)).child(here.name)))
       .child(div().flex_1())
       .when(Boolean(here) && Boolean(localName()), (el) => el.child(this.where(localName(), t)))
+      .child(this.tool("bar-tasks", svg(ICON("panel-right")).size(16), () => run("layout.toggle", { id: "panel" }), t)
+        .when(!find(layout(), "panel")?.hidden, (el) => el.bg(t.selected).text_color(t.foreground)));
+  }
+
+  // The bar while a Herdr space is shown: its name and its tabs (a click shows one, × closes it, + adds one), the
+  // machine it is on and the tasks panel's button. Herdr's own keys (⌘T, ⌘W, ⌘D, ...) work on it as anywhere.
+  spaceBar(space, t) {
+    const tabs = space.tabs.filter((x) => !x.settled || x.active);
+    const pill = (tab) => {
+      const key = `tab:${tab.id}`;
+      const status = tab.status && tab.status !== "idle" ? tab.status : null;
+      return h_flex().id(`bar-tab-${tab.id}`).h(28).pl(12).pr(this.hover === key ? 4 : 12).gap(6).flex_none().items_center().rounded(7)
+        .text_size(13).cursor_pointer()
+        .text_color(tab.active ? t.foreground : t.muted)
+        .when(tab.active, (el) => el.bg(t.selected))
+        .hover((st) => st.bg(tab.active ? t.selected : t.hover))
+        .on_hover(this.hovering(key))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => run("tab.select", { id: tab.id }))
+        .when(Boolean(status), (el) => el.child(div().w(6).h(6).rounded(3).bg(t[status] ?? t.dim)))
+        .child(div().max_w(180).truncate().child(tab.named ? tab.name : `${tab.index}`))
+        .when(this.hover === key, (el) => el.child(this.tool(`bar-tab-x-${tab.id}`, svg(ICON("x")).size(12),
+          () => run("tab.close", { id: tab.id }), t).w(20).h(20)));
+    };
+    return h_flex().size_full().px(16).gap(6).items_center().bg(t.background).border_b(1).border_color(t.border).text_color(t.foreground)
+      .child(svg(ICON("terminal")).size(16).text_color(t.muted))
+      .child(div().mr(8).max_w(220).truncate().text_size(14).font_medium().child(space.name || "~"))
+      .child(h_flex().id("bar-tabs").flex_1().min_w(0).gap(2).items_center().overflow_x_scroll().children(tabs.map(pill))
+        .child(this.tool("bar-tab-new", svg(ICON("plus")).size(14), () => run("tab.new", { space: space.id }), t)))
+      .child(this.where(space.machine ?? localName(), t))
       .child(this.tool("bar-tasks", svg(ICON("panel-right")).size(16), () => run("layout.toggle", { id: "panel" }), t)
         .when(!find(layout(), "panel")?.hidden, (el) => el.bg(t.selected).text_color(t.foreground)));
   }
