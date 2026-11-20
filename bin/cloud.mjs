@@ -207,7 +207,10 @@ export function runInPty(argv, { cwd, env, platform = process.platform, timeoutM
     let value;
     let finished = false;
     let child;
-    try { child = spawnImpl(cmd, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }); } catch (e) { return resolve({ value: undefined, text: e.message, code: 127, timedOut: false }); }
+    // macOS's script refuses a socket as its stdin (tcgetattr: "Operation not supported on socket"), and a pipe from
+    // node is a socket there; /dev/null it takes (not a terminal), and it then ends when its command does.
+    const mac = platform === 'darwin' || platform === 'freebsd';
+    try { child = spawnImpl(cmd, args, { cwd, env, stdio: [mac ? 'ignore' : 'pipe', 'pipe', 'pipe'] }); } catch (e) { return resolve({ value: undefined, text: e.message, code: 127, timedOut: false }); }
     const end = (code, timedOut = false) => { if (finished) return; finished = true; clearTimeout(timer); clearTimeout(grace); resolve({ value, text, code, timedOut }); };
     let grace = null;
     const stop = () => {
