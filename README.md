@@ -225,8 +225,8 @@ newest Claude Code from its next message on.
   15 seconds of starting isn't started again on its own: the main area says why, and **Retry** (or
   selecting the channel) tries again.
 - **Tasks panel.** The button at the top right toggles the panel. It groups the channel's tasks into
-  *Needs input*, *Working* and *Ready for review*. A dot marks a task with an event you haven't
-  seen (it finished or asked something since you last opened it). Click a task to open it live. Press the left arrow
+  *Needs input*, *Working* and *Ready for review*. A dot marks a task that asked something you haven't
+  seen since you last opened it; a task that finished tells the chat instead ([task events](#task-events)). Click a task to open it live. Press the left arrow
   on an empty prompt to return to the list. Each channel's panel keeps its place: switch to another
   channel and back, and it shows the task you had open (or the list, if you went back to it), even
   after Herdr restarts. **+** starts a new session in the projects folder. The
@@ -237,7 +237,7 @@ newest Claude Code from its next message on.
 
   <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: its header has the task's name, Needs input, and Rename, Resolve and Close buttons; below, the task's Claude Code session asks which homepage headline to use, with three options to choose from">
 
-  <img src="docs/task-menu.png" width="420" alt="The tasks panel with a task's menu open over the Watch the release build row, offering Rename and Resolve">
+  <img src="docs/task-menu.png" width="420" alt="The tasks panel with Build pricing page working and two tasks ready for review, Pick a hero headline and Draft the launch notes; a task's menu is open over the first, offering Rename and Resolve">
 
 - **Spaces.** Everything that isn't a channel is under **Spaces**, below the channels: Herdr's own
   spaces, for a shell, a plain Claude Code session or anything else Herdr runs, without leaving the
@@ -487,9 +487,9 @@ claude.ai, another Mac).
 **Tracking.** While a channel has an open cloud task, its listener asks for the account's session list every
 20 seconds: one call covers every session and every channel, and uses no model. A session that is running shows
 as Working, one waiting on you (`requires_action`) as Needs input, one whose turn ended as Ready for review. The
-row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a dot in the
-panel, a card above the chat's prompt, ride-along with your next message, or a wake when the chat registered for
-it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
+row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a finish is a
+one-line notice in the chat; a question is a dot in the panel, a card above the chat's prompt, ride-along with your
+next message, or a wake when the chat registered for it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
 (Claude Code hasn't refreshed the login yet) it waits a minute; any other failure shows state unknown until a
 call works again.
 
