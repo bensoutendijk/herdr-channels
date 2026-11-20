@@ -170,6 +170,9 @@ With a store on another machine:
   seconds of starting.
 - The sidebar's foot shows the server and whether Herdr reaches it.
 
+<img src="docs/remote-footer.png" width="280" alt="The foot of the channels sidebar with a store on another machine: a green dot, a server icon, server, connected">
+<img src="docs/remote-menu.png" width="200" alt="A channel's ··· menu for a store that has no routines: Rename, Instructions, Change icon and Archive">
+
 The mod keeps its state under its own name (`channels-hc.data`, ...), so a copy installed this way
 beside another channels mod never reads the other's. To go back, switch layouts (`⌘⇧L`, or
 `herdr-app do layout.switch --name channels`); `node install.mjs --uninstall` removes only the
