@@ -127,11 +127,12 @@ function alive(pid) {
 
 export class UpdateRefused extends Error {}
 
-// Fast-forwards the clone to `tag` (fetched first), or refuses with why. Answers { from, to, already }.
+// Fast-forwards the clone to `tag` (fetched first), or refuses with why, in a line short enough for the sidebar's
+// release row (`channels update` names the clone). Answers { from, to, already }.
 export function fastForward({ repo = CLONE, tag, git = gitRunner(repo) }) {
   const dirty = git(['status', '--porcelain', '--untracked-files=no']);
   if (dirty.code !== 0) throw new UpdateRefused(`${repo} isn't a git clone git can read: ${dirty.err || dirty.out}`);
-  if (dirty.out.trim()) throw new UpdateRefused(`The clone at ${repo} has changes not committed. Commit or drop them, then update again.`);
+  if (dirty.out.trim()) throw new UpdateRefused('The clone has changes not committed. Commit or drop them, then update again.');
   const fetched = git(['fetch', '--quiet', '--tags', '--force']);
   if (fetched.code !== 0) throw new UpdateRefused(`git fetch failed: ${(fetched.err || fetched.out).trim().split('\n').pop()}`);
   const target = git(['rev-parse', '--verify', '--quiet', `${tag}^{commit}`]).out.trim();
@@ -141,8 +142,8 @@ export function fastForward({ repo = CLONE, tag, git = gitRunner(repo) }) {
   if (git(['merge-base', '--is-ancestor', 'HEAD', target]).code !== 0) {
     const ahead = git(['merge-base', '--is-ancestor', target, 'HEAD']).code === 0;
     throw new UpdateRefused(ahead
-      ? `The clone at ${repo} is past ${tag} already (it has newer commits), so there is nothing to update to.`
-      : `The clone at ${repo} has commits that aren't in ${tag}, so it can't move to the release without losing them. Update it by hand (git pull, then node install.mjs).`);
+      ? `The clone is past ${tag} already: it has newer commits.`
+      : `The clone has commits that aren't in ${tag}. Update it by hand: git pull, then node install.mjs.`);
   }
   const branch = git(['symbolic-ref', '--quiet', '--short', 'HEAD']).out.trim();
   const moved = branch ? git(['merge', '--ff-only', '--quiet', target]) : git(['checkout', '--quiet', '--detach', target]);

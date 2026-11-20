@@ -2,6 +2,7 @@
 # Conventional Commit titles since the last tag (feat: a minor, fix: a patch, feat!: a major), tags vX.Y.Z, writes
 # CHANGELOG.md and publishes a GitHub Release with the notes. Installed Macs learn about it from GitHub Releases
 # (bin/release.mjs). semantic-release and its plugins are fetched here only: the repo itself has no dependencies.
+# The tests aren't run again here: CI ran them on the PR, and a flaky one shouldn't hold a release back.
 name: release
 on:
   push:
@@ -24,7 +25,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node --test test/*.test.mjs
       - name: semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
