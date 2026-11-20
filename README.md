@@ -194,7 +194,7 @@ The routines timer looks up the latest release every four hours: one unauthentic
 Mac or its user. When a newer release is out, a row under the channels in the sidebar says so, with a link
 to its release notes and an **Update** button. Nothing is updated until the button is clicked.
 
-<img src="docs/release-row.png" width="280" alt="The bottom of the channels sidebar: a row with a download arrow, herdr-channels 1.0.1 available, This Mac runs 1.0.0, a Release notes link and an Update button, above the studio, on this Mac footer with v1.0.0 at its right">
+<img src="docs/release-row.png" width="280" alt="The release row in the channels sidebar: a download arrow, herdr-channels 1.0.1 available, This Mac runs 1.0.0, a Release notes link and an Update button">
 
 Update, or the same from a terminal:
 
