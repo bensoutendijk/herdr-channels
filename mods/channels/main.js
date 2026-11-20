@@ -232,8 +232,13 @@ async function refreshNow() {
 // `channels update --bg` does it in its own process, which outlives this mod (the install copies a new one in), and
 // `channels list` says how it goes (`updates.release.update`).
 const UPDATING = K("updating"); // when Update was clicked, until the list says the update runs
+// A click the list hasn't caught up with yet: no record of an update since it (for up to 30 s).
+const pendingClick = () => {
+  const at = shared(UPDATING);
+  return Boolean(at) && Date.now() - at < 30000 && !(Date.parse(shared(DATA)?.updates?.release?.update?.at ?? "") >= at - 2000);
+};
 async function updateNow() {
-  if (shared(UPDATING) && Date.now() - shared(UPDATING) < 30000) return;
+  if (pendingClick()) return;
   setShared(UPDATING, Date.now());
   try {
     const out = JSON.parse(await store("channels update --bg --json", [], 30000));
@@ -1044,9 +1049,7 @@ export default class Channels extends View {
   releaseRow(t, data) {
     if (!has("update")) return div();
     const release = data?.updates?.release ?? null;
-    // Between the click and the list saying the update runs: the update's own record is older than the click.
-    const at = shared(UPDATING);
-    const clicked = Boolean(at) && Date.now() - at < 30000 && !(Date.parse(release?.update?.at ?? "") >= at - 2000);
+    const clicked = pendingClick();
     const row = clicked ? { state: "running", title: `Updating to ${release?.latest ?? "the latest release"}…`, detail: "Starting.", button: null, notes: null } : releaseRow(release);
     if (!row) return div();
     const color = row.state === "failed" ? t.blocked : row.state === "done" ? t.ansi2 : t.accent;
