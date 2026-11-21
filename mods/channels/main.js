@@ -1096,10 +1096,11 @@ export default class Channels extends View {
       ? { connected: [t.ansi2, "connected"], connecting: [t.dim, "connecting…"], unreachable: [t.blocked, "unreachable"], unreadable: [t.blocked, "store unreadable"] }[link]
       : data?.error ? [t.blocked, "store unreadable"] : data ? [t.ansi2, "on this Mac"] : [t.dim, "reading…"];
     return h_flex().h(44).flex_none().px(18).gap(10).items_center().border_t(1).border_color(t.border)
-      .child(div().w(8).h(8).rounded(4).bg(color))
-      .child(svg(ICON(ON ? "server" : "monitor")).size(13).text_color(t.muted))
-      .child(div().text_size(13).text_color(t.muted).child(ON ?? data?.machine ?? "this Mac"))
-      .child(div().flex_1().text_size(12.5).text_color(t.dim).child(text))
+      // flex_none: a long host name plus the version label would otherwise squeeze the dot into an oval.
+      .child(div().w(8).h(8).flex_none().rounded(4).bg(color))
+      .child(svg(ICON(ON ? "server" : "monitor")).size(13).flex_none().text_color(t.muted))
+      .child(div().min_w(0).truncate().text_size(13).text_color(t.muted).child(ON ?? data?.machine ?? "this Mac"))
+      .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.dim).child(text))
       // This herdr-channels install's version (install.mjs writes it into config.js).
       .when(Boolean(versionLabel(CONFIG.version)), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(versionLabel(CONFIG.version))));
   }
