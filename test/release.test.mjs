@@ -161,6 +161,9 @@ test('the sidebar\'s release row: offered, running, failed, and gone when curren
   assert.deepEqual(releaseRow(done, Date.parse(at) + 5000), { state: 'done', title: 'Updated to 1.0.1', detail: 'Restarted #general and #design.', button: null, notes: NOTES('1.0.1') });
   assert.equal(releaseRow(done, Date.parse(at) + 61000), null, 'gone after a minute');
   assert.equal(releaseRow(null), null);
+  // A mod-only install (a store on another machine): an update reloads the mod and restarts no chat.
+  assert.equal(releaseRow({ ...release, update: { state: 'running', to: '1.0.1' } }, Date.now(), { remote: true }).detail, 'Installing. The mod reloads; chats keep running.');
+  assert.equal(releaseRow({ ...done, update: { ...done.update, message: 'Updated to 1.0.1.' } }, Date.parse(at) + 5000, { remote: true }).detail, 'The mod reloads; chats keep running.');
   assert.equal(versionLabel('1.0.1'), 'v1.0.1');
   assert.equal(versionLabel(null), null);
 });

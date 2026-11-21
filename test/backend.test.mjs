@@ -88,3 +88,20 @@ test('a copy installed beside another keeps its own shared state', () => {
   assert.equal(B.keyOf('channels-hc', 'data'), 'channels-hc.data');
   assert.equal(B.keyOf('', 'data'), 'channels.data');
 });
+
+test('capabilities --json is preferred: what it lists, or null for a command that doesn\'t know the question', () => {
+  const r = spawnSync(process.execPath, [new URL('../bin/channels.mjs', import.meta.url).pathname, 'capabilities', '--json'], { encoding: 'utf8', env: { ...process.env, CHANNELS_DIR: '/nonexistent-store' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(B.capabilitiesOf(r.stdout), B.ALL_FEATURES, 'this repo\'s command lists them all');
+  assert.deepEqual(B.capabilitiesOf('{"features":["chat-bg","seen",3,"refresh"]}\n'), ['chat-bg', 'seen', 'refresh']);
+  assert.equal(B.capabilitiesOf('usage: hub channels [list …]'), null, 'an older command answers with its usage');
+  assert.equal(B.capabilitiesOf(''), null);
+  assert.equal(B.capabilitiesOf('{"machine":"server"}'), null);
+});
+
+test("a store on another machine's terminal addresses are named by that machine here", () => {
+  assert.equal(B.remoteAddress('t2k', 'server'), 'server/t2k');
+  assert.equal(B.remoteAddress('server/t2k', 'server'), 'server/t2k');
+  assert.equal(B.remoteAddress('t2k', null), 't2k', 'a store on this computer: as it is');
+  assert.equal(B.remoteAddress(null, 'server'), null);
+});

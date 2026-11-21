@@ -76,6 +76,22 @@ export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refr
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
+// The features, from `capabilities --json` ({ features: [...] }): null when it isn't that (an older command, which
+// doesn't know the question), so the list's answer stands.
+export function capabilitiesOf(text) {
+  try {
+    const out = JSON.parse(`${text ?? ""}`.trim());
+    return Array.isArray(out?.features) ? out.features.filter((f) => typeof f === "string") : null;
+  } catch { return null; }
+}
+
+// A terminal address a store on another machine gave ("t2k", that machine's own), as Herdr here names it: "server/t2k".
+// One already named by machine, or any on this computer (`on` null), is kept.
+export function remoteAddress(address, on) {
+  if (!address) return null;
+  return on && !`${address}`.includes("/") ? `${on}/${address}` : `${address}`;
+}
+
 // The features, from `list --json`: its `features` when it gives them. This repo's command from before it listed
 // them is known by its `remote_control` field, and had them all; any other command (a hub that lists none) has none.
 export function featuresOf(head) {

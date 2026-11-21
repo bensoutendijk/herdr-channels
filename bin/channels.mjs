@@ -23,7 +23,9 @@
 //   channels chat <channel> --bg [--json]     make sure the chat runs, in a herdr-core terminal; prints that terminal
 //   channels routine list|add|edit|rm|run|on|off ...   prompts the chat gets on a schedule (see "routines" below)
 //   channels refresh [--auto] [--json]       restart idle chats on what is installed now (see "updates" below)
-//   channels update [--check] [--bg] [--json]   install the latest herdr-channels release; --check only looks (bin/release.mjs)
+//   channels update [--check | --status] [--bg] [--json]   install the latest herdr-channels release; --check only looks,
+//                                             --status says what the last look found, looking again when it is old
+//   channels capabilities --json              what this command can do, for the herdr mod (FEATURES)
 //   channels tick                             what the launchd agent runs every minute: fires the routines that are due
 //
 // Cloud tasks (off unless CHANNELS_CLOUD is on: install.mjs --cloud): a task can also be a Claude Code cloud session at
@@ -2484,7 +2486,7 @@ export function parseArgs(args) {
   const pos = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check') opts[a.slice(2)] = true;
+    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check' || a === '--status') opts[a.slice(2)] = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
       opts[a.slice(2).replace(/-(.)/g, (_, x) => x.toUpperCase())] = args[++i];
@@ -2649,8 +2651,21 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       console.log(opts.json ? JSON.stringify({ ...r, summary: refreshSummary(r) }) : refreshSummary(r));
       return 0;
     }
+    if (sub === 'capabilities') {
+      if (pos.length) fail('channels capabilities [--json]');
+      console.log(opts.json ? JSON.stringify({ features: FEATURES }) : FEATURES.join('\n'));
+      return 0;
+    }
     if (sub === 'update') {
-      if (pos.length) fail('channels update [--check] [--bg] [--json]');
+      if (pos.length) fail('channels update [--check | --status] [--bg] [--json]');
+      // --status: the release row's question where no tick looks for releases (a mod installed for a store on another
+      // machine asks this itself, now and then). It asks GitHub only when the last look is older than CHECK_MS.
+      if (opts.status) {
+        await checkRelease({ dir, fetchLatest: deps.fetchLatest });
+        const r = releaseStatus({ dir, build: readBuild(dir) });
+        console.log(opts.json ? JSON.stringify(r) : r.available ? `herdr-channels ${r.latest} is out (this Mac runs ${r.current ?? 'a version from before releases'}).` : `herdr-channels ${r.current ?? 'here'} is the latest release known.`);
+        return 0;
+      }
       if (opts.check) {
         const cache = await checkRelease({ dir, maxAgeMs: 0, fetchLatest: deps.fetchLatest });
         const r = releaseStatus({ dir, build: readBuild(dir) });

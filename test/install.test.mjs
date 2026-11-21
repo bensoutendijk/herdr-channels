@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cloneVersion } from '../bin/release.mjs';
 
@@ -248,13 +248,21 @@ test('a store on another machine: only the mod and its layout, beside a channels
   assert.equal(readFileSync(join(appHome, 'layouts', 'channels.json'), 'utf8'), '{"theirs":1}\n');
   const mod = join(appHome, 'mods', 'channels-hc');
   const config = loadConfig(join(mod, 'config.js'));
-  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels-hc', layout: 'channels-hc', command: ['hub', 'channels'], on: 'server', local: 'laptop', path: 'string', projects: '/srv/projects', by: 'me', version: cloneVersion() });
+  const state = join(home, '.local', 'state', 'herdr-channels', 'channels-hc');
+  assert.deepEqual({ ...config, path: typeof config.path }, { mod: 'channels-hc', layout: 'channels-hc', command: ['hub', 'channels'], on: 'server', local: 'laptop', path: 'string', projects: '/srv/projects', by: 'me', version: cloneVersion(), updater: { script: join(repo, 'bin', 'channels.mjs'), dir: state } });
+  assert.ok(config.path.split(':').includes(dirname(process.execPath)), 'node, for the updater');
+  // What updates it: the version installed, and these options, for `channels update` to install with again.
+  assert.equal(JSON.parse(readFileSync(join(state, 'build.json'), 'utf8')).version, cloneVersion());
+  assert.deepEqual(JSON.parse(readFileSync(join(state, 'install.json'), 'utf8')).args, ['--on', 'server', '--command', 'hub channels', '--local', 'laptop', '--projects', '/srv/projects', '--by', 'me', '--name', 'channels-hc', '--app-home', appHome, '--store', join(home, '.local', 'state', 'herdr-channels')]);
+  const status = spawnSync(process.execPath, [config.updater.script, 'update', '--status', '--json'], { encoding: 'utf8', env: { ...env, CHANNELS_DIR: state, CHANNELS_RELEASES_URL: 'http://127.0.0.1:9/none' } });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).current, cloneVersion(), 'the updater reads this install\'s version');
   const layout = readFileSync(join(appHome, 'layouts', 'channels-hc.json'), 'utf8');
   assert.ok(layout.includes('"mod": "channels-hc"') && !layout.includes('"mod": "channels"'));
-  // No command, cards mod or store here, and the layout isn't selected.
+  // No command, cards mod or channels store here (only the updater's folder), and the layout isn't selected.
   assert.equal(existsSync(join(home, '.local', 'bin', 'channels')), false);
   assert.equal(existsSync(join(home, '.local', 'share', 'herdr-channels')), false);
-  assert.equal(existsSync(join(home, '.local', 'state', 'herdr-channels')), false);
+  assert.equal(existsSync(join(home, '.local', 'state', 'herdr-channels', 'channels.json')), false);
   assert.equal(existsSync(join(appHome, 'shared.json')), false);
   // Again: updated in place. The name can't take theirs.
   assert.match(install(...args), /\(updated\)/);

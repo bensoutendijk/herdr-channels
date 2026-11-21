@@ -34,3 +34,10 @@ test('a chat behind the build that is idle (no timer, or before its tick) can be
   assert.deepEqual(refreshRow({ ...base, chats: [chat('general', ['channels', 'claude'])] }),
     { offer: true, title: 'Updates installed', detail: 'Claude Code 2.1.330 and herdr-channels 3f2a1bc' });
 });
+
+test("a store on another machine's chats are behind on its own command, by the name it gives", () => {
+  const row = refreshRow({ build: { id: 'b', label: 'abc1234', name: 'hub' }, claude: '2.1.5', asked: null, chats: [{ channel: 'general', behind: ['channels'], state: 'idle', claude: '2.1.5' }] });
+  assert.deepEqual(row, { offer: true, title: 'hub updated', detail: '#general runs the version before' });
+  const both = refreshRow({ build: { id: 'b', label: 'abc1234', name: 'hub' }, claude: '2.1.5', asked: null, chats: [{ channel: 'general', behind: ['channels', 'claude'], state: 'idle', claude: '2.1.4' }] });
+  assert.deepEqual([both.title, both.detail], ['Updates installed', 'Claude Code 2.1.5 and hub abc1234']);
+});

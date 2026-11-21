@@ -161,17 +161,27 @@ With a store on another machine:
 - Tasks open on the machine they run on: this Mac's in a local terminal, the server's and any other
   machine's through Herdr (`hc run --on`), when Herdr reaches that machine. Their standing comes from
   `claude agents` on the server and on this Mac.
-- The mod asks the command what it can do: `list --json` gives `features`. What the command lacks is
-  hidden rather than offered and refused. A command that lists no features gets the basics only
-  (channels, chats, tasks, resolve, rename, icon, instructions, archive): no routines, unread dots,
-  task renaming, Refresh row or release row.
-- No update check runs for such an install, since it has no `channels` command of its own here; the
-  footer still shows the version the mod was installed from. Update it by hand (`git pull`, then the
-  same `install.mjs --on …` line).
-- Without the `chat-bg` feature, a channel's chat is a tab named `#<channel id>` in the server's
-  `channels` space, running `<command> chat <name>` there. A tab already running it is reused. One
-  whose program ended is replaced, so the chat starts again on its session, unless it ended within
-  seconds of starting.
+- The mod asks the command what it can do, once each time it loads: `<command> capabilities --json`
+  prints `{ "features": [...] }`. A command that doesn't know that question is judged by its
+  `list --json` (`features`, if it gives them). What the command lacks is hidden rather than offered
+  and refused. A command that lists no features gets the basics only (channels, chats, tasks,
+  resolve, rename, icon, instructions, archive). The features are `chat-bg` (the chat in a background
+  terminal), `seen` (unread dots), `refresh` (the Refresh row, from `updates` in `list --json`),
+  `routines` and `rename-task`.
+- Updates come from GitHub Releases here too. The install keeps a small folder of its own
+  (`~/.local/state/herdr-channels/<name>`: the version installed, the options it was given, the last
+  check). The mod asks this clone's `channels update --status` every few minutes, which asks GitHub
+  at most every 4 hours, and shows the same "herdr-channels X.Y.Z available · Update" row. Update
+  fast-forwards this clone to the release tag and installs the mod again with the same options. The
+  mod reloads, and the chats on the server keep running. Nothing updates until you click. An install
+  from before this needs one run of the `install.mjs --on …` line to set it up.
+- With the `chat-bg` feature, a channel's chat runs in a terminal of its own on the server
+  (`<command> chat <name> --bg --json` starts it, or finds the one it runs in), shown as a tab in the
+  server's `channels` space. A chat already running in a `#<channel id>` tab there is shown as it is
+  until it ends.
+- Without it, a channel's chat is a tab named `#<channel id>` in the server's `channels` space,
+  running `<command> chat <name>` there. A tab already running it is reused. One whose program ended
+  is replaced, so the chat starts again on its session, unless it ended within seconds of starting.
 - The sidebar's foot shows the server and whether Herdr reaches it.
 
 <img src="docs/remote-footer.png" width="280" alt="The foot of the channels sidebar with a store on another machine: a green dot, a server icon, server, connected">
