@@ -331,7 +331,7 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   const pathDirs = [...new Set([o.bin, dirname(node), ...Object.values(found).filter(Boolean).map((p) => dirname(p)), join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'])].filter((d) => !SYSTEM.includes(d));
   const path = pathDirs.join(':');
 
-  if (o.on) return installRemote(o, { home, log });
+  if (o.on) return installRemote(o, { home, log, node });
   // 1. The command.
   const wrapper = join(o.bin, 'channels');
   if (existsSync(wrapper) && !readFileSync(wrapper, 'utf8').includes(MARK)) {
@@ -374,6 +374,11 @@ export function installArgs(o, name) {
   return ['--app-home', o.appHome, '--bin', o.bin, '--chat-mod', o.chatMod, '--store', o.store, '--projects', o.projects, '--by', o.by, '--name', name, '--label', o.label, ...(o.timer ? [] : ['--no-timer'])];
 }
 
+// The same for an install for a store on another machine.
+export function remoteArgs(o, name) {
+  return ['--on', o.on, '--command', o.command.join(' '), '--local', o.local, '--projects', o.projects, '--by', o.by, '--name', name, '--app-home', o.appHome, '--store', o.store];
+}
+
 // The mod's folder and layout file under a name, and the layout with its mod blocks renamed to match.
 function modFiles(appHome, name) {
   const layout = JSON.parse(readFileSync(join(REPO, 'layouts', 'channels.json'), 'utf8'));
@@ -390,20 +395,30 @@ function writeMod({ modDir, layoutFile, layout, name, config }) {
   writeAtomic(layoutFile, `${JSON.stringify(layout, null, 2)}\n`);
 }
 
-// A store on another machine (--on): the mod and its layout only. No command, cards mod, timer or build here: the
-// store, its chats and their schedule are that machine's.
-export function installRemote(o, { home = homedir(), log = console.log } = {}) {
+// A store on another machine (--on): the mod and its layout only. No command, cards mod, timer or chats here: the
+// store, its chats and their schedule are that machine's. What updates this install is here, though: the mod asks this
+// clone's `channels update --status` now and then (no launchd tick looks for releases here), in a folder of its own
+// under --store (build.json with the version, install.json with these options, release.json), and its Update button
+// runs `channels update --bg` there, which fast-forwards the clone and installs the mod again with the same options.
+export const remoteState = (o, name) => join(o.store, name);
+export function installRemote(o, { home = homedir(), log = console.log, node = process.execPath } = {}) {
   if (!existsSync(o.appHome)) log(`${o.appHome} doesn't exist yet; it is made now. Open the herdr app once to fill it in.`);
   const { name, update } = pickNames(o.appHome, o.name);
   const { modDir, layoutFile, layout } = modFiles(o.appHome, name);
   // PATH for what runs on this computer (hc, python3, and claude for this computer's own tasks).
   const found = Object.fromEntries(['claude', 'hc', 'python3'].map((p) => [p, findProgram(p, { home })]));
   const SYSTEM = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-  const path = [...new Set([...Object.values(found).filter(Boolean).map((p) => dirname(p)), join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'])].filter((d) => !SYSTEM.includes(d)).join(':');
-  const config = { mod: name, layout: name, command: o.command, on: o.on, local: o.local, path, projects: o.projects, by: o.by, version: cloneVersion(REPO) };
+  const path = [...new Set([dirname(node), ...Object.values(found).filter(Boolean).map((p) => dirname(p)), join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'])].filter((d) => !SYSTEM.includes(d)).join(':');
+  const version = cloneVersion(REPO);
+  const state = remoteState(o, name);
+  const updater = { script: join(REPO, 'bin', 'channels.mjs'), dir: state };
+  const config = { mod: name, layout: name, command: o.command, on: o.on, local: o.local, path, projects: o.projects, by: o.by, version, updater };
   const result = { remoteStore: true, modDir, layoutFile, name, update, config, found, selected: null, timer: null, refreshed: null };
   if (o.dryRun) return result;
   writeMod({ modDir, layoutFile, layout, name, config });
+  mkdirSync(state, { recursive: true });
+  writeAtomic(join(state, 'build.json'), `${JSON.stringify({ id: version ?? 'none', label: commitLabel(REPO) ?? version ?? 'none', version, at: new Date().toISOString() })}\n`);
+  writeInstall(state, { repo: REPO, args: remoteArgs(o, name), at: new Date().toISOString() });
   result.selected = o.switch ? selectLayout(o.appHome, name, home) : 'not selected (--no-switch)';
   return result;
 }
@@ -440,6 +455,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.log(`  layout   ${r.layoutFile}`);
       console.log(`  store    \`${o.command.join(' ')}\` on ${o.on}, which calls this computer ${o.local}`);
       console.log(`  projects ${o.projects} on ${o.on}`);
+      console.log(`  version  ${r.config.version ?? 'none: this clone has no release tag (git fetch --tags)'}; the sidebar offers each new release`);
+      console.log(`  chats    The mod reloaded; the chats on ${o.on} keep running.`);
       if (r.selected) console.log(`  The ${r.name} layout is ${r.selected}.`);
       if (!r.found.hc) console.log('\nNot found: hc. Install the herdr app (it brings hc) and run this again.');
       process.exit(0);

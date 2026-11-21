@@ -113,10 +113,24 @@ const ICON = (name) => `mods/${MOD}/icons/${name}.svg`;
 const localName = () => B.localName(BACKEND, shared(DATA));
 // The machine the store is on, by the store's own name for it: this computer's, or the other machine's.
 const storeName = () => shared(DATA)?.machine ?? ON ?? localName();
-// What the store's command can do (backend.js): a feature it lacks is hidden, not offered and then refused.
-// Until the store has answered once, a store on this computer is this repo's command, and one on another machine is
-// taken to have none of them.
-const has = (feature) => (shared(DATA)?.features ?? (ON ? [] : B.ALL_FEATURES)).includes(feature);
+// What the store's command can do (backend.js): a feature it lacks is hidden, not offered and then refused. The
+// sidebar asks it once per load (`channels capabilities --json`) and keeps the answer in shared state; a command that
+// doesn't know that question (an older one) is judged by what its `list --json` gives. Until the store has answered
+// once, a store on this computer is this repo's command, and one on another machine is taken to have none of them.
+// Updating this install is this computer's business, not the store's: with a store on another machine it is there
+// when install.mjs set up the updater (config.js `updater`).
+const FEATURES = K("features"); // { list: [...] | null (the command doesn't say), at }
+const has = (feature) => {
+  if (feature === "update" && ON) return Boolean(CONFIG.updater?.script && CONFIG.updater?.dir);
+  return (shared(FEATURES)?.list ?? shared(DATA)?.features ?? (ON ? [] : B.ALL_FEATURES)).includes(feature);
+};
+let askedFeatures = 0; // when this load last asked; 0 is not yet
+async function askFeatures() {
+  if (askedFeatures && (shared(FEATURES)?.list || Date.now() - askedFeatures < 600000)) return;
+  askedFeatures = Date.now();
+  const r = await sh("channels capabilities --json", [], { timeout: 30000 });
+  setShared(FEATURES, { list: r.code === 0 ? B.capabilitiesOf(r.stdout) : null, at: Date.now() });
+}
 
 function uuid() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -233,16 +247,32 @@ async function refreshNow() {
 // `channels update --bg` does it in its own process, which outlives this mod (the install copies a new one in), and
 // `channels list` says how it goes (`updates.release.update`).
 const UPDATING = K("updating"); // when Update was clicked, until the list says the update runs
+// With a store on another machine, the release is this computer's install's: this clone's `channels update --status`,
+// in the install's own folder, asked every RELEASE_MS (it asks GitHub only every few hours), and every few seconds
+// while an update runs.
+const RELEASE = K("release"); // what that said last, with `at`
+const RELEASE_MS = 300000;
+const releaseNow = () => (ON ? shared(RELEASE) : shared(DATA)?.updates?.release) ?? null;
+const updater = (sub) => sh(`CHANNELS_DIR="$1" exec node "$2" update ${sub} --json`, [CONFIG.updater.dir, CONFIG.updater.script], { on: null, timeout: 30000 });
+async function lookForRelease(force = false) {
+  if (!ON || !has("update")) return;
+  const was = shared(RELEASE);
+  const running = was?.update?.state === "running" || pendingClick();
+  if (!force && was?.at && Date.now() - was.at < (running ? 3000 : RELEASE_MS)) return;
+  setShared(RELEASE, { ...(was ?? {}), at: Date.now() }); // one look at a time
+  const r = await updater("--status");
+  try { if (r.code === 0) setShared(RELEASE, { ...JSON.parse(r.stdout), at: Date.now() }); } catch { /* the last answer stands */ }
+}
 // A click the list hasn't caught up with yet: no record of an update since it (for up to 30 s).
 const pendingClick = () => {
   const at = shared(UPDATING);
-  return Boolean(at) && Date.now() - at < 30000 && !(Date.parse(shared(DATA)?.updates?.release?.update?.at ?? "") >= at - 2000);
+  return Boolean(at) && Date.now() - at < 30000 && !(Date.parse(releaseNow()?.update?.at ?? "") >= at - 2000);
 };
 async function updateNow() {
   if (pendingClick()) return;
   setShared(UPDATING, Date.now());
   try {
-    const out = JSON.parse(await store("channels update --bg --json", [], 30000));
+    const out = ON ? JSON.parse((await updater("--bg")).stdout) : JSON.parse(await store("channels update --bg --json", [], 30000));
     if (!out.started) note(out.why);
   } catch (err) {
     fail(`Couldn't start the update: ${String(err?.message ?? err)}`);
@@ -457,7 +487,9 @@ function followPanel(c) {
 // version opened as a tab of its own (named "#<channel id>") is shown as before until it ends.
 const CHATS = K("chats"); // channel id -> the address of its chat's terminal, as last found
 const chatOf = (c) => ({ machine: storeName(), session_id: `#${c.id ?? c.name}`, job: `#${c.id ?? c.name}`, name: "", folder: PROJECTS });
-const chatAddress = (c) => (shared(CHATS) ?? {})[c.id] ?? c.chat_terminal ?? null;
+// A store on another machine answers with that machine's own addresses ("t2k"); Herdr here knows them as "<machine>/t2k".
+const hereAddress = (address) => B.remoteAddress(address, ON);
+const chatAddress = (c) => (shared(CHATS) ?? {})[c.id] ?? hereAddress(c.chat_terminal) ?? null;
 const termOf = (address) => (address ? terminals().find((x) => x.address === address) ?? null : null);
 // Channels whose chat stopped right after it started: id -> { message, at }. The sidebar doesn't start those
 // again on its own; opening the channel (a click) does.
@@ -493,10 +525,11 @@ function syncMain() {
 }
 const paneOf = (address) => (address ? panes().find((p) => p.terminal === address) ?? null : null);
 const spaceOfTab = (tab) => spaces().find((sp) => sp.tabs.some((x) => x.id === tab)) ?? null;
-// An earlier version's chat tab, still running its program.
-function oldChatTab(c) {
-  const tab = tabOf(holdSpace(null), chatOf(c));
-  if (!tab || panes().some((p) => p.tab === tab.id && p.program?.shell)) return null;
+// An earlier version's chat tab (on a store's machine: the chat's own tab, "#<channel id>", from before the chat ran in
+// the background), still running its program. `dead` too: one whose program has ended (only a shell is left).
+function oldChatTab(c, { dead = false } = {}) {
+  const tab = tabOf(holdSpace(ON), chatOf(c));
+  if (!tab || (!dead && panes().some((p) => p.tab === tab.id && p.program?.shell))) return null;
   return tab;
 }
 // Shows the tab that holds this terminal, if one does.
@@ -513,18 +546,26 @@ function selectChat(address) {
 // `stale` is the tab of a chat that ended, closed once the new chat's tab is there.
 let placing = []; // { address, shell: the tab to close, or "?" until it is known, stale, until }
 function placeChat(address, stale = null) {
-  const space = holdSpace(null);
+  const space = holdSpace(ON);
   if (space) run("space.select", { id: space.id });
-  else run("space.new", { name: HOLD, folder: PROJECTS });
+  else run("space.new", { name: HOLD, folder: PROJECTS, ...(ON ? { machine: ON } : {}) });
   run("terminal.keep", { terminal: address, place: "tab" });
-  placing.push({ address, shell: space ? null : "?", stale, until: Date.now() + 8000 });
+  placing.push({ address, shell: space ? null : "?", stale, until: Date.now() + 8000, kept: Date.now() });
 }
 const closeTab = (id, keep) => { if (id && id !== keep && spaceOfTab(id)) run("tab.close", { id, confirmed: true }); };
 function settlePlacing() {
   placing = placing.filter((p) => {
     const pane = paneOf(p.address);
-    if (!pane) return Date.now() < p.until;
-    if (p.shell === "?") p.shell = holdSpace(null)?.tabs.find((x) => x.id !== pane.tab && x.id !== p.stale)?.id ?? null;
+    if (!pane) {
+      // A terminal just started on another machine may not be known here yet ("no running terminal"): ask again.
+      if (ON && Date.now() - p.kept > 1500) {
+        p.kept = Date.now();
+        const space = holdSpace(ON);
+        if (space) { run("space.select", { id: space.id }); run("terminal.keep", { terminal: p.address, place: "tab" }); }
+      }
+      return Date.now() < p.until;
+    }
+    if (p.shell === "?") p.shell = holdSpace(ON)?.tabs.find((x) => x.id !== pane.tab && x.id !== p.stale)?.id ?? null;
     closeTab(p.shell, pane.tab);
     closeTab(p.stale, pane.tab);
     run("tab.select", { id: pane.tab });
@@ -564,19 +605,20 @@ function openChannel(c, { auto = false } = {}) {
   const was = chatAddress(c);
   if (chatAlive(termOf(was)) && selectChat(was)) { if (downOf(c)) setDown(c, null); return; }
   const old = oldChatTab(c);
-  if (old) { run("space.select", { id: holdSpace(null).id }); run("tab.select", { id: old.id }); return; }
+  if (old) { run("space.select", { id: holdSpace(ON).id }); run("tab.select", { id: old.id }); return; }
   if (downOf(c)) { if (auto) return; setDown(c, null); }
   if (findingNow(c.id)) return;
   finding.set(c.id, Date.now());
   (async () => {
-    // The tab still showing the chat that ended, if one is: closed once the new chat has its own.
-    const stale = paneOf(was)?.tab ?? null;
+    // The tab still showing the chat that ended, if one is (an earlier version's tab whose chat ended too): closed once
+    // the new chat has its own.
+    const stale = paneOf(was)?.tab ?? oldChatTab(c, { dead: true })?.id ?? null;
     if (was && !chatAlive(termOf(was))) {
       const info = await lastOf(was);
       const next = afterEnd(info, { auto, channel: c.name });
       if (!next.start) return setDown(c, { message: next.message, last: info?.last || null, at: Date.now() });
     }
-    const { address } = JSON.parse(await store('channels chat "$1" --bg --json', [c.name], 40000));
+    const address = hereAddress(JSON.parse(await store('channels chat "$1" --bg --json', [c.name], 40000)).address);
     setShared(CHATS, { ...(shared(CHATS) ?? {}), [c.id]: address });
     // Only if the user is still on this channel: a slow start mustn't pull them back.
     if (current()?.name !== c.name) closeTab(stale, paneOf(address)?.tab);
@@ -630,7 +672,7 @@ function chatShown(c) {
     const hit = chatTab(c);
     return Boolean(hit && space?.id === hit.space.id && hit.tab.active && !tabDead(hit.tab));
   }
-  if (!space || space.name !== HOLD || (space.machine ?? null) !== null) return false;
+  if (!space || space.name !== HOLD || (space.machine ?? null) !== ON) return false;
   const tab = space.tabs.find((x) => x.active);
   if (!tab) return false;
   const pane = paneOf(chatAddress(c));
@@ -842,6 +884,8 @@ export default class Channels extends View {
 
   refresh(cx) {
     cx.spawn(async () => {
+      try { await askFeatures(); } catch { /* asked again later */ }
+      try { await lookForRelease(); } catch { /* looked again later */ }
       const started = Date.now();
       let next;
       try { next = { ...(await readStore()), error: null, at: Date.now() }; }
@@ -1064,9 +1108,9 @@ export default class Channels extends View {
   // update runs. Nothing updates until Update is clicked.
   releaseRow(t, data) {
     if (!has("update")) return div();
-    const release = data?.updates?.release ?? null;
+    const release = releaseNow();
     const clicked = pendingClick();
-    const row = clicked ? { state: "running", title: `Updating to ${release?.latest ?? "the latest release"}…`, detail: "Starting.", button: null, notes: null } : releaseRow(release);
+    const row = clicked ? { state: "running", title: `Updating to ${release?.latest ?? "the latest release"}…`, detail: "Starting.", button: null, notes: null } : releaseRow(release, Date.now(), { remote: Boolean(ON) });
     if (!row) return div();
     const color = row.state === "failed" ? t.blocked : row.state === "done" ? t.ansi2 : t.accent;
     return h_flex().id("release-row").mx(10).mb(10).px(12).py(10).gap(10).items_start().flex_none().rounded(10)

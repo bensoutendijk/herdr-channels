@@ -26,9 +26,11 @@ export function refreshRow(updates) {
   if (unasked.length || idle.length) {
     const claudeNew = unasked.length || (idle.some((x) => x.behind.includes("claude")));
     const buildNew = onBuild.length > 0;
-    const title = claudeNew && buildNew ? "Updates installed" : claudeNew ? `Claude Code ${updates.claude}` : "herdr-channels updated";
+    // The build is herdr-channels', or the store's own command's when it is on another machine (its `name`).
+    const product = updates.build?.name ?? "herdr-channels";
+    const title = claudeNew && buildNew ? "Updates installed" : claudeNew ? `Claude Code ${updates.claude}` : `${product} updated`;
     const olds = [...new Set(onClaude.map((x) => x.claude).filter(Boolean))];
-    const detail = claudeNew && buildNew ? `Claude Code ${updates.claude} and herdr-channels ${updates.build?.label ?? ""}`.trim()
+    const detail = claudeNew && buildNew ? `Claude Code ${updates.claude} and ${product} ${updates.build?.label ?? ""}`.trim()
       : claudeNew ? `${onClaude.length === 1 ? `#${onClaude[0].channel} runs` : `${onClaude.length} chats run`} ${olds.length === 1 ? olds[0] : "an older one"}`
       : `${onBuild.length === 1 ? `#${onBuild[0].channel} runs` : `${onBuild.length} chats run`} the version before`;
     return { offer: true, title, detail };
@@ -38,15 +40,17 @@ export function refreshRow(updates) {
 }
 
 // The release row, above the refresh row: a newer herdr-channels release than this Mac runs, from `updates.release`
-// (see bin/release.mjs), or an update running or just done. null when there is none; else { state, title, detail,
+// (see bin/release.mjs), or an update running or just done. `remote`: this install is the mod only, for a store on
+// another machine, so an update reloads the mod and restarts no chat. null when there is none; else { state, title, detail,
 // button, notes }: `state` says how to draw it (offer, running, failed, done), `button` is the button's word (Update,
 // Retry; null otherwise), and `notes` the release notes' link.
 export const DONE_MS = 60000; // how long "Updated to X" stays
-export function releaseRow(release, now = Date.now()) {
+export function releaseRow(release, now = Date.now(), { remote = false } = {}) {
   if (!release) return null;
   const u = release.update;
-  if (u?.state === "done" && !release.available && now - Date.parse(u.at) < DONE_MS) return { state: "done", title: `Updated to ${u.to}`, detail: u.message?.replace(/^Updated to \S+\.\s*/, "") || "Chats restart once they are idle.", button: null, notes: release.url ?? null };
-  if (u?.state === "running") return { state: "running", title: `Updating to ${u.to ?? release.latest ?? "the latest release"}…`, detail: "Installing. Chats restart once they are idle.", button: null, notes: null };
+  const after = remote ? "The mod reloads; chats keep running." : "Chats restart once they are idle.";
+  if (u?.state === "done" && !release.available && now - Date.parse(u.at) < DONE_MS) return { state: "done", title: `Updated to ${u.to}`, detail: u.message?.replace(/^Updated to \S+\.\s*/, "") || after, button: null, notes: release.url ?? null };
+  if (u?.state === "running") return { state: "running", title: `Updating to ${u.to ?? release.latest ?? "the latest release"}…`, detail: `Installing. ${after}`, button: null, notes: null };
   if (!release.available) return null;
   const notes = release.url ?? null;
   if (u?.state === "failed" && (!u.to || u.to === release.latest)) return { state: "failed", title: `Update to ${release.latest} failed`, detail: u.message ?? "It stopped before it finished.", button: "Retry", notes };
