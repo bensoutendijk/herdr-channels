@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.1.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.0.2...v1.1.0) (2026-11-21)
+
+### Features
+
+* Update, Refresh and unread dots for a store on another machine, and its chat in the background ([#32](https://github.com/bensoutendijk/herdr-channels/issues/32)) ([c599376](https://github.com/bensoutendijk/herdr-channels/commit/c5993762f9f79dcf2ddb6ec4875891bb3719d625))
+
 ## [1.0.2](https://github.com/bensoutendijk/herdr-channels/compare/v1.0.1...v1.0.2) (2026-11-21)
 
 ### Bug Fixes
