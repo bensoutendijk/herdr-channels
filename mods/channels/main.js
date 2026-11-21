@@ -550,13 +550,21 @@ function placeChat(address, stale = null) {
   if (space) run("space.select", { id: space.id });
   else run("space.new", { name: HOLD, folder: PROJECTS, ...(ON ? { machine: ON } : {}) });
   run("terminal.keep", { terminal: address, place: "tab" });
-  placing.push({ address, shell: space ? null : "?", stale, until: Date.now() + 8000 });
+  placing.push({ address, shell: space ? null : "?", stale, until: Date.now() + 8000, kept: Date.now() });
 }
 const closeTab = (id, keep) => { if (id && id !== keep && spaceOfTab(id)) run("tab.close", { id, confirmed: true }); };
 function settlePlacing() {
   placing = placing.filter((p) => {
     const pane = paneOf(p.address);
-    if (!pane) return Date.now() < p.until;
+    if (!pane) {
+      // A terminal just started on another machine may not be known here yet ("no running terminal"): ask again.
+      if (ON && Date.now() - p.kept > 1500) {
+        p.kept = Date.now();
+        const space = holdSpace(ON);
+        if (space) { run("space.select", { id: space.id }); run("terminal.keep", { terminal: p.address, place: "tab" }); }
+      }
+      return Date.now() < p.until;
+    }
     if (p.shell === "?") p.shell = holdSpace(ON)?.tabs.find((x) => x.id !== pane.tab && x.id !== p.stale)?.id ?? null;
     closeTab(p.shell, pane.tab);
     closeTab(p.stale, pane.tab);
