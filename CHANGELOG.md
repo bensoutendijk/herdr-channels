@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.4.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.4.0...v1.4.1) (2026-11-22)
+
+### Bug Fixes
+
+* A routine's row no longer shows an old skipped run beside a newer run ([#38](https://github.com/bensoutendijk/herdr-channels/issues/38)) ([49fbc33](https://github.com/bensoutendijk/herdr-channels/commit/49fbc3305dcdc66639e6b6d69353cbba535dd665))
+
 ## [1.4.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.3.0...v1.4.0) (2026-11-22)
 
 ### Features
