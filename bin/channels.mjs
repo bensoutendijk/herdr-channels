@@ -34,11 +34,13 @@
 // listener polls its list (one call for every session) every CLOUD.pollMs while a channel has an open cloud task, and
 // turns its states into the same events as a local task's.
 //
-// Everything else is on this machine. A task is one Claude Code session here, named <machine>/<session id>, where
-// <machine> is this machine's name (CHANNELS_MACHINE, else the host name). start runs `claude --bg`, read and send
-// use Claude Code's own records (~/.claude/jobs, ~/.claude/sessions, the transcripts), and the herdr mod lists
-// `claude agents --json` beside `channels list --json`. Dismissing hides a task and archiving hides a channel:
-// neither stops or deletes a session.
+// Everything else is on this machine. A task is one coding agent's session here, named <machine>/<session id>, where
+// <machine> is this machine's name (CHANNELS_MACHINE, else the host name). The agent is the task's harness
+// (bin/harness/, docs/harnesses.md): Claude Code unless the task says otherwise. The harness starts the session, says
+// where it stands, reads its messages and sends it one; for Claude Code that is `claude --bg` and its own records
+// (~/.claude/jobs, ~/.claude/sessions, the transcripts), and the herdr mod lists `claude agents --json` beside
+// `channels list --json`. Everything else here (the store, events, cards, notices, routines) is the same for every
+// harness. Dismissing hides a task and archiving hides a channel: neither stops or deletes a session.
 //
 // Listening: `channels chat` runs the chat's `claude` in its herdr terminal and, beside it, watches the channel's
 // tasks in Claude Code's job records every few seconds. When a task finishes, or stops to ask something, that is an
@@ -69,6 +71,13 @@ import { catchupMinutes, RoutineError, routineName, routineText, ROUTINE_DEFAULT
 import { timeZone } from './schedule.mjs';
 import { checkRelease, CLONE, readInstall, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
 import { cloudId, cloudUrl, listCloudSessions, probeAttach, sendToCloudSession, startCloudSession } from './cloud.mjs';
+import * as claude from './harness/claude.mjs';
+import { alive, cleanEnv, exited, findTranscript, installedClaude, readJson, readLive, remoteOn, remoteUrl, renameJob } from './harness/claude.mjs';
+import { HARNESSES, harnessOf } from './harness/index.mjs';
+
+// Claude Code's own records, Remote Control's links and renaming a job are the Claude harness's
+// (bin/harness/claude.mjs); they are exported from here too, as they were before there were harnesses.
+export { cleanEnv, findTranscript, installedClaude, parseTranscript, readJobs, readLive, readTranscript, remoteLink, remoteOn, remoteUrl, renameJob, stateOf, THREAD, transcriptBridge, transcriptTitle } from './harness/claude.mjs';
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 const MACHINE = /^[a-z0-9][a-z0-9.-]{0,62}$/;
@@ -99,6 +108,8 @@ const stopWaitMs = () => (Number(process.env.CHANNELS_STOP_WAIT_MS) > 0 ? Number
 
 export class UsageError extends Error {}
 const fail = (msg) => { throw new UsageError(msg); };
+// A refusal from a harness module (its own error class, named UsageError) counts as one of ours.
+const isUsage = (err) => err instanceof UsageError || err?.name === 'UsageError';
 const oneLine = (s) => `${s ?? ''}`.replace(/\s+/g, ' ').trim();
 const cut = (s, n) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
@@ -170,210 +181,13 @@ function channelOf(store, name, { archived = false } = {}) {
   return c;
 }
 
-// ---------- Claude Code's own records ----------
-
-const readJson = (file) => {
-  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
-};
-const countLines = (file) => {
-  try { return readFileSync(file, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; }
-};
-
-function jobState(home, job) {
-  if (!job || !/^[A-Za-z0-9_-]{1,64}$/.test(job)) return null;
-  return readJson(join(home, '.claude', 'jobs', job, 'state.json'));
-}
-
-// Background jobs by session id. `work` counts the job's timeline entries: Claude Code adds them only while the
-// session works, so the same count means no new work.
-export function readJobs(home) {
-  const dir = join(home, '.claude', 'jobs');
-  const out = new Map();
-  let names = [];
-  try { names = readdirSync(dir); } catch { return out; }
-  for (const job of names) {
-    const s = readJson(join(dir, job, 'state.json'));
-    if (!s?.sessionId) continue; // not a job folder, or its state isn't written yet
-    out.set(s.sessionId, {
-      job, state: s.state, detail: s.detail ?? '', needs: s.needs ?? null, cwd: s.cwd ?? null, name: s.name ?? '',
-      nameSource: s.nameSource ?? null, inFlight: Number(s.inFlight?.tasks) || 0, result: s.output?.result ?? null,
-      updatedAt: s.updatedAt ?? null, transcript: s.linkScanPath ?? null, bridge: s.bridgeSessionId ?? null, work: countLines(join(dir, job, 'timeline.jsonl')),
-    });
-  }
-  return out;
-}
-
-const alive = (pid) => {
-  try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
-};
-
-// Each running Claude Code process's own record (~/.claude/sessions/<pid>.json), by session id: its status
-// (busy, idle, waiting on a dialog), what it waits for, its name. Records of processes that ended are skipped.
-export function readLive(home) {
-  const dir = join(home, '.claude', 'sessions');
-  const out = new Map();
-  let files = [];
-  try { files = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return out; }
-  for (const f of files) {
-    const s = readJson(join(dir, f));
-    if (!s?.sessionId || !Number.isInteger(s.pid) || !alive(s.pid)) continue;
-    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null, bridge: s.bridgeSessionId ?? null, version: s.version ?? null });
-  }
-  return out;
-}
-
-// A session's state from what Claude Code says about it: working, waiting_on_job, waiting_on_user (a dialog in the
-// session needs the user), blocked (it ended its turn asking for something), failed or done.
-export function stateOf({ live = null, job = null } = {}) {
-  const status = live?.status ?? null;
-  if (status === 'waiting') return { state: 'waiting_on_user', doing: `Waiting on you: ${live.waitingFor || 'a prompt'}` };
-  if (status === 'busy') return { state: 'working', doing: job?.detail || 'Working' };
-  if (status === 'shell') return { state: 'waiting_on_job', doing: 'A background command is running' };
-  if (live && status && status !== 'idle') return { state: 'working', doing: job?.detail || `Claude Code says "${status}"` };
-  if (job) {
-    if (job.state === 'working') {
-      if (!live) return { state: 'paused', doing: 'Its process stopped while it was working' };
-      return job.inFlight > 0 ? { state: 'waiting_on_job', doing: job.detail || 'Waiting on a background task' } : { state: 'working', doing: job.detail || 'Working' };
-    }
-    if (job.state === 'blocked') return { state: 'blocked', doing: job.needs || job.detail || 'Blocked' };
-    if (job.state === 'failed') return { state: 'failed', doing: job.detail || 'Failed' };
-    if (job.state === 'stopped') return { state: 'done', doing: 'Stopped' };
-    if (job.state === 'done') return { state: 'done', doing: job.detail || 'Done' };
-    return { state: live ? 'working' : 'done', doing: job.detail || job.state || '' };
-  }
-  return { state: 'done', doing: live ? 'Its turn ended' : 'Ended' };
-}
-
-export function findTranscript(home, id) {
-  const root = join(home, '.claude', 'projects');
-  if (!/^[0-9a-f-]{8,64}$/i.test(id) || !existsSync(root)) return null;
-  for (const dir of readdirSync(root)) {
-    const file = join(root, dir, `${id}.jsonl`);
-    if (existsSync(file)) return file;
-  }
-  return null;
-}
-
-const textOf = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.filter((b) => b?.type === 'text').map((b) => b.text).join('\n') : '');
-export const THREAD = { keep: 40, textChars: 1500 };
-
-// { title, first_prompt, cwd, thread, last }. The thread is oldest first: { who: 'user', at, text },
-// { who: 'agent', at, text } and { who: 'tools', calls } for a run of tool calls; each message is cut to
-// THREAD.textChars except `last`, the session's last agent message, kept whole.
-export function parseTranscript(text) {
-  const st = { title: '', aiTitle: '', firstPrompt: '', cwd: null, thread: [], last: null };
-  for (const line of text.split('\n')) {
-    if (!line) continue;
-    let r;
-    try { r = JSON.parse(line); } catch { continue; } // a line being written
-    if (r.type === 'custom-title' && r.customTitle) st.title = r.customTitle;
-    if (r.type === 'agent-name' && r.agentName) st.title = r.agentName;
-    if (r.type === 'ai-title' && r.aiTitle) st.aiTitle = r.aiTitle;
-    if (r.type !== 'user' && r.type !== 'assistant') continue;
-    if (r.isSidechain) continue;
-    if (!st.cwd && r.cwd) st.cwd = r.cwd;
-    const at = r.timestamp || null;
-    const content = r.message?.content;
-    if (r.type === 'user') {
-      const kind = r.origin?.kind;
-      if (r.isMeta || r.isCompactSummary || r.isVisibleInTranscriptOnly || (kind && kind !== 'human')) continue;
-      if (Array.isArray(content) && content.some((b) => b?.type === 'tool_result')) continue;
-      const said = textOf(content).replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-      if (!said || (!kind && said.startsWith('<'))) continue;
-      if (!st.firstPrompt) st.firstPrompt = said;
-      st.thread.push({ who: 'user', at, text: said.slice(0, THREAD.textChars) });
-      continue;
-    }
-    for (const b of Array.isArray(content) ? content : []) {
-      if (b?.type === 'text' && b.text?.trim()) {
-        st.last = { at, text: b.text.trim() };
-        st.thread.push({ who: 'agent', at, text: st.last.text.slice(0, THREAD.textChars) });
-      } else if (b?.type === 'tool_use') {
-        const prev = st.thread[st.thread.length - 1];
-        if (prev?.who === 'tools') prev.calls++; else st.thread.push({ who: 'tools', at, calls: 1 });
-      }
-    }
-  }
-  const thread = st.thread.length <= THREAD.keep ? st.thread : st.thread.slice(-THREAD.keep);
-  return { title: st.title || st.aiTitle || '', first_prompt: st.firstPrompt || null, cwd: st.cwd, thread, last: st.last };
-}
-
-export function readTranscript(home, id, file = null) {
-  const path = file && existsSync(file) ? file : findTranscript(home, id);
-  if (!path) return null;
-  try { return parseTranscript(readFileSync(path, 'utf8')); } catch { return null; }
-}
-
-// A session's current name from its transcript: the last rename, else the title Claude Code gave it. Only those
-// lines are parsed. '' when there's none yet.
-export function transcriptTitle(home, id) {
-  const file = findTranscript(home, id);
-  if (!file) return '';
-  let text;
-  try { text = readFileSync(file, 'utf8'); } catch { return ''; }
-  for (const [type, field] of [['custom-title', 'customTitle'], ['agent-name', 'agentName'], ['ai-title', 'aiTitle']]) {
-    const mark = `"type":"${type}"`;
-    let at = text.lastIndexOf(mark);
-    while (at !== -1) {
-      const start = text.lastIndexOf('\n', at) + 1;
-      const end = text.indexOf('\n', at);
-      try {
-        const name = JSON.parse(text.slice(start, end === -1 ? undefined : end))[field];
-        if (typeof name === 'string' && name.trim()) return name.trim();
-      } catch { /* a line being written */ }
-      at = start > 0 ? text.lastIndexOf(mark, start - 1) : -1;
-    }
-  }
-  return '';
-}
-
 // ---------- Remote Control ----------
 
-// Remote Control: when it is on (CHANNELS_REMOTE_CONTROL, which install.mjs writes into the installed command), the
-// chat and every task `start` makes also show at claude.ai/code and in the Claude app. Only the flags this command
-// passes turn it on; the user's own Claude Code settings are never touched.
-export const remoteOn = (env = process.env) => /^(1|on|yes|true)$/i.test(`${env.CHANNELS_REMOTE_CONTROL ?? ''}`.trim());
+// Remote Control itself (remoteOn, remoteUrl and the links) is the Claude harness's: bin/harness/claude.mjs.
 
 // The claude.ai name of a channel's chat: the channel and the machine, since the account's list doesn't say which
 // machine a session runs on and the same channel can exist on several.
 export const remoteChatName = (name, machine = LOCAL) => `#${name} · ${machine}`;
-
-// A Remote Control session id (cse_… in a job record and the transcript, session_… in a live record) as its
-// claude.ai/code link, or null.
-export function remoteLink(bridge) {
-  const m = /^(?:cse|session)_([A-Za-z0-9]{8,64})$/.exec(`${bridge ?? ''}`.trim());
-  return m ? `https://claude.ai/code/session_${m[1]}` : null;
-}
-
-// The last Remote Control session id a transcript records ("bridge-session" lines), or null.
-export function transcriptBridge(text) {
-  const mark = '"type":"bridge-session"';
-  let at = `${text ?? ''}`.lastIndexOf(mark);
-  while (at !== -1) {
-    const start = text.lastIndexOf('\n', at) + 1;
-    const end = text.indexOf('\n', at);
-    try {
-      const id = JSON.parse(text.slice(start, end === -1 ? undefined : end)).bridgeSessionId;
-      if (remoteLink(id)) return id;
-    } catch { /* a line being written */ }
-    at = start > 0 ? text.lastIndexOf(mark, start - 1) : -1;
-  }
-  return null;
-}
-
-// A session's claude.ai/code link, when it has had Remote Control: from its job's record (kept after the process
-// exits), else its running process's record, else its transcript (which `transcript: false` skips, as list does for
-// a session that has a job). It stays the same across `send` and a chat's restart; a copy gets a link of its own.
-export function remoteUrl(home, { sessionId = null, job = null, live = null, transcript = true, file = null } = {}) {
-  const fromJob = remoteLink(job?.bridge ?? job?.bridgeSessionId);
-  if (fromJob) return fromJob;
-  const fromLive = remoteLink(live?.bridge ?? live?.bridgeSessionId);
-  if (fromLive) return fromLive;
-  if (!transcript || !sessionId) return null;
-  const path = file && existsSync(file) ? file : findTranscript(home, sessionId);
-  if (!path) return null;
-  try { return remoteLink(transcriptBridge(readFileSync(path, 'utf8'))); } catch { return null; }
-}
 
 // ---------- cloud tasks ----------
 
@@ -479,17 +293,6 @@ async function pushedRepo(deps, cwd, repo) {
 
 // ---------- running programs ----------
 
-// Variables a Claude Code session sets for the programs it runs. A task started from the chat's Bash would inherit
-// them and run as that session's child (no transcript of its own), so they are taken out. Settings such as
-// CLAUDE_CONFIG_DIR or a provider's CLAUDE_CODE_USE_* stay.
-const SESSION_ENV = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
-  'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_JOB_DIR', 'CLAUDE_PID', 'CLAUDE_EFFORT'];
-export function cleanEnv(env = process.env) {
-  const out = { ...env };
-  for (const k of SESSION_ENV) delete out[k];
-  return out;
-}
-
 // Runs a program to its end: { code, out, err }. It never throws.
 export function runProgram(cmd, args, { cwd, input, env, timeout = 120_000 } = {}) {
   return new Promise((done) => {
@@ -537,12 +340,6 @@ function cloudDeps(home, projects) {
   };
 }
 
-async function listAgents(deps) {
-  const r = await deps.run(deps.claude, ['agents', '--json', '--all'], { cwd: deps.home, timeout: 30_000 });
-  if (r.code !== 0) return [];
-  try { const all = JSON.parse(r.out); return Array.isArray(all) ? all : []; } catch { return []; }
-}
-
 // ---------- sessions ----------
 
 // "<machine>/2ebb0d50" or a bare id → { machine, id }. The store is this machine's only: another machine's name
@@ -565,32 +362,10 @@ export function parseSessionRef(raw) {
   return { machine, id };
 }
 
-// A session on this machine, from Claude Code's records: a session id, the start of one (6 or more characters) or a
-// job id. A session no process or job holds any more is found by its full id in the transcripts.
-export async function findLocalSession({ deps, id }) {
-  const byId = new Map();
-  for (const [sessionId, j] of readJobs(deps.home)) byId.set(sessionId, { session_id: sessionId, job: j.job, name: j.name || '', cwd: j.cwd || null });
-  for (const a of await listAgents(deps)) {
-    if (!a?.sessionId) continue;
-    const was = byId.get(a.sessionId) ?? { session_id: a.sessionId, job: null, name: '', cwd: null };
-    byId.set(a.sessionId, { ...was, job: was.job ?? (a.kind === 'background' ? a.id ?? null : null), name: was.name || a.name || '', cwd: was.cwd || a.cwd || null });
-  }
-  const want = id.toLowerCase();
-  const all = [...byId.values()];
-  let hits = all.filter((s) => s.session_id.toLowerCase() === want || s.job?.toLowerCase() === want);
-  if (!hits.length && want.length >= 6) hits = all.filter((s) => s.session_id.toLowerCase().startsWith(want));
-  if (hits.length > 1) fail(`"${id}" matches ${hits.length} sessions; use a full session id: ${hits.slice(0, 5).map((s) => s.session_id).join(', ')}.`);
-  if (hits.length === 1) return hits[0];
-  const file = findTranscript(deps.home, id);
-  if (file) {
-    const t = readTranscript(deps.home, id, file);
-    return { session_id: id, job: null, name: t?.title || '', cwd: t?.cwd ?? null };
-  }
-  fail(`No session ${id} on ${LOCAL}.`);
-}
+// A session on this machine, from its harness's records (Claude Code's: bin/harness/claude.mjs, find).
+export const findLocalSession = ({ deps, id }) => claude.find({ deps, id, machine: LOCAL });
 
 const sameSession = (t, machine, id) => t.machine === machine && (t.session_id === id || (t.session_id == null && t.job === id));
-const sessionIdOf = (home, t) => t.session_id ?? jobState(home, t.job)?.sessionId ?? null;
 
 // The project a folder under the projects folder belongs to (its first part), or null.
 function projectOf(projects, cwd) {
@@ -598,42 +373,19 @@ function projectOf(projects, cwd) {
   return cwd.slice(projects.length + 1).split('/')[0] || null;
 }
 
-// The name of each running Claude Code process's session. A name Claude Code made up from the folder
-// (nameSource "derived") isn't one: it's left out.
-function liveNames(live) {
-  const out = new Map();
-  for (const [id, s] of live) if (s.name?.trim() && s.nameSource !== 'derived') out.set(id, s.name.trim());
-  return out;
-}
-
-// One task as list shows it, with its current Claude Code name: its job's, else its running process's, else its
-// transcript's (not read for a dismissed task), else the name it was filed under.
-// Its claude.ai link too, when it has had Remote Control (the transcript is read for one only for a session with no
-// job that isn't dismissed).
-function showTask(home, t, names, live = new Map(), cache = null) {
+// One task as list shows it: a cloud task from the sessions list; any other from its harness (row), with its current
+// name there and its link when it has one. A task on a harness this command doesn't know shows what the store kept.
+// `scans` holds each harness's one look for this list.
+function showTask(scans, t, cache = null) {
   if (isCloud(t)) {
     const cloud = cloudView(t, cache);
     const name = (t.named === 'user' ? t.name : t.name || cloud.title) || '';
     return { ...taskRow(t, t.session_id, name, cloud.url), cloud };
   }
-  const job = t.machine === LOCAL ? jobState(home, t.job) : null;
-  const sessionId = t.session_id ?? job?.sessionId ?? null;
-  const remote = t.machine === LOCAL ? remoteUrl(home, { sessionId, job, live: sessionId ? live.get(sessionId) : null, transcript: !job && !t.dismissed_at }) : null;
-  const kept = keptName(t, job);
-  if (kept) return taskRow(t, sessionId, kept, remote);
-  let name = job?.name || '';
-  if (!name && t.machine === LOCAL && sessionId) name = names.get(sessionId) || (t.dismissed_at ? '' : transcriptTitle(home, sessionId));
-  return taskRow(t, sessionId, name || t.name || '', remote);
-}
-
-// The name the store keeps for a task over Claude Code's, or null. A copy Claude Code started in a task's place keeps
-// the task's name, unless the copy's job was renamed by someone (Claude Code names a copy from the message it was
-// sent). A session with no job that was renamed with rename-task keeps that name: Claude Code has no way to rename it
-// from outside (see renameTask).
-function keptName(t, job) {
-  if (t.how === 'copied' && t.name && job?.nameSource !== 'user') return t.name;
-  if (t.named === 'user' && t.name && !job) return t.name;
-  return null;
+  const h = harnessOf(t);
+  if (!h) return taskRow(t, t.session_id ?? null, t.name || '', null);
+  const r = h.row(scans.get(h.id), t, { local: LOCAL });
+  return taskRow(t, r.session_id, r.name, r.remote_url);
 }
 
 function taskRow(t, sessionId, name, remote = null) {
@@ -653,8 +405,7 @@ export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh'
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
   if (only) channelOf(store, only, { archived: true });
-  const live = readLive(home);
-  const names = liveNames(live);
+  const scans = new Map([[claude.id, claude.scan({ deps: { home } })]]);
   const cache = readCloudCache(dir);
   const position = new Map(store.channels.filter((c) => !c.archived_at).map((c, i) => [c, i + 1]));
   return {
@@ -671,7 +422,7 @@ export function listChannels({ dir, home = homedir(), all = false, only = null }
       id: c.id, name: c.name, position: position.get(c) ?? null, icon: c.icon ?? null, created_at: c.created_at, archived_at: c.archived_at ?? null,
       description_path: descriptionPath(dir, c.name), chat: c.chat ?? null, chat_terminal: chatRunning(dir, c.id)?.terminal ?? null,
       routines: c.routines.map((r) => showRoutine(r, Date.now(), WORDS)), queued: c.queue.length,
-      tasks: c.tasks.map((t) => showTask(home, t, names, live, cache)).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`)),
+      tasks: c.tasks.map((t) => showTask(scans, t, cache)).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`)),
     })),
   };
 }
@@ -768,25 +519,14 @@ async function start({ dir, deps, name, repo, title, model, mode, brief, wake = 
     fail(`--repo is a folder in ${deps.projects}: ${projectNames(deps.projects).join(', ') || 'none there yet'}.`);
   }
   if (model != null && !/^[a-z0-9][a-z0-9.\[\]-]{0,60}$/i.test(model)) fail('--model is a model name such as "opus" or "sonnet".');
-  if (mode != null && mode !== '' && !/^[A-Za-z]{1,32}$/.test(mode)) fail('--permission-mode is one of Claude Code\'s permission modes, such as "auto" or "default".');
+  const h = HARNESSES.claude;
+  h.checkStart?.({ mode });
   const cwd = repo ? join(deps.projects, repo) : deps.projects;
   if (!existsSync(cwd)) fail(`The projects folder ${cwd} doesn't exist. Make it, or set CHANNELS_PROJECTS.`);
   const label = cut(oneLine(title || brief), 60);
-  // With Remote Control on, the task also shows at claude.ai/code under its name. `send` passes no flags: Claude Code
-  // resumes a background session with the options it started with, this one included.
-  const args = ['--bg', ...(remoteOn() ? ['--remote-control', label] : []), '-n', label, ...(mode ? ['--permission-mode', mode] : []), ...(model ? ['--model', model] : []), brief];
-  const r = await deps.run(deps.claude, args, { cwd, env: cleanEnv(), timeout: 90_000 });
-  const said = `${r.out}\n${r.err}`;
-  const job = (/backgrounded · (\S+)/.exec(said) || /claude attach (\S+)/.exec(said) || [])[1];
-  if (!job) fail(`Claude Code didn't start a session in ${cwd}: ${cut(oneLine(r.err || r.out || 'no output'), 300)}`);
-  // The session id is written a moment after the job starts.
-  let sessionId = null;
-  for (let k = 0; k < 30 && !sessionId; k++) {
-    sessionId = jobState(deps.home, job)?.sessionId ?? null;
-    if (!sessionId) await deps.sleep(300);
-  }
+  const made = await h.start({ deps, cwd, brief, name: label, model, mode });
   const task = {
-    machine: LOCAL, session_id: sessionId, job, name: label, repo: repo ?? null, folder: cwd,
+    machine: LOCAL, session_id: made.session_id, job: made.job, name: label, repo: repo ?? null, folder: cwd,
     added_at: new Date().toISOString(), how: 'started', dismissed_at: null, dismissed_by: null, told: null,
     ...(wake ? { wake: registration(wake, 'you started it with --wake-on') } : {}),
   };
@@ -823,17 +563,14 @@ async function startCloud({ dir, deps, name, repo, title, model, brief, wake }) 
   return task;
 }
 
-// What the listener would say about a session right now, and the mark that says it was said: a finished task is
-// news again only after it did more work (its timeline grew, or its transcript did for a session with no job).
-function looked(home, t, jobs, live) {
-  const sid = sessionIdOf(home, t);
-  const job = sid ? jobs.get(sid) ?? null : null;
-  const l = sid ? live.get(sid) ?? null : null;
-  const st = stateOf({ live: l, job });
-  const kind = st.state === 'done' || st.state === 'failed' ? 'done' : st.state === 'waiting_on_user' || st.state === 'blocked' ? 'needs' : null;
-  let work = job?.work ?? 0;
-  if (!job && sid) { const f = findTranscript(home, sid); try { work = f ? statSync(f).size : 0; } catch { work = 0; } }
-  return { sid, job, live: l, st, kind, transcript: null, mark: { kind, work } };
+// What the listener would say about a task right now: its harness's look (a Snap, docs/harnesses.md §2), or null for a
+// task on a harness this command doesn't know. `scans` keeps each harness's one look at all its sessions, so a tick
+// asks each harness once.
+async function lookTask(scans, deps, t) {
+  const h = harnessOf(t);
+  if (!h) return null;
+  if (!scans.has(h.id)) scans.set(h.id, await h.scan({ deps }));
+  return h.look(scans.get(h.id), t);
 }
 
 // A cloud session's event, from the list: it asks you (requires_action), or its turn ended (idle, with a summary of
@@ -851,13 +588,9 @@ function cloudMark(s, kind) {
   return { kind, work: s.last_event_at ?? null, last, key: eventKey(kind, last, kind === 'needs' ? said : null) };
 }
 
-// Reads the session's transcript for what looked saw, and adds its last message's fingerprint to the mark. Only
-// done when there is something to say, as a transcript can be large.
-function withLast(home, now) {
-  now.transcript = now.sid ? readTranscript(home, now.sid, now.job?.transcript) : null;
-  now.mark.last = lastMark(now.transcript?.last?.text);
-  return now;
-}
+// Reads the task's own words for what its look saw (its last message, its title), and adds its last message's
+// fingerprint to the mark. Only done when there is something to say, as a transcript can be large.
+const withLast = (now) => HARNESSES[now.harness].withLast(now, lastMark);
 
 // A short fingerprint of a task's last message, kept with what it was last reported as: a report that would repeat
 // the message the chat already has isn't sent.
@@ -866,9 +599,9 @@ const lastMark = (text) => (text ? createHash('sha256').update(text).digest('hex
 // Files a session into a channel as a task. Where it stands now isn't news to the chat: only what it does after.
 // With `supersedes`, the task it replaces in that channel is marked superseded by it and resolved, so one task owns
 // the work.
-function fileTask({ dir, deps, name, task, how, supersedes = null }) {
-  const now = looked(deps.home, task, readJobs(deps.home), readLive(deps.home));
-  if (now.kind) withLast(deps.home, now);
+async function fileTask({ dir, deps, name, task, how, supersedes = null }) {
+  const now = await lookTask(new Map(), deps, task);
+  if (now?.kind) withLast(now);
   const at = new Date().toISOString();
   return updateStore(dir, (store) => {
     if (supersedes) {
@@ -879,7 +612,7 @@ function fileTask({ dir, deps, name, task, how, supersedes = null }) {
         old.dismissed_by ??= 'send';
       }
     }
-    return addTask(store, name, { ...task, added_at: at, how, dismissed_at: null, dismissed_by: null, told: now.kind ? now.mark : null });
+    return addTask(store, name, { ...task, added_at: at, how, dismissed_at: null, dismissed_by: null, told: now?.kind ? now.mark : null });
   });
 }
 
@@ -950,31 +683,6 @@ export function taskName(raw) {
   return name;
 }
 
-// Renames a background session in Claude Code, as its own agents view (`claude agents`, Rename) does: the job's
-// state.json gets the name with nameSource "user". A running session watches that file and takes the name on at once
-// (no turn starts), `claude agents` lists it, `claude respawn` and a resume keep it, and Claude Code's own naming
-// never replaces a name the user gave. The session's process writes the same file as it works, read-change-write, so
-// a write of ours can be lost to one of its writes: the name is read back and written again until it holds.
-// true when the job holds the name, false when it has no state to rename.
-export async function renameJob(deps, job, name) {
-  if (!job || !/^[A-Za-z0-9_-]{1,64}$/.test(job)) return false;
-  const file = join(deps.home, '.claude', 'jobs', job, 'state.json');
-  for (let k = 0; k < 5; k++) {
-    const s = readJson(file);
-    if (!s || typeof s !== 'object') return false;
-    if (s.name === name && s.nameSource === 'user') {
-      if (k > 0) return true;
-    } else {
-      const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify({ ...s, name, nameSource: 'user', updatedAt: new Date().toISOString() }, null, 2)}`, { mode: 0o600 });
-      renameSync(tmp, file);
-    }
-    await deps.sleep(k === 0 ? 400 : 250);
-  }
-  const s = readJson(file);
-  return Boolean(s && s.name === name && s.nameSource === 'user');
-}
-
 // A task and its copies in its channel: the tasks it was a copy of, and the copies started in its place, by
 // copy_of and superseded_by.
 function chainOf(c, t) {
@@ -1003,10 +711,10 @@ async function renameTask({ dir, deps, ref, name }) {
   const hit = open[0] ?? found[0] ?? null;
   let targets;
   if (hit) {
-    targets = chainOf(hit.c, hit.t).map((t) => ({ ref: taskRef(t), session_id: t.session_id ?? null, job: t.job ?? (t.session_id ? readJobs(deps.home).get(t.session_id)?.job : null) ?? null }));
+    targets = chainOf(hit.c, hit.t).map((t) => ({ ref: taskRef(t), session_id: t.session_id ?? null, job: claude.jobOf(deps.home, t) }));
   } else {
     const s = await findLocalSession({ deps, id });
-    targets = [{ ref: `${machine}/${s.session_id}`, session_id: s.session_id, job: s.job ?? readJobs(deps.home).get(s.session_id)?.job ?? null }];
+    targets = [{ ref: `${machine}/${s.session_id}`, session_id: s.session_id, job: claude.jobOf(deps.home, s) }];
   }
   const renamed = [];
   const kept = [];
@@ -1082,12 +790,7 @@ function seen({ dir, ref }) {
 
 async function sessionFacts(deps, ref) {
   const { id } = parseSessionRef(ref);
-  const s = await findLocalSession({ deps, id });
-  const jobs = readJobs(deps.home);
-  const live = readLive(deps.home);
-  const job = jobs.get(s.session_id) ?? null;
-  const l = live.get(s.session_id) ?? null;
-  return { s, job, live: l, st: stateOf({ live: l, job }) };
+  return claude.facts({ deps, id, machine: LOCAL });
 }
 
 // A cloud task, read from the sessions list (fetched now if the last one is older than a poll): its state, its
@@ -1111,19 +814,9 @@ async function readCloud({ dir, deps, id }) {
 async function read({ dir, deps, ref, limit }) {
   const r = parseSessionRef(ref);
   if (r.machine === CLOUD_MACHINE) return readCloud({ dir, deps, id: r.id });
-  const { s, job, live, st } = await sessionFacts(deps, ref);
-  const t = readTranscript(deps.home, s.session_id, job?.transcript);
-  const summary = {
-    id: s.session_id, machine: LOCAL, job: s.job, title: job?.name || live?.name || t?.title || s.name || '', state: st.state, doing: st.doing,
-    project: projectOf(deps.projects, s.cwd), folder: s.cwd, waiting_on: st.state === 'waiting_on_user' ? (live?.waitingFor || 'a prompt') : st.state === 'blocked' ? st.doing : null,
-    result: job?.result ?? null, last_agent_message: t?.last?.text ?? null,
-    remote_url: remoteUrl(deps.home, { sessionId: s.session_id, job, live, file: job?.transcript }),
-  };
-  const thread = t?.thread ?? [];
-  // The last agent message is shown whole, the others cut.
-  const lastAt = thread.map((x) => x.who).lastIndexOf('agent');
-  const messages = thread.slice(-limit).map((x, i, a) => (x.who === 'agent' && thread.length - a.length + i === lastAt && t?.last ? { ...x, text: t.last.text } : x));
-  return { summary, messages: messages.reverse(), more: thread.length > limit };
+  const out = await claude.read({ deps, id: r.id, machine: LOCAL, limit });
+  out.summary.project = projectOf(deps.projects, out.summary.folder);
+  return out;
 }
 
 const clock = (iso) => (typeof iso === 'string' ? iso.slice(0, 16).replace('T', ' ') : '');
@@ -1159,16 +852,6 @@ function taskOf(dir, sessionId) {
   return null;
 }
 
-// Waits until a process has exited: true, or false when it still runs after `ms`.
-async function exited(deps, pid, ms) {
-  const until = Date.now() + ms;
-  while (alive(pid)) {
-    if (Date.now() > until) return false;
-    await deps.sleep(200);
-  }
-  return true;
-}
-
 // A message to a background session. One whose turn is over (done, or ended asking something) is woken with it:
 // its process is stopped, and once that process has exited the same session resumes in the background with the
 // message as its next turn (`claude --bg --resume` on a session whose process still runs starts a copy instead).
@@ -1179,29 +862,18 @@ async function send({ dir, deps, ref, text, wake = null }) {
   if (!text.trim()) fail('A message needs some text.');
   const target = parseSessionRef(ref);
   if (target.machine === CLOUD_MACHINE) return sendCloud({ dir, deps, id: target.id, text, wake });
-  const { s, job, live, st } = await sessionFacts(deps, ref);
-  if (!job && !s.job) fail(`${LOCAL}/${s.session_id} isn't a background session, so a message can't reach it: continue it where it runs.`);
-  if (live && (st.state === 'working' || st.state === 'waiting_on_job')) fail(`${LOCAL}/${s.session_id} is working. Send it after it finishes; or type into it in its view in the panel.`);
-  if (st.state === 'waiting_on_user') fail(`${LOCAL}/${s.session_id} is showing a prompt (${live?.waitingFor || 'a dialog'}): answer it in its view in the panel.`);
-  const jobId = job?.job ?? s.job;
+  const f = await sessionFacts(deps, ref);
+  const { s, job } = f;
   const filed = taskOf(dir, s.session_id);
   const channel = filed?.channel ?? null;
   const body = `${channel ? `From the user via #${channel}'s chat: ` : 'From the user via a channel chat: '}${text}`;
-  if (live) {
-    const stop = await deps.run(deps.claude, ['stop', jobId], { cwd: deps.home, env: cleanEnv(), timeout: 60_000 });
-    if (stop.code !== 0) fail(`Couldn't stop ${jobId} to wake it: ${cut(oneLine(stop.err || stop.out || 'no output'), 240)}`);
-    const ms = stopWaitMs();
-    if (!(await exited(deps, live.pid, ms))) {
-      fail(`${LOCAL}/${s.session_id} was told to stop, but its process (pid ${live.pid}) still runs after ${Math.round(ms / 100) / 10}s. The message wasn't sent and nothing was started, since resuming it now would start a copy. Send it again in a moment.`);
-    }
-  }
-  const r = await deps.run(deps.claude, ['--bg', '--resume', s.session_id, body], { cwd: job?.cwd || s.cwd || deps.projects, env: cleanEnv(), timeout: 90_000 });
-  const woke = (/backgrounded · (\S+)/.exec(`${r.out}${r.err}`) || [])[1];
-  if (!woke) fail(`The session didn't resume: ${cut(oneLine(r.err || r.out || 'no output'), 240)}`);
+  const sent = await claude.send({ deps, facts: f, body, machine: LOCAL, stopWaitMs: stopWaitMs() });
+  const woke = sent.job;
+  const jobId = woke;
   const reg = wake ? registration(wake, 'you sent it a message with --wake-on') : null;
   // The task has its answer: a question it waited on is no longer a card, nor news for the chat.
   if (filed) dropWaiting(dir, `${LOCAL}/${s.session_id}`);
-  if (woke === jobId) {
+  if (sent.delivered_as === 'resumed') {
     let watching = false;
     if (reg && filed) {
       updateStore(dir, (store) => {
@@ -1210,13 +882,7 @@ async function send({ dir, deps, ref, text, wake = null }) {
     }
     return { id: s.session_id, machine: LOCAL, delivered_as: 'resumed', job: woke, note: `It continues with this as its next message.${reg ? (watching ? ` The chat is woken when it ${reg.on === 'finish' ? 'finishes' : reg.on === 'question' ? 'asks something' : 'finishes or asks something'}.` : ' It isn\'t a task in a channel, so --wake-on has nothing to register on.') : ''}` };
   }
-  // A copy: a new session with the same history and the message as its next turn. Its session id is written a
-  // moment after it starts.
-  let copyId = null;
-  for (let k = 0; k < 30 && !copyId; k++) {
-    copyId = jobState(deps.home, woke)?.sessionId ?? null;
-    if (!copyId) await deps.sleep(300);
-  }
+  const copyId = sent.copy_session_id ?? null;
   const copyRef = `${LOCAL}/${copyId ?? `job:${woke}`}`;
   const out = { id: s.session_id, machine: LOCAL, delivered_as: 'copy_started', job: woke, copy: { id: copyRef, session_id: copyId, job: woke }, filed_in: null };
   const head = `Claude Code didn't continue ${LOCAL}/${s.session_id}: it started a copy of it, ${copyRef} (job ${woke}), and the message went to the copy.`;
@@ -1227,9 +893,9 @@ async function send({ dir, deps, ref, text, wake = null }) {
     folder: was.folder ?? job?.cwd ?? s.cwd ?? null, copy_of: `${LOCAL}/${s.session_id}`, ...(reg ? { wake: reg } : {}),
   };
   try {
-    fileTask({ dir, deps, name: channel, task, how: 'copied', supersedes: { machine: LOCAL, id: was.session_id ?? was.job } });
+    await fileTask({ dir, deps, name: channel, task, how: 'copied', supersedes: { machine: LOCAL, id: was.session_id ?? was.job } });
   } catch (err) {
-    if (!(err instanceof UsageError)) throw err;
+    if (!isUsage(err)) throw err;
     return { ...out, note: `${head} Filing the copy into #${channel} failed: ${err.message}` };
   }
   return { ...out, filed_in: channel, note: `${head} The copy is filed into #${channel} as "${task.name}" in its place, and the original task is marked superseded by it and resolved.${copyRemoteNote()}` };
@@ -1281,7 +947,7 @@ function dropWaiting(dir, ref) {
 
 // A card's Tell chat: the task's report, whole, as a wake would bring it, for the chat to read as the user's ask.
 // The card leaves the inbox first, so the event doesn't ride along as well.
-export function tellText({ dir, home, ref }) {
+export async function tellText({ dir, home, deps = { home }, ref }) {
   const { channel, task, ref: id, entry } = takeCard(dir, ref);
   if (isCloud(task)) {
     // What the listener last learned of the session; the card's event, else its kept state.
@@ -1291,14 +957,15 @@ export function tellText({ dir, home, ref }) {
     const facts = { channel: channel.name, ref: id, name: entry?.name || task.name || c.title || '', at: entry?.at || c.last_event_at || new Date().toISOString(), doing: c.detail || (kind === 'done' ? 'its turn ended' : 'it asks you'), last: said, why: CARD_ASKED, cloud: true };
     return kind === 'needs' ? questionText({ ...facts, prompt: false, waiting: said }) : reportText(facts);
   }
-  const now = looked(home, task, readJobs(home), readLive(home));
-  withLast(home, now);
-  const name = entry?.name || now.job?.name || now.live?.name || task.name || now.transcript?.title || '';
-  const at = entry?.at || now.job?.updatedAt || new Date().toISOString();
-  const facts = { channel: channel.name, ref: id, name, at, doing: now.st.doing, last: now.transcript?.last?.text, result: now.job?.result, why: CARD_ASKED };
+  const now = await lookTask(new Map(), deps, task);
+  if (!now) return reportText({ channel: channel.name, ref: id, name: entry?.name || task.name || '', at: entry?.at || new Date().toISOString(), doing: 'state unknown here', last: entry?.card?.message ?? null, why: CARD_ASKED });
+  withLast(now);
+  const name = entry?.name || now.agentName || task.name || now.title || '';
+  const at = entry?.at || now.at || new Date().toISOString();
+  const facts = { channel: channel.name, ref: id, name, at, doing: now.st.doing, last: now.last, result: now.result, why: CARD_ASKED };
   if (now.kind === 'needs') {
     const prompt = now.st.state === 'waiting_on_user';
-    return questionText({ ...facts, prompt, waiting: prompt ? now.live?.waitingFor || 'a prompt' : now.st.doing });
+    return questionText({ ...facts, prompt, waiting: prompt ? now.liveWaiting || 'a prompt' : now.st.doing });
   }
   return reportText(facts);
 }
@@ -1489,7 +1156,7 @@ const isRepeat = (told, kind, mark) => Boolean(told) && ((told.key && told.key =
 // panel, then wakes the chat through `deliver(text)` (true when it arrived) if a registration on the task matches,
 // using it up; otherwise it waits in the channel's inbox for the chat's next message. Dismissed tasks have no events.
 // Answers what was done: [{ level: 'wake' | 'ride-along', task, text }].
-export async function listenTick({ dir, home, channelId, deliver, look = null }) {
+export async function listenTick({ dir, home, deps = { home }, channelId, deliver, look = null }) {
   const store = readStore(dir);
   const c = store.channels.find((x) => x.id === channelId);
   if (!c || c.archived_at) return [];
@@ -1498,24 +1165,21 @@ export async function listenTick({ dir, home, channelId, deliver, look = null })
   const typed = await deliverQueue({ dir, channel: c, deliver });
   for (const text of typed) out.push({ level: 'routine', task: null, text });
   if (typed.length < c.queue.length) return out;
-  const jobs = readJobs(home);
-  const live = readLive(home);
+  const scans = new Map();
   for (const t of c.tasks) {
     if (t.dismissed_at || t.machine !== LOCAL) continue;
-    const now = looked(home, t, jobs, live);
-    if (!now.kind || !now.sid) continue;
+    const now = await lookTask(scans, deps, t);
+    if (!now?.kind || !now.sid) continue;
     if (t.told && t.told.kind === now.mark.kind && t.told.work === now.mark.work) continue;
-    withLast(home, now);
+    withLast(now);
     const ref = `${LOCAL}/${now.sid}`;
-    const transcript = now.transcript;
-    const prompt = now.st.state === 'waiting_on_user';
-    const waiting = now.kind === 'needs' ? (prompt ? (now.job?.state === 'working' && now.job.needs) || now.live?.waitingFor || 'a prompt' : now.st.doing) : null;
-    now.mark.key = eventKey(now.kind, now.mark.last ?? lastMark(now.job?.result), waiting);
+    const { prompt, waiting } = now;
+    now.mark.key = eventKey(now.kind, now.mark.last ?? lastMark(now.result), waiting);
     const repeat = isRepeat(t.told, now.kind, now.mark);
     const reg = !repeat && wakes(t.wake, now.kind) ? t.wake : null;
-    const name = (keptName(t, t.job ? jobState(home, t.job) : null) || now.job?.name || now.live?.name || t.name || transcript?.title) || ''; // as list names it
-    const at = now.job?.updatedAt || new Date().toISOString();
-    const facts = { channel: c.name, ref, name, at, doing: now.st.doing, waiting, prompt, last: transcript?.last?.text, result: now.job?.result };
+    const name = (now.kept || now.agentName || t.name || now.title) || ''; // as list names it
+    const at = now.at || new Date().toISOString();
+    const facts = { channel: c.name, ref, name, at, doing: now.st.doing, waiting, prompt, last: now.last, result: now.result };
     if (now.kind === 'done') {
       const text = repeat ? null : noticeText({ ...facts, why: reg?.why });
       queueNotice({ dir, channelId, t, mark: now.mark, repeat, reg, ref, name, at, text });
@@ -1525,10 +1189,10 @@ export async function listenTick({ dir, home, channelId, deliver, look = null })
     // A turn that ended asking for something (a question, a hand-off) is a notice too, so the chat can act on it now,
     // and it keeps its card and dot. A live prompt in the task's session isn't: its card answers it, and it rides along.
     if (!prompt && !repeat && !reg) {
-      const last = transcript?.last?.text;
-      const text = needsNoticeText({ ref, name, needs: now.job?.needs, last, result: now.job?.result, detail: now.job?.detail });
-      const card = cardOf({ kind: 'needs', prompt, waiting, last, result: now.job?.result });
-      const remote = remoteUrl(home, { sessionId: now.sid, job: now.job, live: now.live, file: now.job?.transcript });
+      const last = now.last;
+      const text = needsNoticeText({ ref, name, needs: now.needs, last, result: now.result, detail: now.detail });
+      const card = cardOf({ kind: 'needs', prompt, waiting, last, result: now.result });
+      const remote = HARNESSES[now.harness].remote?.(now) ?? null;
       queueNotice({ dir, channelId, t, mark: now.mark, repeat, reg, ref, name, at, text, asks: { note: noteText({ ...facts, kind: 'needs' }), card, ...(remote ? { remote } : {}) } });
       out.push({ level: 'asks', task: ref, text });
       continue;
@@ -1539,9 +1203,9 @@ export async function listenTick({ dir, home, channelId, deliver, look = null })
       if (!(await deliver(text))) break; // the chat can't take it now: the next look tries again, in order
     }
     const note = repeat || reg ? null : noteText({ ...facts, kind: now.kind });
-    const card = note ? cardOf({ kind: now.kind, prompt, waiting, last: transcript?.last?.text, result: now.job?.result }) : null;
+    const card = note ? cardOf({ kind: now.kind, prompt, waiting, last: now.last, result: now.result }) : null;
     // The task's claude.ai link, for the card's Open on claude.ai.
-    const remote = note ? remoteUrl(home, { sessionId: now.sid, job: now.job, live: now.live, file: now.job?.transcript }) : null;
+    const remote = note ? HARNESSES[now.harness].remote?.(now) ?? null : null;
     updateStore(dir, (s) => {
       const ch = s.channels.find((x) => x.id === channelId);
       const task = ch?.tasks.find((x) => sameSession(x, t.machine, t.session_id ?? t.job));
@@ -1635,7 +1299,7 @@ export async function listenTick({ dir, home, channelId, deliver, look = null })
         if (s !== undefined && s?.worker_status !== 'requires_action') moved.add(e.task);
         continue;
       }
-      const now = t && !t.dismissed_at ? looked(home, t, jobs, live) : null;
+      const now = t && !t.dismissed_at ? await lookTask(scans, deps, t) : null;
       if (now?.kind !== 'needs') moved.add(e.task);
     }
     if (moved.size) {
@@ -1871,7 +1535,7 @@ export function startListener({ dir, deps, channelId, terminal }) {
     try {
       await confirmChannels();
       if (await isReady()) {
-        await listenTick({ dir, home: deps.home, channelId, deliver, look: () => cloudLook({ dir, deps }) });
+        await listenTick({ dir, home: deps.home, deps, channelId, deliver, look: () => cloudLook({ dir, deps }) });
         for (const n of await settleNotices({ dir, home: deps.home, channelId, idle, deliver })) log(n.how === 'typed' ? `notice ${n.id} wasn't in the chat: typed it in` : `notice ${n.id} reached the chat`);
         // With a cloud task open, whether `claude --cloud <id>` attaches here is asked now and then, in the background.
         if (cloudOn() && openCloudTasks(readStore(dir))) probeAttachLater({ dir, deps })?.then((state) => log(`claude --cloud attach: ${state}`));
@@ -2256,32 +1920,6 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-function onPath(cmd) {
-  if (cmd.includes('/')) return existsSync(cmd) ? cmd : null;
-  for (const d of `${process.env.PATH ?? ''}`.split(':')) if (d && existsSync(join(d, cmd))) return join(d, cmd);
-  return null;
-}
-
-// The Claude Code version a new claude would run. The native installer's `claude` links into versions/<version>, which
-// says it without running anything; otherwise `claude --version`, remembered for that binary (path, size, mtime).
-export async function installedClaude({ dir, deps }) {
-  const path = onPath(deps.claude);
-  if (!path) return null;
-  const target = (() => { try { return realpathSync(path); } catch { return path; } })();
-  const named = /^(\d+\.\d+\.\d+[^/]*)$/.exec(target.split('/').pop());
-  if (named) return named[1];
-  let st;
-  try { st = statSync(target); } catch { return null; }
-  const key = `${target}:${st.size}:${st.mtimeMs}`;
-  const file = join(dir, 'claude-version.json');
-  const was = readJson(file);
-  if (was?.key === key) return was.version;
-  const r = await deps.run(deps.claude, ['--version'], { cwd: deps.home, env: cleanEnv(), timeout: 20_000 });
-  const version = (/(\d+\.\d+\.\d+)/.exec(r.out) || [])[1] ?? null;
-  if (version) { try { mkdirSync(dir, { recursive: true }); writeAtomic(file, `${JSON.stringify({ key, version })}\n`); } catch { /* not remembered */ } }
-  return version;
-}
-
 // Where each running chat stands against what is installed: `behind` lists what it is behind on ("channels",
 // "claude"), `state` is its claude's own status (idle, busy, waiting, ...; null while it starts). `asked` is the
 // Claude Code version a refresh was asked for, when one waits on chats that were mid-turn.
@@ -2637,7 +2275,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
     if (sub === 'listen') {
       if (pos.length !== 1 || !opts.once) fail('channels listen <channel> --once   (one look, as the listener takes: prints what it did, and records it)');
       const c = channelOf(readStore(dir), channelName(pos[0]));
-      const did = await listenTick({ dir, home: deps.home, channelId: c.id, deliver: async () => true, look: () => cloudLook({ dir, deps }) });
+      const did = await listenTick({ dir, home: deps.home, deps, channelId: c.id, deliver: async () => true, look: () => cloudLook({ dir, deps }) });
       for (const e of did) console.log(e.level === 'routine' ? `Types a routine run into the chat:\n${e.text}\n` : e.level === 'wake' ? `Wakes the chat with:\n${e.text}\n` : e.level === 'gone' ? `Drops ${e.task}'s question: the task has moved on.\n` : e.level === 'notice' ? `Tells the chat, in one line:\n${e.text}\n` : e.level === 'asks' ? `Tells the chat, in one line, and shows its card:\n${e.text}\n` : `Rides along with the chat's next message:\n${e.text}\n`);
       if (!did.length) console.log('Nothing new to report.');
       return 0;
@@ -2659,7 +2297,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
     if (sub === 'card') {
       const [how, ref] = pos;
       if (pos.length !== 2 || !['dismiss', 'tell'].includes(how)) fail('channels card dismiss|tell <session>   (what a card above the chat\'s prompt does)');
-      if (how === 'tell') { console.log(tellText({ dir, home: deps.home, ref })); return 0; }
+      if (how === 'tell') { console.log(await tellText({ dir, home: deps.home, deps, ref })); return 0; }
       const r = takeCard(dir, ref);
       console.log(r.entry ? `Dismissed ${r.ref}'s card in #${r.channel.name}.` : `${r.ref} had no card waiting.`);
       return 0;
@@ -2776,7 +2414,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
     if (sub === 'help' || sub === '-h') { console.log(USAGE); return 0; }
     fail(USAGE);
   } catch (err) {
-    if (err instanceof UsageError || err instanceof RoutineError) { console.error(err.message); return 1; }
+    if (isUsage(err) || err instanceof RoutineError) { console.error(err.message); return 1; }
     throw err;
   }
 }
