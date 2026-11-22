@@ -787,9 +787,10 @@ const dropLast = (r, on) => (!on && r.last?.status === "queued" && r.last.kind !
 function lastRun(r, t) {
   const l = r.last;
   const hm = (iso) => whenText(iso).replace(/^Today /, "");
-  // Slots the tick skipped because this run still waited for the chat (bin/routines.mjs, claimDue).
+  // Slots the tick skipped because this run still waited for the chat (bin/routines.mjs, claimDue): only while
+  // the skip came after this run was recorded, so a later run (a run now has no due time) doesn't show an old skip.
   const s = r.skipped;
-  const skipped = s?.due_at && (!l?.due_at || s.due_at > l.due_at) ? ` · skipped ${s.count > 1 ? `${s.count}, last ` : ""}${hm(s.due_at)}` : "";
+  const skipped = s?.due_at && s.at && (!l?.at || s.at > l.at) ? ` · skipped ${s.count > 1 ? `${s.count}, last ` : ""}${hm(s.due_at)}` : "";
   if (!l) return ["never run", t.dim];
   if (l.status === "missed") return [`missed ${whenText(l.due_at)}`, t.blocked];
   const manual = l.kind === "manual";
