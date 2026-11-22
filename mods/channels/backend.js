@@ -75,7 +75,9 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - routine-edit-on: `routine edit … --on|--off` saves a routine's fields and its switch in one write; without it
 //   the dialog saves with edit, then on or off
 // - routine-manual: `routine add|edit … --schedule manual`, a routine with no time that runs only when run
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual"];
+// - routine-dry-run: `routine add|edit … --dry-run` prints what it would set up without saving (for the chat; the
+//   mod doesn't use it)
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 

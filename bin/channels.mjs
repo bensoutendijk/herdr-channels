@@ -646,7 +646,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run'];
 
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
@@ -1869,15 +1869,18 @@ export function startListener({ dir, deps, channelId, terminal }) {
 export { catchupMinutes, routineName, routineText, ROUTINE_DEFAULTS, schedule, showRoutine };
 const WORDS = { who: 'the user', where: 'this Mac', cli: 'channels' };
 
-function addRoutine({ dir, channel, now = Date.now(), ...fields }) {
+// A change to the store, or with `dry` the same change on a copy that is never written (--dry-run).
+const changeStore = (dir, change, dry) => (dry ? change(readStore(dir)) : updateStore(dir, change));
+
+function addRoutine({ dir, channel, now = Date.now(), dry = false, ...fields }) {
   schedule(fields.spec);
-  return updateStore(dir, (store) => R.addRoutine(channelOf(store, channel), { ...fields, now }));
+  return changeStore(dir, (store) => R.addRoutine(channelOf(store, channel), { ...fields, now }), dry);
 }
 
 // Answers { routine, dropped } (see R.editRoutine).
-function editRoutine({ dir, channel, name, change, now = Date.now() }) {
+function editRoutine({ dir, channel, name, change, now = Date.now(), dry = false }) {
   const ch = R.checkChange(change);
-  return updateStore(dir, (store) => R.editRoutine(channelOf(store, channel), name, ch, now));
+  return changeStore(dir, (store) => R.editRoutine(channelOf(store, channel), name, ch, now), dry);
 }
 
 function removeRoutine({ dir, channel, name }) {
@@ -2359,6 +2362,7 @@ export function parseArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--on' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check' || a === '--status') opts[a.slice(2)] = true;
+    else if (a === '--dry-run') opts.dryRun = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
       opts[a.slice(2).replace(/-(.)/g, (_, x) => x.toUpperCase())] = args[++i];
@@ -2395,8 +2399,8 @@ async function routineCommand({ dir, deps, pos, opts }) {
   if (verb === 'add') {
     if (opts.schedule == null) fail(`--schedule is needed.\n${ROUTINE_USAGE}`);
     const text = opts.prompt != null ? (opts.prompt === '-' ? readStdin() : opts.prompt) : rest.length === 3 && rest[2] === '-' ? readStdin() : rest.slice(2).join(' ');
-    const r = addRoutine({ dir, channel, name, prompt: text, spec: opts.schedule, catchupMin: opts.catchup == null ? undefined : catchupMinutes(opts.catchup), enabled: !opts.off });
-    console.log(opts.json ? JSON.stringify(r) : R.confirmation({ verb, channel, routine: r }));
+    const r = addRoutine({ dir, channel, name, prompt: text, spec: opts.schedule, catchupMin: opts.catchup == null ? undefined : catchupMinutes(opts.catchup), enabled: !opts.off, dry: opts.dryRun });
+    console.log(opts.json ? JSON.stringify(opts.dryRun ? { ...r, dry_run: true } : r) : R.confirmation({ verb, channel, routine: r, dry: opts.dryRun, ...WORDS }));
     return 0;
   }
   if (rest.length !== 2) fail(ROUTINE_USAGE);
@@ -2411,10 +2415,11 @@ async function routineCommand({ dir, deps, pos, opts }) {
       if (opts.on || opts.off) change.enabled = Boolean(opts.on);
       if (!Object.keys(change).length) fail(`Nothing to change.\n${ROUTINE_USAGE}`);
     } else change.enabled = verb === 'on';
-    const { routine, dropped } = editRoutine({ dir, channel, name, change });
-    console.log(opts.json ? JSON.stringify({ ...routine, dropped }) : R.confirmation({ verb, channel, routine, dropped }));
+    const { routine, dropped } = editRoutine({ dir, channel, name, change, dry: opts.dryRun });
+    console.log(opts.json ? JSON.stringify({ ...routine, dropped, ...(opts.dryRun ? { dry_run: true } : {}) }) : R.confirmation({ verb, channel, routine, dropped, dry: opts.dryRun, ...WORDS }));
     return 0;
   }
+  if (opts.dryRun) fail(`--dry-run goes with add, edit, on and off.\n${ROUTINE_USAGE}`);
   if (verb === 'rm') {
     removeRoutine({ dir, channel, name });
     console.log(R.confirmation({ verb, channel, routine: name }));

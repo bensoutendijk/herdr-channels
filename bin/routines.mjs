@@ -14,7 +14,7 @@
 // A channel object here is { name, routines: [...], queue: [...] }. A queue entry is a run waiting for the chat:
 // { id, routine (its id), name, kind: 'scheduled' | 'manual', text, queued_at }.
 import { randomUUID } from 'node:crypto';
-import { defaultCatchup, due, nextDue, parseSchedule, ScheduleError, scheduleWarnings, shortWhen, timeZone } from './schedule.mjs';
+import { defaultCatchup, due, MANUAL_LABEL, nextDue, parseSchedule, ScheduleError, scheduleWarnings, shortWhen, timeZone } from './schedule.mjs';
 
 // What this file refuses (a bad name, schedule or prompt, a routine that isn't there): the message says why, for the
 // person or chat that asked. A backend shows it the way it shows its own usage errors.
@@ -33,6 +33,16 @@ const oneLine = (s) => `${s ?? ''}`.replace(/\s+/g, ' ').trim();
 const cut = (s, n) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const hm = (ms) => { const d = new Date(ms); return `${`${d.getHours()}`.padStart(2, '0')}:${`${d.getMinutes()}`.padStart(2, '0')}`; };
 const iso = (ms) => new Date(ms).toISOString();
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// A moment with its day spelled out, so nobody has to work out which day "09:00" was: "Monday, Nov 23, 09:00", or
+// "Mon Nov 23, 09:00" short. By hand: some runtimes ignore toLocaleString's options.
+export const dayTime = (ms, { short = false } = {}) => {
+  const d = new Date(ms);
+  const day = WEEKDAYS[d.getDay()];
+  const year = d.getFullYear() === new Date().getFullYear() ? '' : ` ${d.getFullYear()}`;
+  return `${short ? day.slice(0, 3) : `${day},`} ${MONTHS[d.getMonth()]} ${d.getDate()}${year}, ${hm(ms)}`;
+};
 
 export function routineName(raw) {
   const name = `${raw ?? ''}`.trim().toLowerCase();
@@ -139,20 +149,34 @@ export function removeRoutine(c, name) {
 
 export const fenceRoutine = (text) => `${text}`.trim().replace(/<(\/?)routine-prompt/gi, '<$1routine_prompt');
 
+// What a run asks of the chat beyond the routine's own prompt: one plain line with the outcome first (a quiet run
+// stops there), the prompt's own limits on day and time checked against the real day and time, which it states, and
+// a question only when the chat can't go on without one.
+export function replyContract({ now = Date.now(), who = 'the user', where = 'this Mac' } = {}) {
+  return [
+    `For you (it is ${dayTime(now)} on ${where}'s clock):`,
+    `- Do what the prompt asks, as if ${who} had asked it here.`,
+    `- Open your reply with one plain line that says the outcome. When there is nothing that needs ${who}, that line is the whole reply.`,
+    `- If the prompt limits when it applies (only on weekdays, not after 18:00, not on holidays), check that against the day and time above. When this run falls outside it, say so in that one line and stop.`,
+    `- Don't ask ${who} anything unless you can't go on without an answer: ${who} may not be at the screen. If you must, ask once, at the end.`,
+  ].join('\n');
+}
+
 // The message a routine types into the chat. The header says it is a routine, when it was due, and when it runs if
 // that is late: "[routine morning-plan, scheduled 09:00, running 10:40]".
 export function routineText({ channel, routine, slot = null, now = Date.now(), manual = false, label = null, who = 'the user', where = 'this Mac' }) {
+  if (label == null) { try { label = parseSchedule(routine.schedule).label; } catch { label = routine.schedule; } }
   const late = !manual && slot != null && now - slot > 2 * 60_000;
   const head = manual ? `[routine ${routine.name}, run now]` : `[routine ${routine.name}, scheduled ${shortWhen(slot, now)}${late ? `, running ${hm(now)}` : ''}]`;
   const lines = [
     `${head} #${channel}`,
     manual
       ? `From the channels timer on ${where}: ${who} asked for this routine of #${channel} to run now.`
-      : `From the channels timer on ${where}, not typed by ${who} just now: a routine ${who} set up for #${channel} came due (${label ?? routine.schedule}).`,
+      : `From the channels timer on ${where}, not typed by ${who} just now: a routine ${who} set up for #${channel} came due (${label}).`,
   ];
   if (late) lines.push(`It is late: it was due at ${shortWhen(slot, now)} and runs at ${hm(now)}, because the timer on ${where} couldn't run it then (asleep or off).`);
   lines.push('', `The routine's prompt, as ${who} wrote it:`, '<routine-prompt>', fenceRoutine(routine.prompt), '</routine-prompt>', '',
-    `For you: do what the prompt asks, as if ${who} had asked it here. If you need ${who}, ask; ${who} may not be at the screen yet.`);
+    replyContract({ now, who, where }));
   return lines.join('\n');
 }
 
@@ -230,17 +254,55 @@ export function preview(raw, now = Date.now()) {
 
 export const previewText = (p, now = Date.now()) => p.error ?? (p.manual ? `${p.label}.` : `${p.label}. Next: ${p.next.map((x) => shortWhen(Date.parse(x), now)).join(', ')}`);
 
-// A routine in one line, as the command confirms a change: "morning-plan: Weekdays at 09:00, next Mon 09:00,
-// catch-up 60 min."
+// A routine in one line: "morning-plan: Weekdays at 09:00, next Mon 09:00, catch-up 60 min."
 export const said = (r) => `${r.name}: ${r.enabled ? r.label : `off (${r.label})`}${r.next_at ? `, next ${shortWhen(Date.parse(r.next_at))}` : ''}, catch-up ${r.catchup_min} min.`;
-const droppedText = (n) => (n ? ` Dropped ${n} run${n === 1 ? '' : 's'} that ${n === 1 ? 'was' : 'were'} waiting for the chat.` : '');
+
+// A length of minutes in words: "45 min", "2 hours", "1 day".
+const lengthText = (min) => {
+  const unit = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  return min >= 1440 && min % 1440 === 0 ? unit(min / 1440, 'day') : min >= 60 && min % 60 === 0 ? unit(min / 60, 'hour') : `${min} min`;
+};
+
+// A routine's next `n` runs from `now` (ms), none when it is off, manual or its schedule doesn't parse.
+function nextRuns(r, n, now) {
+  if (!r.enabled) return [];
+  let cron;
+  try { cron = parseSchedule(r.schedule).cron; } catch { return []; }
+  const out = [];
+  for (let t = now; cron && out.length < n;) { t = nextDue(cron, t); if (t == null) break; out.push(t); }
+  return out;
+}
+
+// The block add, edit, on and off print, which the chat passes on as it is: what the routine is, when it runs in
+// words, whether it is on, its next two runs, its catch-up window, the first line of its prompt and where to change
+// it. A dry run heads it "Would set up:" and saves nothing.
+export function routineBlock({ channel, routine: r, head, dropped = 0, now = Date.now(), where = 'this Mac', cli = 'channels' }) {
+  const manual = r.label === MANUAL_LABEL || r.schedule === 'manual';
+  const next = nextRuns(r, 2, now);
+  const first = `${r.prompt ?? ''}`.split('\n').map((l) => l.trim()).filter(Boolean);
+  const rows = [
+    ['Routine', `${r.name} in #${channel}`],
+    ['When', manual ? `${r.label} (no schedule)` : `${r.label}, ${where}'s time`],
+    ['Status', r.enabled ? 'on' : manual ? 'off' : 'off: it won\'t run on its schedule until it is switched on'],
+  ];
+  if (manual) rows.push(['Runs', `only when run: Run now in Routines, or ${cli} routine run ${channel} ${r.name}`]);
+  if (!manual && r.enabled) rows.push(['Next runs', next.length ? next.map((t) => dayTime(t, { short: true })).join(' and ') : 'none coming']);
+  if (!manual) rows.push(['Catch-up', r.catchup_min ? `runs up to ${lengthText(r.catchup_min)} late if ${where} was asleep or off at the time` : `none: a run ${where} misses is skipped`]);
+  rows.push(['Prompt', `${JSON.stringify(cut(first[0] ?? '', 90))}${first.length > 1 ? ` (+${first.length - 1} more line${first.length > 2 ? 's' : ''})` : ''}`]);
+  if (dropped) rows.push(['Dropped', `${dropped} run${dropped === 1 ? '' : 's'} that ${dropped === 1 ? 'was' : 'were'} waiting for the chat`]);
+  rows.push(['To change', `ask in #${channel}'s chat, or open Routines in #${channel}'s menu (${cli} routine edit ${channel} ${r.name} …)`]);
+  return [head, ...rows.map(([k, v]) => `  ${`${k}:`.padEnd(11)}${v}`)].join('\n');
+}
 
 // What the command prints after a routine command: { verb: 'add'|'edit'|'on'|'off'|'rm'|'run', channel, routine
-// (showRoutine's, or the name for rm), dropped, run (for run: { address, started }) }.
-export function confirmation({ verb, channel, routine, dropped = 0, run = null }) {
-  if (verb === 'add') return `Added a routine to #${channel}: ${said(routine)}`;
-  if (verb === 'edit') return `Changed #${channel}'s routine ${said(routine)}${droppedText(dropped)}`;
-  if (verb === 'on' || verb === 'off') return `#${channel}'s routine ${said(routine)}${droppedText(dropped)}`;
+// (showRoutine's, or the name for rm), dropped, run (for run: { address, started }), dry (a --dry-run of add or edit:
+// nothing was saved) }, in the words of `where` and `cli`.
+export function confirmation({ verb, channel, routine, dropped = 0, run = null, dry = false, now = Date.now(), where = 'this Mac', cli = 'channels' }) {
+  const block = (head) => routineBlock({ channel, routine, head, dropped, now, where, cli });
+  if (dry && ['add', 'edit', 'on', 'off'].includes(verb)) return `${block('Would set up:')}\n(A dry run: nothing is saved. Run the same command without --dry-run to ${verb === 'add' ? 'set it up' : 'make the change'}.)`;
+  if (verb === 'add') return block(`Added a routine to #${channel}:`);
+  if (verb === 'edit') return block(`Changed #${channel}'s routine ${routine.name}:`);
+  if (verb === 'on' || verb === 'off') return block(`Switched #${channel}'s routine ${routine.name} ${verb}:`);
   if (verb === 'rm') return `Removed #${channel}'s routine ${routine?.name ?? routine}.`;
   if (verb === 'run') return `Queued #${channel}'s routine ${routine?.name ?? routine} for its chat${run?.started ? `, which was started in the background (terminal ${run.address})` : run?.address ? ` (terminal ${run.address})` : ''}.`;
   return '';
@@ -249,11 +311,12 @@ export function confirmation({ verb, channel, routine, dropped = 0, run = null }
 // The routine commands' usage, for `cli` on `where`'s clock.
 export const routineUsage = ({ cli = 'channels', where = 'this Mac' } = {}) => [
   `${cli} routine list [<channel>] [--json]`,
-  `${cli} routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->`,
-  `${cli} routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off]`,
+  `${cli} routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] [--dry-run] <prompt | ->`,
+  `${cli} routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--dry-run]`,
   `${cli} routine rm|run|on|off <channel> <name>`,
   `${cli} routine preview <schedule> [--json]`,
   `Schedules (${where}'s local time): "weekdays 09:00", "daily 09:00", "hourly :15", "weekly fri 16:00", "cron <5 fields>", or "manual" (only when run).`,
+  `--dry-run checks everything and prints what it would set up, headed "Would set up:", without saving.`,
   `A catch-up window (default by schedule: 15 minutes for several runs a day, 60 for daily, 4 hours for weekly): how late a run the timer on ${where} missed may still fire, e.g. 15m, 2h, 1d or 0.`,
 ].join('\n');
 
@@ -280,11 +343,19 @@ export function listText(out, { cli = 'channels' } = {}) {
   return lines.join('\n');
 }
 
-// The chat prompt's paragraph on routines, for channel `name`.
+// The chat prompt's paragraph on routines, for channel `name`: what a run looks like and how to answer it, how to set
+// one up (rounding a request no schedule fits, a one-off, proposing with --dry-run, passing on the confirmation),
+// and how to answer "why didn't it run?" from routine list --json.
 export function promptText({ name, who = 'the user', where = 'this Mac', cli = 'channels' }) {
   return [
-    `Routines: prompts this chat gets on a schedule, set up by ${who}. When one comes due, a message opening with "[routine <name>, scheduled <time>]" arrives here on its own, from the channels timer on ${where}, with the prompt between <routine-prompt> markers; it says "running <time>" too when it runs late because the timer couldn't run it on time. Do what its prompt asks. When ${who} asks for something recurring ("every weekday at 9, ask me for my plan"), set it up:`,
+    `Routines: prompts this chat gets on a schedule, set up by ${who}. When one comes due, a message opening with "[routine <name>, scheduled <time>]" arrives here on its own, from the channels timer on ${where}, with the prompt between <routine-prompt> markers; it says "running <time>" too when it runs late because the timer couldn't run it on time. Do what its prompt asks, and answer the way its "For you" lines say: one plain line with the outcome first (a run with nothing for ${who} stops there), the prompt's own limits on day and time checked against the day and time the message gives, and a question only when you can't go on without one.`,
+    `When ${who} asks for something recurring ("every weekday at 9, ask me for my plan"), set it up:`,
     `- \`${cli} routine add ${name} <name> --schedule "<schedule>" [--catchup <window>] -\`, with the prompt on stdin. <name> is short, lowercase, with dashes (morning-plan). Schedules are in ${where}'s local time: "weekdays 09:00", "daily 18:30", "hourly :15", "weekly fri 16:00", a cron line "cron 0 9 * * 1-5", or "manual" for one ${who} only runs by hand. The catch-up window (default 15 minutes for several runs a day, 1 hour for daily, 4 hours for weekly; 15m, 2h, 1d, 0) is how late a run the timer missed (${where} asleep or off) may still happen. Write the prompt as ${who} would ask it of you at that time, standing on its own.`,
-    `- \`${cli} routine list ${name}\` shows them with their next and last runs; \`${cli} routine edit ${name} <name> [--schedule ...] [--catchup ...] [--prompt -] [--on|--off]\`, \`${cli} routine on|off|rm ${name} <name>\` change them and \`${cli} routine run ${name} <name>\` runs one now. A run that comes due while the last one still waits for this chat is skipped, not stacked. Change routines only when ${who} asks, and tell them the schedule and next run you set.`,
+    `- A request no schedule fits ("every 90 minutes", "the first Monday of the month", "every other Friday", "around lunch"): pick the nearest schedule that does, and say what you chose and why. Limits a schedule can't hold ("only the first Monday", "skip holidays") go in the prompt, which the run checks against the date. In a cron line with both a day of the month and a weekday, a day matching either one runs.`,
+    `- Something once ("remind me at 3 tomorrow"): a routine on a cron line for that date and time ("cron 0 15 24 11 *"), with --catchup 1d so it still runs if ${where} was asleep, and a prompt that ends: "Then remove this routine: ${cli} routine rm ${name} <name>". It removes itself when it runs.`,
+    `- add and edit take --dry-run: every check runs and the confirmation prints headed "Would set up:", with nothing saved. When you rounded a schedule, made a one-off or aren't sure what ${who} meant, propose it that way and set it up once ${who} agrees.`,
+    `- add, edit, on and off print a short confirmation block (the routine, when in words, on or off, the next two runs, the catch-up, the prompt's first line, where to change it). Pass it on to ${who} as it is, in a code block, not retold.`,
+    `- \`${cli} routine list ${name}\` shows them with their next and last runs; \`${cli} routine edit ${name} <name> [--schedule ...] [--catchup ...] [--prompt -] [--on|--off]\`, \`${cli} routine on|off|rm ${name} <name>\` change them and \`${cli} routine run ${name} <name>\` runs one now. A run that comes due while the last one still waits for this chat is skipped, not stacked. Change routines only when ${who} asks.`,
+    `When ${who} asks why a routine didn't run (or ran late, or twice), read \`${cli} routine list ${name} --json\` rather than guess, and answer in plain words with the days and times. Each routine has: enabled (false: switched off, so nothing runs on schedule); next_at (its next run; null when off or manual); error (its schedule no longer reads); last, its most recent run, with due_at, at, late_min, kind (scheduled or manual, a run now) and status: queued (waiting to be typed into this chat, which was busy or not running), delivered (typed into this chat at delivered_at), missed (it came due while ${where} was asleep or off and the timer got to it after the catch-up window, catchup_min, had passed, so it didn't run), dropped (it was waiting when the routine was switched off); and skipped (a later time came due while a run still waited for this chat, so it was skipped, count times, the last at skipped.due_at). The channel's queued counts runs still waiting. A new schedule or switching on starts afresh: times before that are neither run nor missed.`,
   ].join('\n');
 }

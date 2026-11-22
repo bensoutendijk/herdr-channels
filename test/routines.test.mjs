@@ -180,7 +180,7 @@ const nextNine = () => { const d = new Date(); d.setHours(9, 0, 0, 0); if (d.get
 test('routine add, list, edit, on, off and rm keep a routine in the channel\'s store', (t) => {
   const { ok, run, store } = setup(t);
   ok(['create', 'general']);
-  assert.match(ok(['routine', 'add', 'general', 'Morning-Plan', '--schedule', 'weekdays 9am', 'Ask me for my plan.']), /Added a routine to #general: morning-plan: Weekdays at 09:00, next .*catch-up 60 min/);
+  assert.match(ok(['routine', 'add', 'general', 'Morning-Plan', '--schedule', 'weekdays 9am', 'Ask me for my plan.']), /^Added a routine to #general:\n {2}Routine: {3}morning-plan in #general\n {2}When: {6}Weekdays at 09:00, this Mac's time\n {2}Status: {4}on\n {2}Next runs: (Mon|Tue|Wed|Thu|Fri) \w{3} \d+, 09:00 and (Mon|Tue|Wed|Thu|Fri) .*\n {2}Catch-up: {2}runs up to 1 hour late .*\n {2}Prompt: {4}"Ask me for my plan\."\n {2}To change: .*channels routine edit general morning-plan/);
   assert.match(run(['routine', 'add', 'general', 'morning-plan', '--schedule', 'daily 9:00', 'x']).stderr, /already has a routine/);
   assert.match(run(['routine', 'add', 'general', 'x', '--schedule', 'weekdays 25:00', 'x']).stderr, /isn't a time/);
   assert.match(run(['routine', 'add', 'general', 'x', '--schedule', 'daily 9:00']).stderr, /needs a prompt/);
@@ -397,7 +397,7 @@ test('switching a routine off drops its scheduled runs still waiting for the cha
   await tickAt(nextNine() + 20_000);
   ok(['routine', 'run', 'general', 'morning-plan']);
   assert.deepEqual(store().channels[0].queue.map((e) => e.kind), ['scheduled', 'manual']);
-  assert.match(ok(['routine', 'off', 'general', 'morning-plan']), /off \(Every day at 09:00\).*Dropped 1 run that was waiting for the chat\.$/m);
+  assert.match(ok(['routine', 'off', 'general', 'morning-plan']), /^Switched #general's routine morning-plan off:\n[^]*Status: {4}off: it won't run on its schedule[^]*Dropped: {3}1 run that was waiting for the chat$/m);
   assert.deepEqual(store().channels[0].queue.map((e) => e.kind), ['manual'], 'the run now stays: the user asked for it');
   // Off again with nothing scheduled waiting: nothing dropped, nothing said about it.
   assert.doesNotMatch(ok(['routine', 'off', 'general', 'morning-plan']), /Dropped/);
@@ -459,6 +459,8 @@ test('a cron line reads in words where it has a common shape, else as "Cron <lin
     ['0 9 1 * *', 'The 1st of each month at 09:00'],
     ['0 9 1,15 * *', 'The 1st and 15th of each month at 09:00'],
     ['0 9 * 1 *', null], // a month restricted
+    ['30 14 23 11 *', 'Nov 23 at 14:30, each year'], // one date: how a one-off is written
+    ['30 14 23 11 1', null], // one date or Mondays
     ['0 9 1 * 1', null], // both day fields restricted: either matches
     ['*/15 9-17 * * mon-fri', null], // too many times to list
     ['5,10 * * * *', null],
@@ -483,7 +485,7 @@ test('a manual schedule has no time: nothing comes due, and the tick leaves it a
 
   const { ok, store, tickAt } = setup(t);
   ok(['create', 'general']);
-  assert.match(ok(['routine', 'add', 'general', 'release-notes', '--schedule', 'manual', 'Draft the release notes.']), /release-notes: Only when you run it, catch-up 60 min/);
+  assert.match(ok(['routine', 'add', 'general', 'release-notes', '--schedule', 'manual', 'Draft the release notes.']), /When: {6}Only when you run it \(no schedule\)\n {2}Status: {4}on\n {2}Runs: {6}only when run: Run now in Routines, or channels routine run general release-notes\n {2}Prompt/);
   const listed = JSON.parse(ok(['routine', 'list', 'general', '--json'])).channels[0].routines[0];
   assert.deepEqual([listed.schedule, listed.label, listed.next_at, listed.error], ['manual', 'Only when you run it', null, null]);
   assert.deepEqual((await tickAt(Date.now() + 86_400_000)).runs, [], 'a manual routine never comes due');
@@ -520,4 +522,72 @@ test('preview names the time zone and warns of a time the clocks skip', (t) => {
   assert.deepEqual(JSON.parse(ok(['routine', 'preview', 'daily 02:30', '--json'], undefined, { TZ: 'Asia/Tokyo' })).warnings, [], 'a zone without clock changes');
   assert.deepEqual(JSON.parse(ok(['capabilities', '--json'], undefined, { TZ: 'Europe/Amsterdam' })).clock, { tz: 'Europe/Amsterdam' });
   assert.ok(Array.isArray(scheduleWarnings(parseSchedule('daily 02:30').cron)));
+});
+
+test('--dry-run on add and edit runs every check and prints "Would set up:" without saving', (t) => {
+  const { ok, run, store } = setup(t);
+  ok(['create', 'general']);
+  const out = ok(['routine', 'add', 'general', 'standup', '--schedule', 'weekdays 9:30', '--dry-run', 'Ask me for my plan.']);
+  assert.match(out, /^Would set up:\n {2}Routine: {3}standup in #general\n {2}When: {6}Weekdays at 09:30, this Mac's time\n[^]*\(A dry run: nothing is saved\. Run the same command without --dry-run to set it up\.\)$/m);
+  assert.deepEqual(store().channels[0].routines ?? [], [], 'nothing saved');
+  // The checks still run: a bad schedule, a taken name or a missing routine fails the same way.
+  assert.match(run(['routine', 'add', 'general', 'x', '--schedule', 'weekdays 25:00', '--dry-run', 'x']).stderr, /isn't a time/);
+  ok(['routine', 'add', 'general', 'standup', '--schedule', 'weekdays 9:30', 'Ask me for my plan.']);
+  assert.match(run(['routine', 'add', 'general', 'standup', '--schedule', 'daily 9:00', '--dry-run', 'x']).stderr, /already has a routine/);
+  assert.match(run(['routine', 'edit', 'general', 'nope', '--schedule', 'daily 9:00', '--dry-run']).stderr, /has no routine "nope"/);
+  const before = JSON.stringify(store());
+  const edited = ok(['routine', 'edit', 'general', 'standup', '--schedule', 'weekly fri 16:00', '--dry-run']);
+  assert.match(edited, /^Would set up:\n[^]*When: {6}Fridays at 16:00[^]*Next runs: Fri /m);
+  assert.match(edited, /to make the change\.\)$/m);
+  const json = JSON.parse(ok(['routine', 'edit', 'general', 'standup', '--off', '--dry-run', '--json']));
+  assert.deepEqual([json.enabled, json.dry_run], [false, true]);
+  assert.equal(JSON.stringify(store()), before, 'an edit dry run saves nothing either');
+  assert.match(run(['routine', 'rm', 'general', 'standup', '--dry-run']).stderr, /--dry-run goes with add, edit, on and off/);
+  assert.equal(store().channels[0].routines.length, 1);
+  assert.ok(JSON.parse(ok(['capabilities', '--json'])).features.includes('routine-dry-run'));
+});
+
+test('a one-off reads as its date, and the block shows a prompt\'s first line only', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  const now = at(2026, 11, 22, 12);
+  const r = R.addRoutine(c, { name: 'call-back', prompt: 'Remind me to call the bank.\nThen remove this routine.', spec: 'cron 0 15 24 11 *', catchupMin: 1440, now });
+  const block = R.confirmation({ verb: 'add', channel: 'general', routine: r, now });
+  assert.match(block, /When: {6}Nov 24 at 15:00, each year, this Mac's time/);
+  assert.match(block, /Next runs: Tue Nov 24, 15:00 and Wed Nov 24 2027, 15:00/);
+  assert.match(block, /Catch-up: {2}runs up to 1 day late/);
+  assert.match(block, /Prompt: {4}"Remind me to call the bank\." \(\+1 more line\)/);
+  const words = R.confirmation({ verb: 'on', channel: 'general', routine: r, now, where: 'server', cli: 'hub channels' });
+  assert.match(words, /^Switched #general's routine call-back on:/);
+  assert.match(words, /if server was asleep[^]*\(hub channels routine edit general call-back …\)/);
+});
+
+test('a fired run states the real weekday and time, and asks for the outcome first, quiet runs stopping there', async () => {
+  const R = await import('../bin/routines.mjs');
+  const text = R.routineText({ channel: 'general', routine: { name: 'x', prompt: 'P', schedule: 'weekdays 09:00' }, slot: at(2026, 11, 23, 9), now: at(2026, 11, 23, 9, 0) + 20_000 });
+  assert.match(text, /\(Weekdays at 09:00\)/, 'the schedule in words');
+  assert.match(text, /^For you \(it is Monday, Nov 23, 09:00 on this Mac's clock\):$/m);
+  assert.match(text, /Open your reply with one plain line that says the outcome\. When there is nothing that needs the user, that line is the whole reply\./);
+  assert.match(text, /limits when it applies[^]*check that against the day and time above/);
+  assert.match(text, /Don't ask the user anything unless you can't go on without an answer/);
+  assert.doesNotMatch(text, /If you need the user, ask/);
+  const manual = R.routineText({ channel: 'general', routine: { name: 'x', prompt: 'P', schedule: 'manual' }, now: at(2026, 11, 28, 18, 5), manual: true, where: 'server' });
+  assert.match(manual, /For you \(it is Saturday, Nov 28, 18:05 on server's clock\)/);
+});
+
+test('the chat prompt teaches rounding, one-offs, --dry-run, passing the block on, and reading why a run didn\'t happen', async () => {
+  const R = await import('../bin/routines.mjs');
+  const p = R.promptText({ name: 'general', who: 'Sam', where: 'server', cli: 'hub channels' });
+  for (const s of [
+    'pick the nearest schedule that does, and say what you chose',
+    'a day matching either one runs',
+    'Then remove this routine: hub channels routine rm general <name>',
+    '--catchup 1d',
+    'headed "Would set up:"',
+    'Pass it on to Sam as it is',
+    'hub channels routine list general --json',
+    'queued (', 'delivered (', 'missed (', 'dropped (', 'skipped (', 'enabled (false: switched off',
+    'one plain line with the outcome first',
+  ]) assert.ok(p.includes(s), s);
+  assert.doesNotMatch(p, /this Mac|the user/);
 });

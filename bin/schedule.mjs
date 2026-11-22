@@ -110,9 +110,14 @@ function stepOf(set, f) {
 export function describeCron(cron) {
   if (!cron) return null;
   const [fm, fh, , fmon] = FIELDS;
-  if (!whole(cron.month, fmon)) return null;
   const mins = ascending(cron.minute);
   const hours = ascending(cron.hour);
+  // One date a year at one time, the way a one-off routine is written: "Nov 23 at 14:30, each year".
+  if (cron.month.size === 1 && cron.day.size === 1 && cron.anyWeekday && mins.length === 1 && hours.length === 1) {
+    const mo = MONTHS[[...cron.month][0] - 1];
+    return `${mo[0].toUpperCase()}${mo.slice(1)} ${[...cron.day][0]} at ${hhmm(hours[0], mins[0])}, each year`;
+  }
+  if (!whole(cron.month, fmon)) return null;
   const anyTime = cron.anyDay && cron.anyWeekday;
   if (whole(cron.hour, fh)) {
     if (!anyTime) return null;
