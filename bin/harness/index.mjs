@@ -6,8 +6,9 @@
 // A task records its harness (`harness` in the store); a task without one is Claude Code's, as every task was before
 // there were harnesses.
 import claude from './claude.mjs';
+import codex from './codex.mjs';
 
-export const HARNESSES = { claude };
+export const HARNESSES = { claude, codex };
 export const DEFAULT_HARNESS = 'claude';
 
 export const harnessId = (t) => t?.harness || DEFAULT_HARNESS;

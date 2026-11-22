@@ -130,7 +130,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
+  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'harnesses'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, harnesses: [{ id: 'claude', label: 'Claude Code', on: true, installed: true, version: '2.1.329', caps: { rename: true, remoteControl: true, cloud: true, approvals: false, open: true, sendWhileWorking: 'refuse', question: 'job', copies: true } }, { id: 'codex', label: 'Codex', on: false, installed: false, version: null, caps: { rename: true, remoteControl: false, cloud: false, approvals: true, open: true, sendWhileWorking: 'queue', question: 'heuristic', copies: false } }], channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', harnesses: { claude: '2.1.329' }, asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
   assert.match(ok([]), /No channels yet/);
 });
 
@@ -139,7 +139,7 @@ test('create makes a channel and its description file; describe shows and sets i
   assert.match(ok(['create', '#Design', '--icon', '🎨']), /Created #design/);
   const [c] = list().channels;
   assert.match(c.id, /^ch_[0-9a-f]{12}$/);
-  assert.deepEqual({ ...c, id: 'x', created_at: typeof c.created_at }, { id: 'x', name: 'design', position: 1, icon: '🎨', created_at: 'string', archived_at: null, description_path: join(dir, 'design.md'), chat: null, chat_terminal: null, routines: [], queued: 0, tasks: [] });
+  assert.deepEqual({ ...c, id: 'x', created_at: typeof c.created_at }, { id: 'x', name: 'design', position: 1, icon: '🎨', created_at: 'string', archived_at: null, description_path: join(dir, 'design.md'), chat: null, chat_terminal: null, routines: [], queued: 0, harness: { tasks: 'claude', chat: 'claude' }, tasks: [] });
   assert.equal(readFileSync(join(dir, 'design.md'), 'utf8'), '');
   ok(['describe', 'design', '--set', '# design\nThe look.']);
   assert.equal(ok(['describe', 'design']), '# design\nThe look.\n');
