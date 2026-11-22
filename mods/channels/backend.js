@@ -77,7 +77,10 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - routine-manual: `routine add|edit … --schedule manual`, a routine with no time that runs only when run
 // - routine-dry-run: `routine add|edit … --dry-run` prints what it would set up without saving (for the chat; the
 //   mod doesn't use it)
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run"];
+// - routine-status: `status` ({ state, words, at }) and `paused` on each routine, `last.waiting` as { why, since },
+//   and `timer` ({ last_tick_at, stale, hint }) in the list
+// - routine-by: `routine run|on|off|edit … --by <who>`, so the store says who asked
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
@@ -152,6 +155,35 @@ export function catchupRule(on, at, until) {
   if (!at) return "";
   if (on) return until ? `If ${on} is off at ${at}, it runs when ${on} is back until ${until}, else it's skipped.` : `If ${on} is off at ${at}, that run is skipped.`;
   return until ? `If the Mac sleeps through ${at}, it runs on wake until ${until}, else it's skipped.` : `If the Mac sleeps through ${at}, that run is skipped.`;
+}
+
+// A routine's status (the store's `status`: { state, words, at }, routine-status) as a colour: "blocked" when it needs a
+// look (missed, broken), "working" for a run that has waited a while or says why it waits, else null.
+export function statusTint(r, now = Date.now()) {
+  const st = r?.status;
+  if (!st || !r.enabled) return null;
+  if (st.state === "missed" || st.state === "broken") return "blocked";
+  if (st.state === "waiting" && (r.last?.waiting || (st.at && now - Date.parse(st.at) > 10 * 60000))) return "working";
+  return null;
+}
+
+// The sidebar clock's tint for a channel: the most urgent of its routines' (statusTint), and the routine that gives it.
+export function routineTint(routines = [], now = Date.now()) {
+  let out = null;
+  for (const r of routines) {
+    const tint = statusTint(r, now);
+    if (tint === "blocked") return { tint, routine: r };
+    if (tint && !out) out = { tint, routine: r };
+  }
+  return out;
+}
+
+// The routines timer, when its last tick (`timer` in the list, routine-status) is older than about 5 minutes: the
+// dialog's line and the command that starts it again. null while it ticks, or when the backend doesn't say.
+export function staleTimer(timer, now = Date.now(), hm = (iso) => iso) {
+  const at = timer?.last_tick_at ? Date.parse(timer.last_tick_at) : NaN;
+  if (!Number.isFinite(at) || now - at <= 5 * 60000) return null;
+  return { text: `The routines timer hasn't run since ${hm(timer.last_tick_at)}, so routines won't come due.`, hint: timer.hint ?? null };
 }
 
 // How the sidebar's footer names the store's machine and its link: Herdr's machines() entry for it.

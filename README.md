@@ -594,7 +594,12 @@ weekly review, an end-of-day check) that open the editor filled in. You can add,
 and **Run now** queues its prompt for the chat at once without changing the schedule (on a routine
 that is off, the button says **Run once**). Its row says **Queued for the chat…** until the chat has
 it, then **Delivered** with the time. Switching a routine off drops a scheduled run of it that was
-still waiting for the chat; a run you asked for with Run now stays. You can also ask the chat
+still waiting for the chat; a run you asked for with Run now stays. Each row says where the routine
+stands, in the same words as `channels routine list`: **Waiting 14 min: the chat's terminal didn't
+take it** when a run can't reach the chat yet, **Skipped 09:00: this Mac was asleep until 11:40
+(catch-up 1 hour)** for a run that came too late, **Off since Mon · switched off by you**. The
+small clock in the sidebar turns red while a routine's last run was missed (or its schedule doesn't
+read) and amber while a run is stuck waiting; hovering it says which. You can also ask the chat
 ("every weekday at 9, ask me for my plan"): it sets the routine up with `channels routine add`.
 A request no schedule fits ("every 90 minutes") gets the nearest one that does, and the chat says
 what it chose. Something once ("remind me at 3 tomorrow") becomes a routine on that date that
@@ -645,9 +650,12 @@ clocks go forward (02:30 in most of the US and Europe), the editor warns that th
 
 **When a routine fires**, its prompt is typed into the channel's chat by the chat's listener, the
 way a task report the chat registered for is (`hc send`, which waits while you are typing), as a
-message that starts with `[routine <name>, scheduled 09:00]`. It wakes the chat: it doesn't wait for
-your next message. The message ends with what the chat's reply should be: one plain line with the
-outcome first (when there is nothing for you, that line is the whole reply), any limits the prompt
+message that starts with `[routine <name> · scheduled 09:00 · run <id>]`. The run id is the routine
+and the time it was due for (`rt_…@2026-11-23T08:00:00.000Z`, or `@manual-<time>` for Run now), so a
+run is queued once however often its time is looked at. The message is made when it is typed in, so
+it says how late it really is, and whether this is the routine's first run or its last one was
+missed. It wakes the chat: it doesn't wait for your next message. The message ends with what the
+chat's reply should be: one plain line with the outcome first (when there is nothing for you, that line is the whole reply), any limits the prompt
 sets on days or times checked against the actual weekday and time, which the message states, and a
 question only when the chat can't go on without one.
 
@@ -661,7 +669,7 @@ terminal while the chat runs attaches to it.
 wakes, as long as it is still within the routine's catch-up window (`0`, **Skip it** in the
 dialog, means never run late). Without one, a new routine gets a window that suits its schedule:
 15 minutes when it runs several times a day, so a late run can't land almost on the next one; an
-hour for a daily one; 4 hours for one a week or rarer. Its message then says so: `[routine <name>, scheduled 09:00, running 10:40]`.
+hour for a daily one; 4 hours for one a week or rarer. Its message then says so: `[routine <name> · scheduled 09:00, running 10:40 · run <id>]`.
 Missed runs never stack: after a long sleep only the latest missed time counts. A run outside the
 window is skipped and recorded as missed. Nor do runs pile up behind a busy chat: when a routine's
 time comes while its last run still waits for the chat, that time is skipped and recorded as
@@ -671,14 +679,19 @@ skipped (`routine list` and the dialog show it).
 and once when the Mac wakes. Each tick records every run that is due in the store before anything is
 sent, under the store's lock, so two ticks at once can never fire a routine twice. It then queues the
 prompt for the chat, and the chat's listener types it in. What the tick does is logged in `tick.log`
-in the store. Check that the timer is loaded with
+in the store, and each tick leaves its heartbeat in `tick.json` (when, on what version, what it did).
+When that is more than 5 minutes old, the Routines dialog says the timer hasn't run since then, with
+the command that starts it again. Check that the timer is loaded with
 `launchctl print gui/$(id -u)/dev.herdr-channels.tick`.
+
+`--by` on `routine run`, `on` and `off` records who asked (`dialog`, `chat`, `cli`, or `you`): a
+run's message says who asked for it, and a routine that is off says who switched it off.
 
 ```sh
 channels routine add general morning-plan --schedule "weekdays 09:00" "Ask me for my plan for today."
 channels routine add general standup --schedule "weekdays 09:30" --dry-run "Ask me for my plan."
 channels routine list
-channels routine run general morning-plan
+channels routine run general morning-plan --by cli
 ```
 
 ## Command reference
@@ -711,7 +724,8 @@ channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]
 channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] [--dry-run] <prompt | ->
 channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--dry-run]
-channels routine rm|run|on|off <channel> <name>
+channels routine rm <channel> <name>
+channels routine run|on|off <channel> <name> [--by <who>]
 channels routine preview <schedule> [--json]
 channels refresh [--auto] [--json]
 channels update [--check] [--bg] [--json]

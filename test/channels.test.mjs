@@ -130,7 +130,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
+  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', asked: null, behind: { channels: 0, claude: 0 }, chats: [] } });
   assert.match(ok([]), /No channels yet/);
 });
 

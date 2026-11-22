@@ -55,7 +55,7 @@ test('a task opens on the machine it runs on, or nowhere when Herdr can\'t reach
 test('features: what list --json says, else this repo\'s older command had them all, else none', () => {
   assert.deepEqual(FEATURES, B.ALL_FEATURES, 'the command and the mod agree');
   assert.deepEqual(B.featuresOf({ machine: 'x', features: ['seen', 7] }), ['seen']);
-  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => f !== 'update' && f !== 'routine-edit-on' && f !== 'routine-manual' && f !== 'routine-dry-run'), 'a command from before the list: everything but update, routine-edit-on, routine-manual and routine-dry-run');
+  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => !['update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by'].includes(f)), 'a command from before the list: only what it had then');
   assert.deepEqual(B.featuresOf({ machine: 'server', channels: [] }), [], 'a hub that lists none');
   assert.deepEqual(B.featuresOf(null), []);
 });
@@ -128,4 +128,24 @@ test('the Routines dialog names the zone and says the catch-up window as an outc
   assert.equal(B.catchupRule(null, '09:00', null), 'If the Mac sleeps through 09:00, that run is skipped.');
   assert.equal(B.catchupRule('server', '09:00', '13:00'), "If server is off at 09:00, it runs when server is back until 13:00, else it's skipped.");
   assert.equal(B.catchupRule(null, null, '10:00'), '');
+});
+
+test('the sidebar clock is tinted by the routines\' status: missed or broken first, then a run stuck waiting', () => {
+  const now = Date.parse('2026-11-23T10:00:00Z');
+  const r = (name, state, extra = {}) => ({ name, enabled: true, status: { state, words: `${name} ${state}`, at: '2026-11-23T09:55:00Z' }, ...extra });
+  assert.equal(B.routineTint([r('a', 'ok'), r('b', 'never')], now), null);
+  assert.equal(B.routineTint([r('a', 'waiting')], now), null, 'a run queued minutes ago is not stuck');
+  assert.equal(B.routineTint([r('a', 'waiting', { last: { waiting: { why: 'x' } } })], now).tint, 'working', 'it says why it waits');
+  assert.equal(B.routineTint([r('a', 'waiting', { status: { state: 'waiting', words: 'w', at: '2026-11-23T09:40:00Z' } })], now).tint, 'working', 'over 10 minutes');
+  assert.deepEqual(B.routineTint([r('a', 'waiting', { last: { waiting: { why: 'x' } } }), r('b', 'missed')], now).routine.name, 'b');
+  assert.equal(B.routineTint([r('a', 'missed', { enabled: false })], now), null, 'an off routine needs no look');
+  assert.equal(B.routineTint([{ name: 'old', enabled: true, last: { status: 'missed' } }], now), null, 'an older backend gives no status');
+});
+
+test('the Routines dialog says when the timer stopped, with the backend\'s command to start it again', () => {
+  const now = Date.parse('2026-11-23T10:46:00Z');
+  assert.equal(B.staleTimer({ last_tick_at: '2026-11-23T10:43:00Z' }, now), null);
+  assert.equal(B.staleTimer({ last_tick_at: null }, now), null, 'never ticked: nothing to compare');
+  assert.equal(B.staleTimer(null, now), null, 'an older backend says nothing');
+  assert.deepEqual(B.staleTimer({ last_tick_at: '2026-11-23T10:40:00Z', hint: 'start it' }, now, () => '10:40'), { text: "The routines timer hasn't run since 10:40, so routines won't come due.", hint: 'start it' });
 });
