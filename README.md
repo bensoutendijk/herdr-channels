@@ -805,6 +805,30 @@ run `claude` there once. When you are done, run `node install.mjs --uninstall --
 with the same environment to unload the agent and remove its plist. Then quit the sandbox window,
 run `hc server stop` and delete the folder.
 
+`dev/sandbox` does all of that in one command, and adds Codex for harness work (see
+[docs/harnesses.md](docs/harnesses.md)). It needs nothing beyond Node, Herdr, and `claude` and `codex` when
+you use them:
+
+```sh
+dev/sandbox up --app --codex real     # or --codex mock (a scripted stand-in, no account), or none
+dev/sandbox run channels create demo  # any command, in the sandbox's environment
+dev/sandbox repo demo --agents "…"    # a throwaway git repo in the sandbox's projects folder
+T=$(dev/sandbox task demo "Fix the bug in util.js" --name fix)   # a Codex task on the sandbox's daemon
+dev/sandbox follow $T                 # its state, commands and messages until it's idle (--approve accept|decline)
+dev/sandbox send $T "Also add a test" # a turn when idle, queued when it's working
+dev/sandbox chat web --hook …         # a Codex chat: its own app-server and a TUI on it
+dev/sandbox shot docs/x.png           # the sandbox window
+dev/sandbox down                      # stop everything, delete the folder and any credential copy
+```
+
+The sandbox lives in `/private/tmp/hcdev` (set `HC_SANDBOX` to run another beside it), with its own
+`HOME`, herdr app home, launchd label and `CODEX_HOME`. Your own Herdr, Claude Code and Codex are
+never touched. `--codex real` copies `~/.codex/auth.json` into the sandbox, and `down` deletes the copy.
+`--codex mock` runs `dev/codex-mock.mjs`, which plays scripted turns (`SLEEP 3`, `ASK`, `TOUCH f`).
+`dev/codex-rpc.mjs` is a dependency-free client for Codex's app-server. `dev/sandbox click` and `type`
+refuse to send input unless the sandbox's Herdr window is frontmost (`dev/sandbox front`). Run
+`dev/sandbox` with no arguments for every command.
+
 ## Uninstalling
 
 ```sh
