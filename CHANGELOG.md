@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.4.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.3.0...v1.4.0) (2026-11-22)
+
+### Features
+
+* Routines that teach by example, read in plain words, and can run only by hand ([#36](https://github.com/bensoutendijk/herdr-channels/issues/36)) ([2e24227](https://github.com/bensoutendijk/herdr-channels/commit/2e242271959e2b5bba0615b2aa136a25291288cd))
+
 ## [1.3.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.2.0...v1.3.0) (2026-11-22)
 
 ### Features
