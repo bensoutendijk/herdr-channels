@@ -262,7 +262,8 @@ newest Claude Code from its next message on.
 - **Channels.** Create a channel with **New channel** at the bottom of the sidebar. Use a channel's
   `···` menu to rename it, edit its instructions (the description its chat reads at startup), set
   up its routines, change its icon or archive it. Drag channels to reorder them. A small clock next
-  to a channel's name means it has a routine switched on.
+  to a channel's name means it has a routine switched on: hover it for the next run, click it to
+  open the channel's Routines.
 
   <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Routines, Change icon and Archive">
 
@@ -567,15 +568,26 @@ A routine is a prompt that a channel's chat receives on its own, on a schedule: 
 ask me for my plan". It belongs to one channel and has a name, a prompt, a schedule, a catch-up
 window and an on/off switch. The store keeps each routine with a record of its last run.
 
-**Setting one up.** Open **Routines** from the channel's `···` menu. The dialog lists the channel's
-routines with their next and last runs. You can add, edit or delete a routine, switch it on or off,
+**Setting one up.** Open **Routines** from the channel's `···` menu, or click the small clock next
+to a channel's name (hovering it shows the channel's next run). The dialog lists the channel's
+routines with their next and last runs. With none yet, it offers three starters (a morning plan, a
+weekly review, an end-of-day check) that open the editor filled in. You can add, edit or delete a routine, switch it on or off,
 and **Run now** queues its prompt for the chat at once without changing the schedule (on a routine
 that is off, the button says **Run once**). Its row says **Queued for the chat…** until the chat has
 it, then **Delivered** with the time. Switching a routine off drops a scheduled run of it that was
 still waiting for the chat; a run you asked for with Run now stays. You can also ask the chat
 ("every weekday at 9, ask me for my plan"): it sets the routine up with `channels routine add`.
 
-<img src="docs/routines.png" width="480" alt="The Routines dialog for the #website channel, listing one routine, morning-check, that runs on weekdays at 09:00, with its prompt, its next run and an on/off switch">
+In the editor, the name fills itself from the prompt's first words until you type one. A problem
+shows under the field it is about, and Create stays dimmed with the reason (Needs a name, Needs a
+prompt, Fix the schedule) until the form is good. The line at the bottom says the schedule in words,
+its next runs, what the catch-up window means for the next one ("If the Mac sleeps through 09:00, it
+runs on wake until 10:00, else it's skipped") and the time zone.
+
+<img src="docs/routines-editor.png" width="480" alt="Editing the nightly-digest routine: Cron is picked with the line 30 2 * * 0,3,5, the catch-up window is 1 hour, and the lines at the bottom say Wed, Fri, Sun at 02:30. Next Wed 02:30, then Fri 02:30; If the Mac sleeps through 02:30, it runs on wake until 03:30, else it's skipped. Times are this Mac's (Europe/Amsterdam); and a warning that 02:30 doesn't happen on Mar 28, 2027 (the clocks go forward), so that run is skipped">
+
+<img src="docs/routines.png" width="420" alt="The Routines dialog for the #website channel with four routines: morning-plan, Weekdays at 09:00; nightly-digest, Wed, Fri, Sun at 02:30, hovered so its Run now, edit and delete buttons show; release-notes, Only when you run it, with no next run; and inbox-sweep, Every hour at :15, switched off. The footer says times are this Mac's local time (Europe/Amsterdam)">
+<img src="docs/routines-empty.png" width="420" alt="The Routines dialog for #general with no routines yet: a line on what a routine does and whose clock it keeps, three starters to click (morning-plan, Weekdays at 09:00; weekly-review, Fridays at 16:00; end-of-day, Weekdays at 17:30), each with its prompt, and below them: or ask the chat, every weekday at 9, ask me for my plan">
 
 **Schedules** use the Mac's local time:
 
@@ -586,8 +598,12 @@ still waiting for the chat; a run you asked for with Run now stays. You can also
 | `hourly :15` | Every hour at a quarter past |
 | `weekly fri 16:00` | Fridays at 16:00 |
 | `cron 0 9 * * 1-5` | A standard 5-field cron line (minute, hour, day, month, weekday) |
+| `manual` | Never on its own: only when you press Run now (or run `channels routine run`) |
 
-Times may also be written `9`, `9:30` or `9am`.
+Times may also be written `9`, `9:30` or `9am`. A cron line reads in words where it has a common
+shape (`Mon, Wed, Fri at 09:00`, `Every 30 minutes`, `The 1st of each month at 09:00`), and as
+`Cron 0 9 * 1 *` where it doesn't. When a schedule uses a time that doesn't exist on the night the
+clocks go forward (02:30 in most of the US and Europe), the editor warns that that run is skipped.
 
 **When a routine fires**, its prompt is typed into the channel's chat by the chat's listener, the
 way a task report the chat registered for is (`hc send`, which waits while you are typing), as a
@@ -601,8 +617,10 @@ this way, through `channels chat <channel> --bg`. Running `channels chat <channe
 terminal while the chat runs attaches to it.
 
 **Missed runs.** If the Mac was asleep or off at a routine's time, the run fires once when the Mac
-wakes, as long as it is still within the routine's catch-up window (default 60 minutes; `0` means
-never run late). Its message then says so: `[routine <name>, scheduled 09:00, running 10:40]`.
+wakes, as long as it is still within the routine's catch-up window (`0`, **Skip it** in the
+dialog, means never run late). Without one, a new routine gets a window that suits its schedule:
+15 minutes when it runs several times a day, so a late run can't land almost on the next one; an
+hour for a daily one; 4 hours for one a week or rarer. Its message then says so: `[routine <name>, scheduled 09:00, running 10:40]`.
 Missed runs never stack: after a long sleep only the latest missed time counts. A run outside the
 window is skipped and recorded as missed. Nor do runs pile up behind a busy chat: when a routine's
 time comes while its last run still waits for the chat, that time is skipped and recorded as
