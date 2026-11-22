@@ -115,6 +115,22 @@ export function agentOf(task, indexes, fallback = null) {
   return by ? by.get(task.session_id) ?? by.get(task.job) ?? null : null;
 }
 
+// A task's standing: needs, working or ready. Claude Code's own list on the task's machine, when the mod read it
+// (`fromAgent`), says it; otherwise the store's own `standing`, which a hub gives for every machine it reaches
+// (the mod reads `claude agents` only on the store's machine and this one); otherwise ready.
+export const STANDINGS = ["needs", "working", "ready"];
+export function standingOf(fromAgent, fromStore) {
+  return fromAgent ?? (STANDINGS.includes(fromStore) ? fromStore : "ready");
+}
+
+// Whose clock a routine keeps, in the Routines dialog's words: this computer's, or the store machine's (`on`), where
+// the timer runs, and so what a missed run waited on.
+export function routineClock(on) {
+  return on
+    ? { times: `Times are ${on}'s local time.`, short: `Times are ${on}'s.`, missed: `If ${on} was off, still run it within` }
+    : { times: "Times are this Mac's local time.", short: "Times are this Mac's.", missed: "If the Mac was asleep, still run it within" };
+}
+
 // How the sidebar's footer names the store's machine and its link: Herdr's machines() entry for it.
 export function linkState(backend, machineList = [], error = null) {
   if (error) return "unreadable";

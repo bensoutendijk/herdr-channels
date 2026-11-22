@@ -105,3 +105,15 @@ test("a store on another machine's terminal addresses are named by that machine 
   assert.equal(B.remoteAddress('t2k', null), 't2k', 'a store on this computer: as it is');
   assert.equal(B.remoteAddress(null, 'server'), null);
 });
+
+test('a task\'s standing: Claude Code\'s list on its machine first, then the store\'s own (a hub reads every machine), then ready', () => {
+  assert.equal(B.standingOf('working', 'needs'), 'working');
+  assert.equal(B.standingOf(null, 'needs'), 'needs', 'a task on a third machine: the store says');
+  assert.equal(B.standingOf(null, undefined), 'ready', "this repo's store gives none");
+  assert.equal(B.standingOf(null, 'done'), 'ready', 'only the three standings are taken');
+});
+
+test('the Routines dialog names whose clock a routine keeps: this Mac\'s, or the store machine\'s', () => {
+  assert.deepEqual(B.routineClock(null), { times: "Times are this Mac's local time.", short: "Times are this Mac's.", missed: 'If the Mac was asleep, still run it within' });
+  assert.deepEqual(B.routineClock('server'), { times: "Times are server's local time.", short: "Times are server's.", missed: 'If server was off, still run it within' });
+});
