@@ -338,13 +338,32 @@ listener answers it. The listener then checks the chat's transcript for each not
 that hasn't arrived a minute later, once the chat is idle (an older Claude Code, or an account where
 an administrator keeps channels off), is typed into the chat as a `[task notice]` line instead.
 
-**A task that asks something**, or shows a permission prompt, is delivered at one of three levels:
+**A task that ended its turn asking for something** (a question, or a hand-off such as "Task A is
+done. Please start B and C") reaches the chat as a one-line notice too, through the same channel, once
+per blocked turn:
+
+```
+← tasks: Task "Draft the launch notes" (studio/f131909d-…) needs you: Should the notes go in NOTES.md or the README?
+```
+
+What it asks is the task's question, or, when Claude Code recorded none, the end of its last message,
+cut to the notice's length. The chat acts on the request only when it is what you already set up for
+the channel (say, "when A is done, start B and C"); otherwise it puts it to you in a line or two. The
+task also gets its dot in the panel and its [card](#task-cards) above the chat's prompt, where you can
+answer it, and the question doesn't ride along with your next message too: the notice already told the
+chat.
+
+**A task that waits on a permission prompt** (or another dialog in its own session) is no notice: its
+card answers it. It is delivered at one of three levels:
 
 | Level | When | What happens |
 |---|---|---|
-| **panel** | Every question | The task gets a dot in the tasks panel until you open it there. |
-| **ride-along** | The default | The chat takes no turn. The question shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
-| **wake** | Only when a registration exists for that task | The listener pastes a `[task question]` into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. |
+| **panel** | Every prompt and question | The task gets a dot in the tasks panel until you open it there. |
+| **ride-along** | The default for a prompt | The chat takes no turn. The prompt shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
+| **wake** | Only when a registration exists for that task | The listener pastes a `[task question]`, with the task's whole last message, into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. It takes the place of a question's notice. |
+
+A cloud task can't be told apart this way: claude.ai's list says only that it waits on you
+(`requires_action`), for a question or a permission prompt alike, so both are a notice beside the card.
 
 Ride-along uses a Claude Code `UserPromptSubmit` hook. `channels chat` passes it to the chat with
 `--settings`, so it applies to that session only and your own settings files are not touched. The
@@ -383,7 +402,7 @@ it, and `channels seen <session>` clears a task's dot.
 
 ### Task cards
 
-Every question that rides along also shows as a card in the chat, in the band directly above its
+Every question and permission prompt also shows as a card in the chat, in the band directly above its
 prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
 the chat:
 
@@ -402,8 +421,8 @@ pick for **Send**:
 <img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…">
 
 Acting on a card marks its event handled in the store: it leaves the chat's inbox and the task's dot
-in the panel clears, so it doesn't also ride along with your next message. A card you don't act on
-still rides along; nothing is delivered twice. A question you answer in the task's own view goes
+in the panel clears, so it doesn't also ride along with your next message. A prompt's card you don't
+act on still rides along; a question's was told as a notice already; nothing is delivered twice. A question you answer in the task's own view goes
 away by itself once the task works again. More than four cards are counted on one line, and the rest
 ride along as usual. A registered wake (`--wake-on`, `channels watch`) still wakes the chat with a
 turn and shows no card, since the chat is waiting on that answer.
@@ -543,8 +562,8 @@ claude.ai, another Mac).
 20 seconds: one call covers every session and every channel, and uses no model. A session that is running shows
 as Working, one waiting on you (`requires_action`) as Needs input, one whose turn ended as Ready for review. The
 row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a finish is a
-one-line notice in the chat; a question is a dot in the panel, a card above the chat's prompt, ride-along with your
-next message, or a wake when the chat registered for it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
+one-line notice in the chat; so is a question (`Cloud task "…" needs you: …`), with a dot in the panel and a card
+above the chat's prompt, or a wake when the chat registered for it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
 (Claude Code hasn't refreshed the login yet) it waits a minute; any other failure shows state unknown until a
 call works again.
 

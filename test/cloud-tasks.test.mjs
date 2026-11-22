@@ -121,7 +121,7 @@ test('start --cloud refuses: off, no --repo, a folder that isn\'t a repo, a dirt
   assert.match(await err(['start', 'design', '--cloud', '--repo', 'site', 'x']), /Cloud tasks are off on this Mac\. Turn them on with `node install\.mjs --cloud`/);
 });
 
-test('the listener: working → asks you → done, each once: a question as a panel dot, a card and ride-along, gone once answered; a finish as a notice', async (t) => {
+test('the listener: working → asks you → done, each once: a question as a notice, a panel dot and a card (no ride-along), gone once answered; a finish as a notice', async (t) => {
   const { ok, fake, store, session, tick } = setup(t);
   await ok(['create', 'design']);
   await ok(['start', 'design', '--cloud', '--repo', 'site', '--name', 'Fix the footer', 'Fix the footer links']);
@@ -133,9 +133,13 @@ test('the listener: working → asks you → done, each once: a question as a pa
   assert.deepEqual(await tick(), []);
   fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2026-11-19T20:01:00Z', needs: 'Should the /press link go, or point to the media kit?', cost_usd: 0.2 })];
   let did = await tick();
-  assert.deepEqual(did.map((e) => [e.level, e.task]), [['ride-along', ref]]);
-  assert.match(did[0].text, /cloud task "Fix the footer" \(cloud\/session_\S+\) is waiting on the user .* the user answers it on claude\.ai/);
+  // requires_action doesn't say a question from a permission prompt, so both are told as a notice, beside the card.
+  assert.deepEqual(did.map((e) => [e.level, e.task]), [['asks', ref]]);
+  assert.equal(did[0].text, `Cloud task "Fix the footer" (${ref}) needs you: Should the /press link go, or point to the media kit?`);
   let c = store().channels[0];
+  assert.deepEqual(c.notices.map((n) => n.text), [did[0].text], 'queued for the notices server');
+  assert.ok(c.inbox[0].delivered_at, 'a card, not riding along too');
+  assert.match(c.inbox[0].text, /cloud task "Fix the footer" \(cloud\/session_\S+\) is waiting on the user .* the user answers it on claude\.ai/);
   assert.deepEqual(c.tasks[0].unread.kind, 'needs');
   assert.deepEqual(c.inbox[0].card, { state: 'question', waiting: 'Should the /press link go, or point to the media kit?', message: 'Should the /press link go, or point to the media kit?', options: [] });
   assert.equal(c.inbox[0].cloud, true);
