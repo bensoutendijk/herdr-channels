@@ -18,7 +18,8 @@ hooks, Herdr's view of the terminal. The second round re-ran it with a real mode
 Development section), across 35 real sessions. [What a real model changed](#10-what-a-real-model-changed) has
 the evidence. Each recommendation below says whether the real run **confirmed** or **changed** it.
 
-**Short answer: go, with four changes from the real run.**
+**Short answer: go, with four changes from the real run.** The owner's decisions on them are in
+[Decided](#decided).
 - Codex tasks fit the task model well: Codex 0.171 keeps sessions in a local daemon of its own, much as
   `claude --bg` does. Its protocol starts a task with no terminal, reports each task's state (including "waiting
   on an approval"), sends it messages (queued while it works), renames it, and lets a terminal open it live
@@ -33,8 +34,9 @@ the evidence. Each recommendation below says whether the real run **confirmed** 
   2. **Approvals answered from a card** move from phase 5 into phase 2. A pending approval is replayed to any
      client that connects later, and answering it over the protocol worked end to end, with the task's open
      terminal following along (§3).
-  3. **No hook for a Codex chat.** `thread/inject_items` carries ride-along news to a real model with no hook,
-     so there is no hook-trust prompt to answer at all (§4).
+  3. **The chat's hook-trust prompt** comes once per machine and Herdr shows it as no status. The real run
+     suggested dropping the hook for `thread/inject_items`, but **the owner decided to keep the hook**: the listener
+     answers "Trust all" once, and the README says so (§4).
   4. **The folder-trust dialog** never shows for a task. It shows only for a fresh Codex terminal in an
      untrusted folder, and channels doesn't answer it.
 - Recommended order, unchanged: the harness seam first, with Claude Code only and no change in behaviour. Then
@@ -295,6 +297,7 @@ herdr-core terminal chat-<channel id>
 └─ /bin/sh restart loop → channels chat <name>
    ├─ codex app-server --listen unix://<store>/codex-<channel id>.sock     the chat's own server, with its settings
    │    -c developer_instructions="<chat prompt>"                           (never the user's config files)
+   │    -c hooks.UserPromptSubmit=[{… "channels pending --hook" …}]
    ├─ codex --remote unix://<that socket> resume <thread id>                the TUI the user types into
    └─ the listener, a client of that socket                                 notices, routines, idle checks
 ```
@@ -309,7 +312,7 @@ doesn't use the shared daemon but runs a server of its own, so the chat's server
 | What | Claude Code chat today | Codex chat |
 | --- | --- | --- |
 | A task finished (notice) | Pushed through the notices channel: one faded `← tasks: …` line, then a short turn once idle | `turn/start` with a one-line `[task notice] …` when the chat is idle; `thread/queue/add` while a turn runs, which runs after it. The RPC's answer confirms delivery, so there is no transcript matching and no typed fallback |
-| Ride-along news | The `UserPromptSubmit` hook (`pending --hook`) | `thread/inject_items`: a developer message added as each event arrives, which starts no turn and which the next turn sees. No hook |
+| Ride-along news | The `UserPromptSubmit` hook (`pending --hook`) | The same hook and command, in Codex's hook format (its output is the same JSON shape), trusted once (below). Fallback until it's trusted: `thread/inject_items` as each event arrives |
 | A wake (a registered question) | Typed into the terminal with `hc send` | `turn/start` or `thread/queue/add`, as a notice |
 | A routine | Typed in with `hc send` | `thread/queue/add`: it waits for any turn in progress and never lands in a half-typed draft |
 | Idle? (refresh, notices) | `~/.claude/sessions` status and the terminal's status | The thread's status from the chat's server, and the terminal's status |
@@ -317,16 +320,19 @@ doesn't use the shared daemon but runs a server of its own, so the chat's server
 | Restart on a new build | SIGTERM to `claude`, the loop runs it again | Stop the TUI and the chat's server, and the loop runs both again on the same thread |
 | The chat's prompt | `--append-system-prompt` | `developer_instructions`. The words change from "one long-lived Claude Code session" to the harness's name; the rest is the same |
 
-A hook would work too, but it costs a consent prompt, so the chat doesn't use one. Codex asks the user to trust
-a hook before it runs it ("Hooks need review", then "Trust all and continue"), and records the trust by the
-hook's key and hash in the user's `config.toml`. In the real run, that prompt came once per machine while the
-hook's command stayed the same: a second chat and a restarted chat didn't ask again, but a changed command did.
-Herdr shows the prompt as no status (`status: null`), so nothing in the panel would say the chat is stuck. The
-listener could answer it with keys, but "Trust all" also trusts any *other* new hook the user has, so answering
-it safely would mean first checking `hooks/list` (which gives each hook's `trustStatus`) for hooks that aren't
-channels'. `thread/inject_items` needs none of that, and a real model used what it carried (§10). *Changed:*
-the recommendation was for the listener to answer the hook prompt. Now there is no hook, so there is nothing to
-answer.
+Codex asks the user to trust a hook before it runs it ("Hooks need review", then "Trust all and continue"), and
+records the trust by the hook's key and hash in the user's `config.toml`. In the real run, that prompt came once
+per machine while the hook's command stayed the same: a second chat and a restarted chat didn't ask again, but a
+changed command did. So the hook's command is kept the same for every chat (the channel comes from the
+environment of the chat's server). Herdr shows the prompt as no status (`status: null`), so the listener
+watches for it on the chat's screen.
+
+**Decided: the listener answers it**, as it answers Claude Code's development-channel prompt today: once,
+by choosing "Trust all and continue", and the README says so. "Trust all" also trusts any other new or changed
+hook the user has at that moment; that was accepted knowingly. `hooks/list` (each hook's `trustStatus`) tells
+the listener whether channels' hook is trusted. Until it is, ride-along news goes in by `thread/inject_items`,
+which a real model also used (§10). The real run had recommended dropping the hook for `thread/inject_items`
+alone; that is the fallback now, not the plan.
 
 A notice started as a turn runs any hooks the user has, like a typed message.
 
@@ -354,7 +360,7 @@ A notice started as a turn runs any hooks the user has, like a typed message.
 | Unread dots, seen | Same | n/a | |
 | Task cards | Shown in a Claude Code chat | **None** | `caps.cards` on the chat's harness |
 | Notices | n/a | Different look (§4) | `caps.notices` |
-| Ride-along | n/a | `thread/inject_items`, no hook | |
+| Ride-along | n/a | Same hook, trusted once by the listener | |
 | Routines | n/a | Same; queued rather than typed | |
 | Refresh | Nothing to do (the daemon holds tasks) | Same rule, harness answers idle and draft | The row names each harness's version |
 | Remote Control (#22) | **Hidden** | **Hidden** | Codex's remote control pairs the daemon with the Codex app, not a link per session. A later `caps.remoteControl: 'pairing'` could offer "Pair with the Codex app". Once paired, the shared daemon's sessions, Codex tasks included, show in the app (checked; risk 8) |
@@ -453,8 +459,8 @@ A store on another machine (a hub's `channels`-style command) keeps the same con
    and Herdr shows that as no status. That is the panel's **New Codex session** (and a Codex chat's first
    start), so those open in the projects folder, which the installer asks the user to trust once by running
    `codex` there, as it does for Claude Code. channels never answers that dialog, and never writes the trust
-   itself: it is Codex's consent, and it lets the folder's own settings run code. With no hook (§4), there is
-   no hook trust.
+   itself: it is Codex's consent, and it lets the folder's own settings run code. The chat's *hook* trust is
+   different: the listener answers that once (§4).
 6. **~~Instructions files.~~** Settled: `project_doc_fallback_filenames = ["CLAUDE.md"]` on the thread makes a
    `CLAUDE.md`-only repo's rules reach the task, and `AGENTS.md` wins when both exist (§3).
 7. **Notices look heavier** in a Codex chat (§4), against the Duet-style one-line notice the product aims for.
@@ -482,13 +488,13 @@ Each answered by the real run (§10):
    tasks? *Recommended: yes.* **Confirmed** (nothing in the run bears against it).
 4. **A Codex chat at all**, after Codex tasks have been used a while? *Recommended: yes, later.* **Confirmed.**
    Real turns took notices as a turn when idle and queued behind a busy turn, so it works; it still looks
-   heavier and has no cards, and phase 3 is now smaller (no hook).
+   heavier and has no cards.
 5. **Questions.** A turn ending with options or a "?" counts as a question? **Changed:** not on its own (it
    caught 1 of 5). *Recommended:* give each Codex task one sentence of developer instructions on how to end a
    question, then apply the same test (9 of 9).
-6. **The hook-trust prompt** answered by the listener? **Changed:** *Recommended: no hook at all.* Ride-along
-   news goes in with `thread/inject_items`, so there is no prompt to answer. The listener never answers Codex's
-   trust prompts (hook or folder): "Trust all" would trust other hooks too, and folder trust is the user's.
+6. **The hook-trust prompt** answered by the listener? The real run recommended no hook at all
+   (`thread/inject_items` instead), since "Trust all" also trusts the user's other new hooks. **Decided: answer
+   it as first planned**, once, said in the README (§4). The folder-trust dialog is still never answered.
 7. **`CLAUDE.md` for Codex tasks** as a fallback for `AGENTS.md`? *Recommended: yes.* **Confirmed**, per thread,
    never in the user's config.
 8. **Codex's default permissions** (`workspace-write`, approvals on request)? *Recommended: yes.*
@@ -499,7 +505,18 @@ Each answered by the real run (§10):
     `dev/sandbox up --codex real` before phase 2 and phase 3 merge.
 11. **New: approvals from a card in phase 2?** *Recommended: yes* (§3). About a day more in phase 2.
 12. **New: show the account's Codex usage?** `account/rateLimits/read` gives the plan's 5-hour and weekly
-    windows as percentages. *Recommended: later, as a line in the Refresh row's harness list*, not in phase 2.
+    windows as percentages. *Recommended: later, as a line in the Refresh row's harness list*, not in phase 2. **Decided: no.**
+
+### Decided
+
+The owner's answers to the four questions the real run left open (2026-11-22):
+
+| Question | Decision |
+| --- | --- |
+| The "how to ask" rule in each Codex task's developer instructions (5) | **Yes** |
+| Allow / Deny on Codex approval cards, in phase 2 (11) | **Yes** |
+| The chat's hook-trust prompt (6) | **The listener answers "Trust all" once**, and the README says so; it also trusting the user's own new hooks is accepted. `thread/inject_items` is the fallback until it's trusted |
+| Codex usage in the panel (12) | **No**: not shown, now or later |
 
 ## 9. Phases
 
@@ -507,9 +524,9 @@ Each answered by the real run (§10):
 | --- | --- | --- |
 | 1. The seam | S (1–2 days) | `bin/harness/claude.mjs` with everything Claude Code-specific from `bin/channels.mjs`, behind the interface; the listener and `list` go through it; cloud becomes the Claude harness's placement. No behaviour change: the existing tests pass unchanged, plus tests for the interface |
 | 2. Codex tasks | M–L (4–6 days) | `bin/harness/codex.mjs`, `bin/codex-rpc.mjs` (seeded by `dev/codex-rpc.mjs`); `channels start --harness codex` with the question rule and the `CLAUDE.md` fallback, read, send (queued while working), rename, file, dismiss; events and cards in the Claude Code chat; approval cards with Allow / Deny, answered by the listener's client; the panel's standing, harness mark and New session menu; `install.mjs --codex`; `harnesses` in `capabilities` and `list`; terminal mode as the fallback; a README section, and screenshots per the repo's rule |
-| 3. A Codex chat | M (2 days) | The per-chat app-server; notices by `turn/start` and the queue; ride-along by `thread/inject_items`; routines queued; refresh for a Codex chat; the chat's prompt worded per harness; `channels harness <channel> --chat`, and the channel menu's choice |
+| 3. A Codex chat | M (2–3 days) | The per-chat app-server; notices by `turn/start` and the queue; the ride-along hook, its trust prompt answered once by the listener (and `thread/inject_items` until then); routines queued; refresh for a Codex chat; the chat's prompt worded per harness; `channels harness <channel> --chat`, and the channel menu's choice |
 | 4. The hub | M (2–3 days, its own repo) | §7's list, in the server's command; `capabilities` says `harnesses` once it's done |
-| 5. Later, as wanted | S each | The account's Codex usage in the Refresh row; Codex Cloud as a cloud placement; "Pair with the Codex app"; Codex's `request_user_input` answered from a card |
+| 5. Later, as wanted | S each | Codex Cloud as a cloud placement; "Pair with the Codex app"; Codex's `request_user_input` answered from a card |
 
 Tasks come before the chat because they need no chat changes at all: the Claude Code chat starts, reads,
 answers and hears about Codex tasks through the same `channels` commands, and its cards work for them. That
@@ -566,7 +583,7 @@ window and 1% of its week. A typical small task used 19k–160k tokens, mostly c
 looking (19k), a one-file fix (95k), setting up a test runner (161k). That is roughly a quarter of a percent of
 the 5-hour window each, so a Plus plan carries dozens of small tasks per window. With an API key instead, the
 same tokens are billed per token, and the account type is visible to the harness (`account/read`'s
-`authMode` and `planType`), so a usage line could show either.
+`authMode` and `planType`).
 
 **What carries over to phases 2–4.** `dev/sandbox` holds the recipe: `task`, `follow --approve`, `send`, `chat`,
 `last` and `usage` are the calls phase 2's `bin/harness/codex.mjs` makes, and `dev/codex-rpc.mjs` is the client
