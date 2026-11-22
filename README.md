@@ -26,6 +26,7 @@ the herdr mod runs every command on the same machine. No server is involved, unl
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
 | `bin/routines.mjs` | The routine engine and its words: adding and changing routines, which runs are due, the message a run types into the chat. It touches no file, so a store on another machine can run the same copy |
+| `bin/harness/` | The coding agents a task runs on, one module each behind the same interface ([docs/harnesses.md](docs/harnesses.md)): `claude.mjs` is Claude Code's sessions, records and messages |
 | `bin/cloud.mjs` | [Cloud tasks](#cloud-tasks): every call to Claude Code's private sessions API, standalone |
 | `bin/release.mjs` | [Versions and updates](#updating): the installed version, the check against GitHub Releases, `channels update` |
 | `install.mjs` | Installer for the command, mod and layout |

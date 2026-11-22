@@ -1,8 +1,14 @@
 # Harnesses: Codex beside Claude Code
 
 herdr-channels runs every task and every chat on Claude Code today. This is the design for a harness layer that
-lets a task, or a channel's chat, run on another coding agent too, starting with OpenAI's Codex CLI. It is a
-design, not the feature: nothing here is built yet.
+lets a task, or a channel's chat, run on another coding agent too, starting with OpenAI's Codex CLI.
+
+**Built so far:** phase 1, the seam. `bin/harness/index.mjs` names the harnesses and `bin/harness/claude.mjs` holds
+everything Claude Code-specific about tasks (start, the records a look reads, read, send, rename, find), behind the
+interface below; the listener, `list`, `read`, `send` and `rename-task` go through it. Two things differ from the
+sketch below: a harness's look is split into `scan` (once a tick) and `look` (per task, giving the Snap) plus
+`withLast` (its last message, read only when there is news), and cloud tasks stay in `bin/channels.mjs` and
+`bin/cloud.mjs` for now, as the Claude harness's placement in all but file.
 
 It was checked on 2026-11-22 against Codex CLI 0.171.0 (the current release) and Claude Code 2.1.330, on macOS,
 in two rounds. The first ran Codex in a sandbox `HOME` against a small local stand-in for the OpenAI Responses API
