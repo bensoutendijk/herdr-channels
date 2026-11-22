@@ -151,13 +151,16 @@ export const fenceRoutine = (text) => `${text}`.trim().replace(/<(\/?)routine-pr
 
 // What a run asks of the chat beyond the routine's own prompt: one plain line with the outcome first (a quiet run
 // stops there), the prompt's own limits on day and time checked against the real day and time, which it states, and
-// a question only when the chat can't go on without one.
-export function replyContract({ now = Date.now(), who = 'the user', where = 'this Mac' } = {}) {
+// a question only when the chat can't go on without one. A run now is someone asking for it at that moment, often to
+// try it out, so the prompt's limits don't hold it back.
+export function replyContract({ now = Date.now(), manual = false, who = 'the user', where = 'this Mac' } = {}) {
   return [
     `For you (it is ${dayTime(now)} on ${where}'s clock):`,
     `- Do what the prompt asks, as if ${who} had asked it here.`,
     `- Open your reply with one plain line that says the outcome. When there is nothing that needs ${who}, that line is the whole reply.`,
-    `- If the prompt limits when it applies (only on weekdays, not after 18:00, not on holidays), check that against the day and time above. When this run falls outside it, say so in that one line and stop.`,
+    manual
+      ? `- ${who} asked for this run now, so do it even if the prompt limits when it applies (only on weekdays, not after 18:00).`
+      : `- If the prompt limits when it applies (only on weekdays, not after 18:00, not on holidays), check that against the day and time above. When this run falls outside it, say so in that one line and stop.`,
     `- Don't ask ${who} anything unless you can't go on without an answer: ${who} may not be at the screen. If you must, ask once, at the end.`,
   ].join('\n');
 }
@@ -176,7 +179,7 @@ export function routineText({ channel, routine, slot = null, now = Date.now(), m
   ];
   if (late) lines.push(`It is late: it was due at ${shortWhen(slot, now)} and runs at ${hm(now)}, because the timer on ${where} couldn't run it then (asleep or off).`);
   lines.push('', `The routine's prompt, as ${who} wrote it:`, '<routine-prompt>', fenceRoutine(routine.prompt), '</routine-prompt>', '',
-    replyContract({ now, who, where }));
+    replyContract({ now, manual, who, where }));
   return lines.join('\n');
 }
 

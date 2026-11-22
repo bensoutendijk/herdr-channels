@@ -573,6 +573,8 @@ test('a fired run states the real weekday and time, and asks for the outcome fir
   assert.doesNotMatch(text, /If you need the user, ask/);
   const manual = R.routineText({ channel: 'general', routine: { name: 'x', prompt: 'P', schedule: 'manual' }, now: at(2026, 11, 28, 18, 5), manual: true, where: 'server' });
   assert.match(manual, /For you \(it is Saturday, Nov 28, 18:05 on server's clock\)/);
+  assert.match(manual, /the user asked for this run now, so do it even if the prompt limits when it applies/, 'a run now is a try-out: the prompt\'s limits don\'t stop it');
+  assert.doesNotMatch(manual, /say so in that one line and stop/);
 });
 
 test('the chat prompt teaches rounding, one-offs, --dry-run, passing the block on, and reading why a run didn\'t happen', async () => {
