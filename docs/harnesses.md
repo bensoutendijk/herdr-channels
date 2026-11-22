@@ -18,7 +18,7 @@ hooks, Herdr's view of the terminal. The second round re-ran it with a real mode
 Development section), across 35 real sessions. [What a real model changed](#10-what-a-real-model-changed) has
 the evidence. Each recommendation below says whether the real run **confirmed** or **changed** it.
 
-**Short answer: go, with four changes from the real run.** Ben's decisions on them are in
+**Short answer: go, with four changes from the real run.** The owner's decisions on them are in
 [Decided](#decided).
 - Codex tasks fit the task model well: Codex 0.171 keeps sessions in a local daemon of its own, much as
   `claude --bg` does. Its protocol starts a task with no terminal, reports each task's state (including "waiting
@@ -35,7 +35,7 @@ the evidence. Each recommendation below says whether the real run **confirmed** 
      client that connects later, and answering it over the protocol worked end to end, with the task's open
      terminal following along (§3).
   3. **The chat's hook-trust prompt** comes once per machine and Herdr shows it as no status. The real run
-     suggested dropping the hook for `thread/inject_items`, but **Ben decided to keep the hook**: the listener
+     suggested dropping the hook for `thread/inject_items`, but **the owner decided to keep the hook**: the listener
      answers "Trust all" once, and the README says so (§4).
   4. **The folder-trust dialog** never shows for a task. It shows only for a fresh Codex terminal in an
      untrusted folder, and channels doesn't answer it.
@@ -327,9 +327,9 @@ changed command did. So the hook's command is kept the same for every chat (the 
 environment of the chat's server). Herdr shows the prompt as no status (`status: null`), so the listener
 watches for it on the chat's screen.
 
-**Decided (Ben): the listener answers it**, as it answers Claude Code's development-channel prompt today: once,
+**Decided: the listener answers it**, as it answers Claude Code's development-channel prompt today: once,
 by choosing "Trust all and continue", and the README says so. "Trust all" also trusts any other new or changed
-hook the user has at that moment; Ben chose this knowing that. `hooks/list` (each hook's `trustStatus`) tells
+hook the user has at that moment; that was accepted knowingly. `hooks/list` (each hook's `trustStatus`) tells
 the listener whether channels' hook is trusted. Until it is, ride-along news goes in by `thread/inject_items`,
 which a real model also used (§10). The real run had recommended dropping the hook for `thread/inject_items`
 alone; that is the fallback now, not the plan.
@@ -494,7 +494,7 @@ Each answered by the real run (§10):
    question, then apply the same test (9 of 9).
 6. **The hook-trust prompt** answered by the listener? The real run recommended no hook at all
    (`thread/inject_items` instead), since "Trust all" also trusts the user's other new hooks. **Decided: answer
-   it as first planned** (Ben), once, said in the README (§4). The folder-trust dialog is still never answered.
+   it as first planned**, once, said in the README (§4). The folder-trust dialog is still never answered.
 7. **`CLAUDE.md` for Codex tasks** as a fallback for `AGENTS.md`? *Recommended: yes.* **Confirmed**, per thread,
    never in the user's config.
 8. **Codex's default permissions** (`workspace-write`, approvals on request)? *Recommended: yes.*
@@ -505,17 +505,17 @@ Each answered by the real run (§10):
     `dev/sandbox up --codex real` before phase 2 and phase 3 merge.
 11. **New: approvals from a card in phase 2?** *Recommended: yes* (§3). About a day more in phase 2.
 12. **New: show the account's Codex usage?** `account/rateLimits/read` gives the plan's 5-hour and weekly
-    windows as percentages. *Recommended: later, as a line in the Refresh row's harness list*, not in phase 2. **Decided: no** (Ben).
+    windows as percentages. *Recommended: later, as a line in the Refresh row's harness list*, not in phase 2. **Decided: no.**
 
 ### Decided
 
-Ben's answers to the four questions the real run left open (2026-11-22):
+The owner's answers to the four questions the real run left open (2026-11-22):
 
 | Question | Decision |
 | --- | --- |
 | The "how to ask" rule in each Codex task's developer instructions (5) | **Yes** |
 | Allow / Deny on Codex approval cards, in phase 2 (11) | **Yes** |
-| The chat's hook-trust prompt (6) | **The listener answers "Trust all" once**, and the README says so; Ben is fine with it also trusting his own new hooks. `thread/inject_items` is the fallback until it's trusted |
+| The chat's hook-trust prompt (6) | **The listener answers "Trust all" once**, and the README says so; it also trusting the user's own new hooks is accepted. `thread/inject_items` is the fallback until it's trusted |
 | Codex usage in the panel (12) | **No**: not shown, now or later |
 
 ## 9. Phases
