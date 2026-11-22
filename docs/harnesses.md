@@ -357,7 +357,7 @@ A notice started as a turn runs any hooks the user has, like a typed message.
 | Ride-along | n/a | `thread/inject_items`, no hook | |
 | Routines | n/a | Same; queued rather than typed | |
 | Refresh | Nothing to do (the daemon holds tasks) | Same rule, harness answers idle and draft | The row names each harness's version |
-| Remote Control (#22) | **Hidden** | **Hidden** | Codex's remote control pairs the daemon with the Codex app, not a link per session. A later `caps.remoteControl: 'pairing'` could offer "Pair with the Codex app". Once paired, Codex tasks in the shared daemon should show in the app (risk 8) |
+| Remote Control (#22) | **Hidden** | **Hidden** | Codex's remote control pairs the daemon with the Codex app, not a link per session. A later `caps.remoteControl: 'pairing'` could offer "Pair with the Codex app". Once paired, the shared daemon's sessions, Codex tasks included, show in the app (checked; risk 8) |
 | Cloud tasks (#23) | **Hidden** | n/a | Codex Cloud has `codex cloud exec --env <id>`, `list --json`, `status`, `apply`: a later cloud placement for Codex, with its own environments |
 | Approvals from a card | **Better**: Allow / Deny | n/a | Only possible with Codex; phase 2 |
 | The Claude Code version in the Refresh row (#24) | — | — | Per harness: "Claude Code 2.1.331 · Codex 0.172.0", each shown when installed and used |
@@ -459,12 +459,12 @@ A store on another machine (a hub's `channels`-style command) keeps the same con
    `CLAUDE.md`-only repo's rules reach the task, and `AGENTS.md` wins when both exist (§3).
 7. **Notices look heavier** in a Codex chat (§4), against the Duet-style one-line notice the product aims for.
    Unchanged by the real run: a notice shows as `› [task notice] …` and a one-line reply.
-8. **Codex's remote control shows the shared daemon's threads to the user's phone.** With
+8. **Codex's remote control shows the shared daemon's sessions on the user's phone.** With
    `codex remote-control start`, the shared daemon the Codex tasks run in is the one paired with the Codex app,
-   so channels' Codex tasks should show there like any Codex session the user started. That wasn't checked on a
-   phone: the real run used a sandbox daemon, and starting a test thread on the user's own daemon was left for
-   the user to approve. It's likely a plus (a task can be watched and answered from the phone), but the task
-   names and briefs are visible there too.
+   and its sessions appear in the app on the paired phone (checked by the user after the real run). So a
+   channels Codex task shows there like any Codex session the user started: it can be watched and answered
+   from the phone, which is a plus, but its name and brief are visible there too. Nothing for channels to do;
+   the README's Codex section should say so.
 9. **A queued message briefly reads as a finish.** Between a turn and a queued message's turn, the thread reads
    `idle`. The listener checks `thread/queue/list` before calling a task done (§3).
 
