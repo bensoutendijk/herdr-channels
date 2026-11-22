@@ -1863,7 +1863,7 @@ export default class Channels extends View {
     const meta = h_flex().gap(14).text_size(12).text_color(t.dim)
       // A manual routine has no next run: its label already says it runs when run.
       .when(r.schedule !== "manual" && !(said && !r.enabled), (el) => el.child(h_flex().flex_none().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off"))))
-      .child(h_flex().gap(4).min_w(0).when(!said, (el) => el.child("Last")).child(div().truncate().text_color(lastColor).child(last)));
+      .child(h_flex().gap(4).min_w(0).when(!said, (el) => el.child("Last")).child(div().id(`rt-st-${r.id}`).truncate().text_color(lastColor).tooltip(last).child(last)));
     return h_flex().id(`rt-${r.id}`).flex_none().overflow_hidden().h(closed ? 0 : 78).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
       .child(h_flex().id(`rt-in-${r.id}`).flex_1().min_w(0).h(74).px(12).gap(12).items_center().rounded(10)
         .when(hover || confirming, (el) => el.bg(t.raised))

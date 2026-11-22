@@ -310,7 +310,8 @@ export function routineStatus(r, now = Date.now(), { where = 'this Mac' } = {}) 
   if (l.status === 'queued') {
     const since = Date.parse(l.at);
     const why = l.waiting?.why ?? (typeof l.waiting === 'string' ? l.waiting : null);
-    const words = !why && now - since < 60_000 ? 'Queued for the chat…' : `Waiting ${span(now - since)}${why ? `: ${why}` : ' for the chat'}`;
+    const fresh = now - since < 60_000;
+    const words = why ? `Waiting${fresh ? '' : ` ${span(now - since)}`}: ${why}` : fresh ? 'Queued for the chat…' : `Waiting ${span(now - since)} for the chat`;
     return { state: 'waiting', words: `${words}${manual ? ' · run now' : ''}${skipped}`, at: l.at };
   }
   if (l.status === 'missed') {
