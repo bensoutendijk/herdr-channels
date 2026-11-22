@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.2.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.1.1...v1.2.0) (2026-11-22)
+
+### Features
+
+* Routines, task renaming and third-machine status for a store on another machine ([#34](https://github.com/bensoutendijk/herdr-channels/issues/34)) ([b6b0df6](https://github.com/bensoutendijk/herdr-channels/commit/b6b0df6f76234f9f56f8f2c204a0060c237ff8b6))
+
 ## [1.1.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.1.0...v1.1.1) (2026-11-22)
 
 ### Bug Fixes
