@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.5.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.4.1...v1.5.0) (2026-11-22)
+
+### Features
+
+* Routines a chat answers with the outcome first, sets up with a confirmation, and can propose with --dry-run ([#40](https://github.com/bensoutendijk/herdr-channels/issues/40)) ([2d76503](https://github.com/bensoutendijk/herdr-channels/commit/2d76503b15be423b9f386287c1cdb41c3691edb0))
+
 ## [1.4.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.4.0...v1.4.1) (2026-11-22)
 
 ### Bug Fixes
