@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.3.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.2.0...v1.3.0) (2026-11-22)
+
+### Features
+
+* One routine engine for both backends, and Run now that says when the chat has it ([#35](https://github.com/bensoutendijk/herdr-channels/issues/35)) ([122ad11](https://github.com/bensoutendijk/herdr-channels/commit/122ad11873f03c8047ad8588981c771693f0ec15))
+
 ## [1.2.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.1.1...v1.2.0) (2026-11-22)
 
 ### Features
