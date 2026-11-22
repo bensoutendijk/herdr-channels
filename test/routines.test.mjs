@@ -7,7 +7,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { due, lastDue, matches, nextDue, ON_TIME_MS, parseCron, parseSchedule, ScheduleError } from '../bin/schedule.mjs';
+import { defaultCatchup, describeCron, due, lastDue, matches, nextDue, ON_TIME_MS, parseCron, parseSchedule, ScheduleError, scheduleWarnings, skippedTimes } from '../bin/schedule.mjs';
 
 const cli = fileURLToPath(new URL('../bin/channels.mjs', import.meta.url));
 const at = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime();
@@ -26,7 +26,7 @@ test('presets and cron lines parse to a normalized schedule, in words too', () =
     ['hourly :15', 'hourly :15', 'Every hour at :15', '15 * * * *'],
     ['weekly fri 16:00', 'weekly fri 16:00', 'Fridays at 16:00', '0 16 * * 5'],
     ['weekly on Sunday at 8', 'weekly sun 08:00', 'Sundays at 08:00', '0 8 * * 0'],
-    ['cron 0 9 * * 1-5', 'cron 0 9 * * 1-5', 'Cron 0 9 * * 1-5', '0 9 * * 1-5'],
+    ['cron 0 9 * * 1-5', 'cron 0 9 * * 1-5', 'Weekdays at 09:00', '0 9 * * 1-5'],
     ['*/15 9-17 * * mon-fri', 'cron */15 9-17 * * mon-fri', 'Cron */15 9-17 * * mon-fri', '*/15 9-17 * * mon-fri'],
   ];
   for (const [raw, spec, label, cron] of cases) {
@@ -441,4 +441,82 @@ test('the routine words name who, where and which command a backend passes in', 
   assert.match(text, /because the timer on server couldn't run it then/);
   assert.match(R.routineUsage(words), /^hub channels routine list/);
   assert.match(R.routineUsage(words), /\[--on \| --off\]/);
+});
+
+test('a cron line reads in words where it has a common shape, else as "Cron <line>"', () => {
+  const cases = [
+    ['0 9 * * 1,3,5', 'Mon, Wed, Fri at 09:00'],
+    ['0 9 * * 1-5', 'Weekdays at 09:00'],
+    ['0 9,17 * * 1-5', 'Weekdays at 09:00 and 17:00'],
+    ['30 8 * * sat,sun', 'Weekends at 08:30'],
+    ['0 16 * * fri', 'Fridays at 16:00'],
+    ['0 8 * * 7', 'Sundays at 08:00'],
+    ['0 18 * * *', 'Every day at 18:00'],
+    ['*/30 * * * *', 'Every 30 minutes'],
+    ['* * * * *', 'Every minute'],
+    ['15 * * * *', 'Every hour at :15'],
+    ['0 */2 * * *', 'Every 2 hours at :00'],
+    ['0 9 1 * *', 'The 1st of each month at 09:00'],
+    ['0 9 1,15 * *', 'The 1st and 15th of each month at 09:00'],
+    ['0 9 * 1 *', null], // a month restricted
+    ['0 9 1 * 1', null], // both day fields restricted: either matches
+    ['*/15 9-17 * * mon-fri', null], // too many times to list
+    ['5,10 * * * *', null],
+  ];
+  for (const [line, words] of cases) {
+    assert.equal(describeCron(parseCron(line)), words, line);
+    assert.equal(parseSchedule(`cron ${line}`).label, words ?? `Cron ${parseCron(line).text}`, line);
+  }
+  assert.equal(describeCron(null), null);
+});
+
+test('a manual schedule has no time: nothing comes due, and the tick leaves it alone', async (t) => {
+  const s = parseSchedule('manual');
+  assert.deepEqual([s.spec, s.cron, s.label, s.manual], ['manual', null, 'Only when you run it', true]);
+  assert.equal(parseSchedule(' Manual ').spec, 'manual');
+  assert.equal(nextDue(null, Date.now()), null);
+  assert.equal(lastDue(null, Date.now()), null);
+  assert.equal(matches(null, Date.now()), false);
+  assert.equal(due({ cron: null, since: new Date(0).toISOString(), catchupMin: 1440, now: Date.now() }), null);
+  assert.deepEqual(skippedTimes(null), []);
+  assert.throws(() => parseSchedule('nonsense'), /or "manual"/);
+
+  const { ok, store, tickAt } = setup(t);
+  ok(['create', 'general']);
+  assert.match(ok(['routine', 'add', 'general', 'release-notes', '--schedule', 'manual', 'Draft the release notes.']), /release-notes: Only when you run it, catch-up 60 min/);
+  const listed = JSON.parse(ok(['routine', 'list', 'general', '--json'])).channels[0].routines[0];
+  assert.deepEqual([listed.schedule, listed.label, listed.next_at, listed.error], ['manual', 'Only when you run it', null, null]);
+  assert.deepEqual((await tickAt(Date.now() + 86_400_000)).runs, [], 'a manual routine never comes due');
+  assert.equal(store().channels[0].routines[0].last, null);
+  const p = JSON.parse(ok(['routine', 'preview', 'manual', '--json']));
+  assert.deepEqual([p.spec, p.label, p.manual, p.next, p.warnings], ['manual', 'Only when you run it', true, [], []]);
+  assert.equal(ok(['routine', 'preview', 'manual']).trim(), 'Only when you run it.');
+});
+
+test('a new routine\'s catch-up window follows its schedule unless one is given', (t) => {
+  const w = (spec) => defaultCatchup(parseSchedule(spec));
+  assert.deepEqual(['hourly :15', 'cron */30 * * * *', 'cron 0 9,17 * * *', 'daily 09:00', 'weekdays 09:00', 'cron 0 9 * * 1,3,5', 'weekly fri 16:00', 'cron 0 9 1 * *', 'manual'].map(w),
+    [15, 15, 15, 60, 60, 60, 240, 240, 60]);
+  const { ok, store } = setup(t);
+  ok(['create', 'general']);
+  ok(['routine', 'add', 'general', 'sweep', '--schedule', 'hourly :15', 'Check the inbox.']);
+  ok(['routine', 'add', 'general', 'review', '--schedule', 'weekly fri 16:00', 'Review the week.']);
+  ok(['routine', 'add', 'general', 'kept', '--schedule', 'hourly', '--catchup', '2h', 'Kept.']);
+  assert.deepEqual(store().channels[0].routines.map((r) => r.catchup_min), [15, 240, 120]);
+  assert.equal(JSON.parse(ok(['routine', 'preview', 'hourly', '--json'])).catchup_min, 15);
+});
+
+test('preview names the time zone and warns of a time the clocks skip', (t) => {
+  const { ok } = setup(t);
+  const chicago = JSON.parse(ok(['routine', 'preview', 'daily 02:30', '--json'], undefined, { TZ: 'America/Chicago' }));
+  assert.equal(chicago.tz, 'America/Chicago');
+  assert.equal(chicago.warnings.length, 1);
+  assert.match(chicago.warnings[0], /^02:30 doesn't happen on Mar \d+, \d{4} \(the clocks go forward\), so that run is skipped\.$/);
+  const half = JSON.parse(ok(['routine', 'preview', 'cron */30 * * * *', '--json'], undefined, { TZ: 'Europe/Amsterdam' }));
+  assert.equal(half.tz, 'Europe/Amsterdam');
+  assert.match(half.warnings[0], /^The clocks go forward on Mar \d+, \d{4}, so the runs from 02:00 to 02:30 are skipped\.$/);
+  assert.deepEqual(JSON.parse(ok(['routine', 'preview', 'daily 09:00', '--json'], undefined, { TZ: 'America/Chicago' })).warnings, [], 'a time every day has');
+  assert.deepEqual(JSON.parse(ok(['routine', 'preview', 'daily 02:30', '--json'], undefined, { TZ: 'Asia/Tokyo' })).warnings, [], 'a zone without clock changes');
+  assert.deepEqual(JSON.parse(ok(['capabilities', '--json'], undefined, { TZ: 'Europe/Amsterdam' })).clock, { tz: 'Europe/Amsterdam' });
+  assert.ok(Array.isArray(scheduleWarnings(parseSchedule('daily 02:30').cron)));
 });

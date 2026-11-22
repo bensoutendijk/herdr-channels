@@ -14,7 +14,7 @@
 // A channel object here is { name, routines: [...], queue: [...] }. A queue entry is a run waiting for the chat:
 // { id, routine (its id), name, kind: 'scheduled' | 'manual', text, queued_at }.
 import { randomUUID } from 'node:crypto';
-import { due, nextDue, parseSchedule, ScheduleError, shortWhen } from './schedule.mjs';
+import { defaultCatchup, due, nextDue, parseSchedule, ScheduleError, scheduleWarnings, shortWhen, timeZone } from './schedule.mjs';
 
 // What this file refuses (a bad name, schedule or prompt, a routine that isn't there): the message says why, for the
 // person or chat that asked. A backend shows it the way it shows its own usage errors.
@@ -79,10 +79,11 @@ export function showRoutine(r, now = Date.now()) {
 
 const needPrompt = (prompt) => { if (!`${prompt ?? ''}`.trim()) fail('A routine needs a prompt: what the chat is asked when it runs.'); };
 
-// Adds a routine to channel c. Answers it as showRoutine does.
-export function addRoutine(c, { name, prompt, spec, catchupMin = ROUTINE_DEFAULTS.catchupMin, enabled = true, now = Date.now() }) {
+// Adds a routine to channel c. Answers it as showRoutine does. Without a catch-up window it gets its schedule's default (defaultCatchup).
+export function addRoutine(c, { name, prompt, spec, catchupMin, enabled = true, now = Date.now() }) {
   needPrompt(prompt);
   const s = schedule(spec);
+  catchupMin ??= defaultCatchup(s);
   if (c.routines.some((x) => x.name === name)) fail(`#${c.name} already has a routine "${name}".`);
   const at = iso(now);
   const r = { id: `rt_${randomUUID().replace(/-/g, '').slice(0, 10)}`, name, prompt: `${prompt}`.trim(), schedule: s.spec, catchup_min: catchupMin, enabled, created_at: at, since: at, done: null, last: null };
@@ -213,19 +214,21 @@ export function claimDue(store, now = Date.now(), { who, where } = {}) {
 export const claimLine = (x) => `${x.action === 'fire' ? 'fired' : x.action === 'skip' ? 'skipped' : 'missed'} #${x.channel} ${x.routine} due ${x.due_at}${x.late_min > 2 ? ` (${x.late_min} min late)` : ''}${x.action === 'skip' ? `: ${SKIP_WHY}` : ''}`;
 
 // For the Routines dialog: a schedule in words and its next runs ({ spec, label, next }), or what is wrong ({ error }).
+// Also: manual (no time: next is empty), catchup_min (the window a new routine on it gets), tz (the zone of the clock
+// it keeps) and warnings (a time it uses that doesn't exist on a clock-change night, in words).
 export function preview(raw, now = Date.now()) {
   try {
     const s = parseSchedule(raw);
     const next = [];
     for (let t = now, i = 0; i < 3; i++) { t = nextDue(s.cron, t); if (t == null) break; next.push(iso(t)); }
-    return { spec: s.spec, label: s.label, next };
+    return { spec: s.spec, label: s.label, next, manual: Boolean(s.manual), catchup_min: defaultCatchup(s), tz: timeZone(), warnings: scheduleWarnings(s.cron, now) };
   } catch (err) {
     if (!(err instanceof ScheduleError)) throw err;
     return { error: err.message };
   }
 }
 
-export const previewText = (p, now = Date.now()) => p.error ?? `${p.label}. Next: ${p.next.map((x) => shortWhen(Date.parse(x), now)).join(', ')}`;
+export const previewText = (p, now = Date.now()) => p.error ?? (p.manual ? `${p.label}.` : `${p.label}. Next: ${p.next.map((x) => shortWhen(Date.parse(x), now)).join(', ')}`);
 
 // A routine in one line, as the command confirms a change: "morning-plan: Weekdays at 09:00, next Mon 09:00,
 // catch-up 60 min."
@@ -250,8 +253,8 @@ export const routineUsage = ({ cli = 'channels', where = 'this Mac' } = {}) => [
   `${cli} routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off]`,
   `${cli} routine rm|run|on|off <channel> <name>`,
   `${cli} routine preview <schedule> [--json]`,
-  `Schedules (${where}'s local time): "weekdays 09:00", "daily 09:00", "hourly :15", "weekly fri 16:00", or "cron <5 fields>".`,
-  `A catch-up window (default ${ROUTINE_DEFAULTS.catchupMin} minutes): how late a run the timer on ${where} missed may still fire, e.g. 15m, 2h, 1d or 0.`,
+  `Schedules (${where}'s local time): "weekdays 09:00", "daily 09:00", "hourly :15", "weekly fri 16:00", "cron <5 fields>", or "manual" (only when run).`,
+  `A catch-up window (default by schedule: 15 minutes for several runs a day, 60 for daily, 4 hours for weekly): how late a run the timer on ${where} missed may still fire, e.g. 15m, 2h, 1d or 0.`,
 ].join('\n');
 
 // A routine's last run in words, for `routine list`.
@@ -281,7 +284,7 @@ export function listText(out, { cli = 'channels' } = {}) {
 export function promptText({ name, who = 'the user', where = 'this Mac', cli = 'channels' }) {
   return [
     `Routines: prompts this chat gets on a schedule, set up by ${who}. When one comes due, a message opening with "[routine <name>, scheduled <time>]" arrives here on its own, from the channels timer on ${where}, with the prompt between <routine-prompt> markers; it says "running <time>" too when it runs late because the timer couldn't run it on time. Do what its prompt asks. When ${who} asks for something recurring ("every weekday at 9, ask me for my plan"), set it up:`,
-    `- \`${cli} routine add ${name} <name> --schedule "<schedule>" [--catchup <window>] -\`, with the prompt on stdin. <name> is short, lowercase, with dashes (morning-plan). Schedules are in ${where}'s local time: "weekdays 09:00", "daily 18:30", "hourly :15", "weekly fri 16:00", or a cron line "cron 0 9 * * 1-5". The catch-up window (default ${ROUTINE_DEFAULTS.catchupMin} minutes; 15m, 2h, 1d, 0) is how late a run the timer missed (${where} asleep or off) may still happen. Write the prompt as ${who} would ask it of you at that time, standing on its own.`,
+    `- \`${cli} routine add ${name} <name> --schedule "<schedule>" [--catchup <window>] -\`, with the prompt on stdin. <name> is short, lowercase, with dashes (morning-plan). Schedules are in ${where}'s local time: "weekdays 09:00", "daily 18:30", "hourly :15", "weekly fri 16:00", a cron line "cron 0 9 * * 1-5", or "manual" for one ${who} only runs by hand. The catch-up window (default 15 minutes for several runs a day, 1 hour for daily, 4 hours for weekly; 15m, 2h, 1d, 0) is how late a run the timer missed (${where} asleep or off) may still happen. Write the prompt as ${who} would ask it of you at that time, standing on its own.`,
     `- \`${cli} routine list ${name}\` shows them with their next and last runs; \`${cli} routine edit ${name} <name> [--schedule ...] [--catchup ...] [--prompt -] [--on|--off]\`, \`${cli} routine on|off|rm ${name} <name>\` change them and \`${cli} routine run ${name} <name>\` runs one now. A run that comes due while the last one still waits for this chat is skipped, not stacked. Change routines only when ${who} asks, and tell them the schedule and next run you set.`,
   ].join('\n');
 }

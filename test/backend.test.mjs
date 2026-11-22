@@ -55,7 +55,7 @@ test('a task opens on the machine it runs on, or nowhere when Herdr can\'t reach
 test('features: what list --json says, else this repo\'s older command had them all, else none', () => {
   assert.deepEqual(FEATURES, B.ALL_FEATURES, 'the command and the mod agree');
   assert.deepEqual(B.featuresOf({ machine: 'x', features: ['seen', 7] }), ['seen']);
-  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => f !== 'update' && f !== 'routine-edit-on'), 'a command from before the list: everything but update and routine-edit-on');
+  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => f !== 'update' && f !== 'routine-edit-on' && f !== 'routine-manual'), 'a command from before the list: everything but update, routine-edit-on and routine-manual');
   assert.deepEqual(B.featuresOf({ machine: 'server', channels: [] }), [], 'a hub that lists none');
   assert.deepEqual(B.featuresOf(null), []);
 });
@@ -116,4 +116,16 @@ test('a task\'s standing: Claude Code\'s list on its machine first, then the sto
 test('the Routines dialog names whose clock a routine keeps: this Mac\'s, or the store machine\'s', () => {
   assert.deepEqual(B.routineClock(null), { times: "Times are this Mac's local time.", short: "Times are this Mac's.", missed: 'If the Mac was asleep, still run it within' });
   assert.deepEqual(B.routineClock('server'), { times: "Times are server's local time.", short: "Times are server's.", missed: 'If server was off, still run it within' });
+});
+
+test('the Routines dialog names the zone and says the catch-up window as an outcome', () => {
+  assert.equal(B.clockOf('{"features":[],"clock":{"tz":"Europe/Amsterdam"}}\n'), 'Europe/Amsterdam');
+  assert.equal(B.clockOf('{"features":[]}'), null, 'an older command says no zone');
+  assert.equal(B.clockOf('usage: …'), null);
+  assert.equal(B.routineClock(null, 'Europe/Amsterdam').short, "Times are this Mac's (Europe/Amsterdam).");
+  assert.equal(B.routineClock('server', 'Europe/Amsterdam').times, "Times are server's local time (Europe/Amsterdam).");
+  assert.equal(B.catchupRule(null, '09:00', '10:00'), "If the Mac sleeps through 09:00, it runs on wake until 10:00, else it's skipped.");
+  assert.equal(B.catchupRule(null, '09:00', null), 'If the Mac sleeps through 09:00, that run is skipped.');
+  assert.equal(B.catchupRule('server', '09:00', '13:00'), "If server is off at 09:00, it runs when server is back until 13:00, else it's skipped.");
+  assert.equal(B.catchupRule(null, null, '10:00'), '');
 });
