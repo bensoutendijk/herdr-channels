@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.7.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.7.0...v1.7.1) (2026-11-22)
+
+### Bug Fixes
+
+* Tasks go through a harness layer, ready for Codex, with no change in how they work ([#45](https://github.com/bensoutendijk/herdr-channels/issues/45)) ([6eebefb](https://github.com/bensoutendijk/herdr-channels/commit/6eebefb6dc5774cf7f578974b59148417a7da9b3))
+
 ## [1.7.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.6.0...v1.7.0) (2026-11-22)
 
 ### Features
