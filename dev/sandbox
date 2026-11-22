@@ -1,0 +1,387 @@
+#!/usr/bin/env node
+// A sandbox for trying herdr-channels end to end, and for harness work (Codex beside Claude Code).
+// See "Development" in the README. Everything lives under one folder (default /private/tmp/hcdev, or $HC_SANDBOX):
+// its own HOME, herdr app home, herdr-core, launchd label and CODEX_HOME. Your own Herdr, Claude Code and Codex
+// setups are never touched; `down` removes it all.
+//
+//   dev/sandbox up [--codex real|mock|none] [--app] [--timer] [--untrusted]
+//   dev/sandbox run <command…>            run a command in the sandbox's environment (channels, hc, codex, claude…)
+//   dev/sandbox env                       print the environment as `export` lines
+//   dev/sandbox repo <name> [--agents <text>] [--claude <text>] [--file <path>=<text>]… [--untrusted]
+//   dev/sandbox task <folder> <brief…> [--name <n>] [--sandbox <mode>] [--approval <policy>] [--dev <text>] [--model <m>]
+//                    [--effort <low|medium|high>] [--config <key>=<json>]…
+//   dev/sandbox follow <thread> [--approve accept|decline] [--timeout <s>] [--events]
+//   dev/sandbox send <thread> <text…>     a turn when idle, queued when a turn runs
+//   dev/sandbox status [<thread>]         every thread (or one) with its status
+//   dev/sandbox last <thread>             its last message, turn count and token use, from the session file
+//   dev/sandbox usage                     the account's rate-limit windows (real Codex)
+//   dev/sandbox rpc <method> [<json>]     one raw call to the Codex daemon
+//   dev/sandbox chat <name> [--dev <text>] [--hook <command>] [--cwd <folder>] [--resume <thread>]
+//                                         a Codex chat: its own app-server and a TUI on it, in herdr-core terminals.
+//                                         CODEX_SOCK=<its socket> points status/send/follow/rpc at it
+//   dev/sandbox front                     exit 0 only when the sandbox Herdr window is frontmost
+//   dev/sandbox click <x> <y> | type <text>   synthetic input, refused unless `front` passes
+//   dev/sandbox shot [<file.png>]         the sandbox window, rendered by `herdr-app shot`
+//   dev/sandbox down                      stop everything and delete the sandbox (and any credential copy)
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { homedir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { connect, controlSocket } from './codex-rpc.mjs';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SB = resolve(process.env.HC_SANDBOX || '/private/tmp/hcdev');
+const STATE = join(SB, 'sandbox.json');
+const REAL_HOME = homedir();
+const die = (msg) => { console.error(`sandbox: ${msg}`); process.exit(1); };
+const state = () => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : die(`no sandbox at ${SB}; run \`dev/sandbox up\``));
+const save = (s) => writeFileSync(STATE, `${JSON.stringify(s, null, 2)}\n`);
+const which = (cmd) => spawnSync('/bin/sh', ['-c', `command -v ${cmd}`], { encoding: 'utf8' }).stdout.trim() || null;
+const sha = (f) => (existsSync(f) ? createHash('sha256').update(readFileSync(f)).digest('hex') : null);
+
+function flags(argv, names) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const k = a.slice(2);
+    if (names[k] === 'bool') out[k] = true;
+    else if (names[k] === 'list') (out[k] ||= []).push(argv[++i]);
+    else if (names[k]) out[k] = argv[++i];
+    else die(`unknown option ${a}`);
+  }
+  return out;
+}
+
+function env(s = state()) {
+  const home = join(SB, 'home');
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CODEX_|CLAUDE|HERDR_|HC_|CHANNELS_|OPENAI_)/.test(k))),
+    HOME: home,
+    HERDR_APP_HOME: join(home, '.config', 'herdr-app'),
+    CODEX_HOME: join(home, '.codex'),
+    CHANNELS_MACHINE: 'studio',
+    HC_SANDBOX: SB,
+    PROMPT: '%~ %# ',
+    ...(s.codex === 'mock' ? { MOCK_KEY: 'mock' } : {}),
+    PATH: [join(home, '.local', 'bin'), ...s.paths, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':'),
+  };
+}
+const sh = (s, cmd, args, opts = {}) => spawnSync(cmd, args, { env: env(s), cwd: join(SB, 'home'), encoding: 'utf8', ...opts });
+
+const freePort = () => new Promise((done) => { const srv = createServer(); srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => done(port)); }); });
+
+async function up(argv) {
+  const o = flags(argv, { codex: 'value', app: 'bool', timer: 'bool', untrusted: 'bool' });
+  const codex = o.codex || 'none';
+  if (!['real', 'mock', 'none'].includes(codex)) die('--codex takes real, mock or none');
+  if (existsSync(STATE)) die(`a sandbox already runs at ${SB}; \`dev/sandbox down\` first, or set HC_SANDBOX`);
+  if (!/^\/(private\/)?tmp\/[\w.-]+$/.test(SB)) die('HC_SANDBOX must be one folder right under /tmp (herdr-core\'s socket path is capped at 104 characters)');
+  if (existsSync(SB) && readdirSync(SB).length) die(`${SB} exists and isn't a sandbox; pick another HC_SANDBOX`);
+  const home = join(SB, 'home');
+  const projects = join(home, 'projects');
+  for (const d of [projects, join(home, 'Library'), join(home, '.codex'), join(home, '.config', 'herdr-app'), join(home, '.local', 'bin')]) mkdirSync(d, { recursive: true });
+  const bins = ['node', 'claude', 'hc', 'herdr-app', 'codex'].map(which);
+  const s = {
+    dir: SB, codex, label: `dev.herdr-channels.sb.${basename(SB)}`, timer: !!o.timer, created: new Date().toISOString(),
+    paths: [...new Set([dirname(process.execPath), ...bins.filter(Boolean).map(dirname)])],
+  };
+  save(s);
+  // Claude Code signs in through the login keychain; a link keeps `claude` signed in with the sandbox HOME.
+  if (existsSync(join(REAL_HOME, 'Library', 'Keychains'))) symlinkSync(join(REAL_HOME, 'Library', 'Keychains'), join(home, 'Library', 'Keychains'));
+  writeFileSync(join(home, '.zshrc'), "PROMPT='%~ %# '\n");
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true, projects: { [projects]: { hasTrustDialogAccepted: true } } }, null, 2));
+
+  // Codex: its own CODEX_HOME. Credentials are a copy of ~/.codex/auth.json that `down` deletes.
+  const config = ['cli_auth_credentials_store = "file"', 'check_for_update_on_startup = false'];
+  if (!o.untrusted) config.push('', `[projects."${projects}"]`, 'trust_level = "trusted"');
+  if (codex === 'real') {
+    const auth = join(REAL_HOME, '.codex', 'auth.json');
+    if (!existsSync(auth)) die('no Codex login (~/.codex/auth.json); run `codex login` first');
+    copyFileSync(auth, join(home, '.codex', 'auth.json'));
+    chmodSync(join(home, '.codex', 'auth.json'), 0o600);
+    s.authHash = sha(auth);
+  }
+  if (codex === 'mock') {
+    s.mockPort = await freePort();
+    const log = join(SB, 'mock.log');
+    const p = spawn(process.execPath, [join(REPO, 'dev', 'codex-mock.mjs'), String(s.mockPort), log], { detached: true, stdio: 'ignore' });
+    p.unref();
+    s.mockPid = p.pid;
+    config.unshift('model_provider = "mock"', 'model = "mock-model"');
+    config.push('', '[model_providers.mock]', 'name = "mock"', `base_url = "http://127.0.0.1:${s.mockPort}/v1"`, 'wire_api = "responses"', 'env_key = "MOCK_KEY"');
+  }
+  writeFileSync(join(home, '.codex', 'config.toml'), `${config.join('\n')}\n`);
+  save(s);
+
+  // herdr-channels from this working tree, with a launchd label of its own.
+  const inst = sh(s, process.execPath, [join(REPO, 'install.mjs'), '--projects', projects, '--label', s.label, ...(s.timer ? [] : ['--no-timer'])]);
+  if (inst.status !== 0) die(`install failed:\n${inst.stdout}${inst.stderr}`);
+  const wrapper = join(home, '.local', 'bin', 'channels');
+  if (existsSync(wrapper)) {
+    const text = readFileSync(wrapper, 'utf8');
+    if (!text.includes('CHANNELS_MACHINE')) writeFileSync(wrapper, text.replace(/^(#!.*\n)/, '$1export CHANNELS_MACHINE=studio\n'));
+  }
+  if (codex !== 'none') {
+    const d = sh(s, 'codex', ['app-server', 'daemon', 'start']);
+    if (d.status !== 0) console.error(`codex daemon: ${d.stderr.trim() || d.stdout.trim()}`);
+  }
+  if (o.app) {
+    const app = [process.env.HERDR_APP, join(REAL_HOME, 'Applications', 'Herdr.app'), '/Applications/Herdr.app'].find((a) => a && existsSync(a));
+    if (!app) die('Herdr.app not found; set HERDR_APP');
+    const out = openSync(join(SB, 'herdr.log'), 'a');
+    const p = spawn(join(app, 'Contents', 'MacOS', 'Herdr'), [], { env: env(s), cwd: home, detached: true, stdio: ['ignore', out, out] });
+    p.unref();
+    s.appPid = p.pid;
+    save(s);
+    // Close Herdr's first-run welcome once the window is up (it can come back; `run herdr-app do overlay.close`).
+    for (let i = 0; i < 20 && sh(s, 'hc', ['ls'], { timeout: 5000 }).status !== 0; i++) spawnSync('sleep', ['1']);
+    spawnSync('sleep', ['2']);
+    sh(s, 'herdr-app', ['do', 'overlay.close'], { timeout: 15000 });
+  }
+  save(s);
+  console.log(`sandbox up at ${SB} (codex: ${codex}${s.appPid ? `, Herdr pid ${s.appPid}` : ''}, label ${s.label})`);
+  console.log(`  projects: ${projects}\n  try: dev/sandbox run channels create demo   ·   dev/sandbox down when done`);
+}
+
+async function down() {
+  if (!existsSync(STATE)) { if (existsSync(SB)) die(`${SB} has no sandbox.json; not deleting it`); console.log('no sandbox'); return; }
+  const s = state();
+  if (s.appPid) try { process.kill(s.appPid); } catch { /* gone */ }
+  if (s.codex !== 'none') sh(s, 'codex', ['app-server', 'daemon', 'stop'], { timeout: 20000 });
+  sh(s, process.execPath, [join(REPO, 'install.mjs'), '--uninstall', '--label', s.label], { timeout: 30000 });
+  sh(s, 'hc', ['server', 'stop'], { timeout: 20000 });
+  if (s.mockPid) try { process.kill(s.mockPid); } catch { /* gone */ }
+  // Anything left whose command line or environment names the sandbox folder (herdr-core respawns once).
+  const mine = new Set([process.pid, process.ppid]);
+  const at = new RegExp(`${SB.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[/\\s"':]|$)`);
+  for (let round = 0; round < 3; round++) {
+    const pids = spawnSync('ps', ['-Eww', '-axo', 'pid=,command='], { encoding: 'utf8' }).stdout.split('\n')
+      .filter((l) => at.test(l)).map((l) => Number(l.trim().split(/\s+/)[0])).filter((p) => p && !mine.has(p));
+    if (!pids.length) break;
+    for (const p of pids) try { process.kill(p, round ? 'SIGKILL' : 'SIGTERM'); } catch { /* gone */ }
+    spawnSync('sleep', ['2']);
+  }
+  if (s.authHash) {
+    const copy = join(SB, 'home', '.codex', 'auth.json');
+    if (sha(copy) && sha(copy) !== s.authHash) console.log('note: the sandbox refreshed its copy of the Codex login. If `codex` stops working outside the sandbox, run `codex login` again.');
+    rmSync(copy, { force: true });
+  }
+  const loaded = spawnSync('launchctl', ['list', s.label], { encoding: 'utf8' }).status === 0;
+  if (loaded) spawnSync('launchctl', ['remove', s.label]);
+  rmSync(SB, { recursive: true, force: true });
+  console.log(existsSync(SB) ? `could not remove ${SB}` : `sandbox at ${SB} removed`);
+}
+
+// ---- Codex over its daemon ----
+
+// The shared daemon, or a chat's own server with CODEX_SOCK=<socket> (see `chat`).
+const rpc = async (s) => {
+  const sock = process.env.CODEX_SOCK || controlSocket(join(SB, 'home', '.codex'));
+  if (!existsSync(sock) && !process.env.CODEX_SOCK) sh(s, 'codex', ['app-server', 'daemon', 'start']);
+  return connect({ socket: sock });
+};
+const text = (t) => [{ type: 'text', text: t, text_elements: [] }];
+const statusOf = (st) => (!st ? '?' : st.type === 'active' ? `active${st.activeFlags?.length ? `[${st.activeFlags.join(',')}]` : ''}` : st.type);
+
+async function task(argv) {
+  const o = flags(argv, { name: 'value', sandbox: 'value', approval: 'value', dev: 'value', model: 'value', reviewer: 'value', config: 'list', effort: 'value' });
+  const [folder, ...words] = o._;
+  if (!folder || !words.length) die('usage: task <folder> <brief…>');
+  const s = state();
+  const cwd = existsSync(folder) ? realpathSync(folder) : join(SB, 'home', 'projects', folder);
+  if (!existsSync(cwd)) die(`no folder ${cwd}`);
+  const c = await rpc(s);
+  const params = { cwd, sandbox: o.sandbox || 'workspace-write', approvalPolicy: o.approval || 'on-request' };
+  if (o.dev) params.developerInstructions = o.dev;
+  if (o.model) params.model = o.model;
+  if (o.reviewer) params.approvalsReviewer = o.reviewer;
+  if (o.config) params.config = Object.fromEntries(o.config.map((kv) => { const i = kv.indexOf('='); let v = kv.slice(i + 1); try { v = JSON.parse(v); } catch { /* a plain string */ } return [kv.slice(0, i), v]; }));
+  const { thread } = await c.call('thread/start', params);
+  if (o.name) await c.call('thread/name/set', { threadId: thread.id, name: o.name });
+  await c.call('turn/start', { threadId: thread.id, input: text(words.join(' ')), ...(o.effort ? { effort: o.effort } : {}) });
+  console.log(thread.id);
+  c.close();
+}
+
+async function send(argv) {
+  const [id, ...words] = argv;
+  if (!id || !words.length) die('usage: send <thread> <text…>');
+  const c = await rpc(state());
+  let { thread } = await c.call('thread/read', { threadId: id });
+  if (thread.status?.type === 'notLoaded') ({ thread } = await c.call('thread/resume', { threadId: id }));
+  if (thread.status?.type === 'active') { await c.call('thread/queue/add', { threadId: id, clientUserMessageId: randomUUID(), input: text(words.join(' ')) }); console.log('queued'); }
+  else { await c.call('turn/start', { threadId: id, input: text(words.join(' ')) }); console.log('started a turn'); }
+  c.close();
+}
+
+async function status(argv) {
+  const c = await rpc(state());
+  if (argv[0]) {
+    const { thread } = await c.call('thread/read', { threadId: argv[0] });
+    console.log(`${statusOf(thread.status)}\t${thread.name ?? ''}\t${thread.cwd ?? ''}`);
+  } else {
+    const r = await c.call('thread/list', {});
+    for (const t of r.data ?? []) console.log(`${t.id}\t${statusOf(t.status)}\t${t.name ?? t.preview?.slice(0, 40) ?? ''}`);
+  }
+  c.close();
+}
+
+function sessionFile(id) {
+  const root = join(SB, 'home', '.codex', 'sessions');
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : e.name.includes(id) ? [join(d, e.name)] : []));
+  return existsSync(root) ? walk(root)[0] : null;
+}
+
+function last(argv) {
+  const f = sessionFile(argv[0] ?? die('usage: last <thread>'));
+  if (!f) die('no session file yet');
+  const lines = readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const ev = lines.filter((l) => l.type === 'event_msg').map((l) => l.payload);
+  const done = ev.filter((p) => p.type === 'task_complete');
+  const usage = ev.filter((p) => p.type === 'token_count' && p.info).at(-1)?.info;
+  console.log(JSON.stringify({
+    file: f, turns_started: ev.filter((p) => p.type === 'task_started').length, turns_complete: done.length,
+    aborted: ev.filter((p) => p.type === 'turn_aborted').length,
+    last: done.at(-1)?.last_agent_message ?? null,
+    total_tokens: usage?.total_token_usage ?? null,
+    rate_limits: ev.filter((p) => p.type === 'token_count').at(-1)?.rate_limits ?? null,
+  }, null, 2));
+}
+
+async function follow(argv) {
+  const o = flags(argv, { approve: 'value', timeout: 'value', events: 'bool' });
+  const id = o._[0] ?? die('usage: follow <thread>');
+  const c = await rpc(state());
+  const t0 = Date.now();
+  const stamp = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+  let finish;
+  const finished = new Promise((r) => (finish = r));
+  c.on((m) => {
+    const p = m.params ?? {};
+    if (m.id != null && m.method) {
+      console.log(`${stamp()} REQUEST ${m.method} ${JSON.stringify(p).slice(0, 600)}`);
+      if (o.approve && /requestApproval|Approval$/.test(m.method)) {
+        c.respond(m.id, { decision: o.approve });
+        console.log(`${stamp()} answered ${o.approve}`);
+      }
+      return;
+    }
+    if (p.threadId && p.threadId !== id) return;
+    if (m.method === 'thread/status/changed') {
+      console.log(`${stamp()} status ${statusOf(p.status)}`);
+      if (p.status?.type === 'idle') finish();
+    } else if (m.method === 'item/completed' && p.item) {
+      const it = p.item;
+      if (it.type === 'agentMessage') console.log(`${stamp()} said: ${it.text}`);
+      else if (it.type === 'commandExecution') console.log(`${stamp()} ran: ${it.command} → ${it.status} (exit ${it.exitCode})`);
+      else if (o.events) console.log(`${stamp()} item ${it.type}`);
+    } else if (m.method === 'turn/completed') console.log(`${stamp()} turn ${p.turn?.status ?? 'completed'}${p.turn?.error ? ` ${JSON.stringify(p.turn.error)}` : ''}`);
+    else if (o.events && m.method && !/delta|mcpServer/.test(m.method)) console.log(`${stamp()} ${m.method} ${JSON.stringify(p).slice(0, 300)}`);
+  });
+  // thread/resume subscribes this connection to the thread (and loads it), also mid-turn.
+  const { thread } = await c.call('thread/resume', { threadId: id });
+  console.log(`${stamp()} status ${statusOf(thread.status)}`);
+  if (thread.status?.type === 'idle') finish();
+  const limit = Number(o.timeout || 600) * 1000;
+  await Promise.race([finished, new Promise((r) => setTimeout(r, limit).unref())]);
+  if (Date.now() - t0 >= limit) console.log(`${stamp()} timed out`);
+  c.close();
+  last([id]);
+}
+
+// A Codex chat as §4 of docs/harnesses.md has it: its own app-server (with the chat's instructions and hook as -c
+// settings, never the user's config) in a herdr-core terminal, and the TUI attached to it in another.
+function chat(argv) {
+  const o = flags(argv, { dev: 'value', hook: 'value', cwd: 'value', resume: 'value' });
+  const name = o._[0] ?? die('usage: chat <name> [--dev <text>] [--hook <command>] [--cwd <folder>] [--resume <thread>]');
+  const s = state();
+  const sock = join(SB, `chat-${name}.sock`);
+  const cwd = o.cwd || join(SB, 'home', 'projects');
+  rmSync(sock, { force: true });
+  const toml = (v) => JSON.stringify(v);
+  const server = ['codex', 'app-server', '--listen', `unix://${sock}`];
+  if (o.dev) server.push('-c', `developer_instructions=${toml(o.dev)}`);
+  if (o.hook) server.push('-c', `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${toml(o.hook)},timeout=10}]}]`);
+  const hc = (...a) => sh(s, 'hc', a);
+  hc('run', '--bg', '--json', '--no-parent', '--name', `chat-${name}-server`, '--cwd', cwd, '--', ...server);
+  for (let i = 0; i < 30 && !existsSync(sock); i++) spawnSync('sleep', ['0.5']);
+  if (!existsSync(sock)) die(`the chat's server didn't start; see \`dev/sandbox run hc read chat-${name}-server\``);
+  hc('run', '--bg', '--json', '--no-parent', '--name', `chat-${name}`, '--cwd', cwd, '--', 'codex', '--remote', `unix://${sock}`, ...(o.resume ? ['resume', o.resume] : []));
+  console.log(`terminal chat-${name} (server chat-${name}-server), socket ${sock}\n  CODEX_SOCK=${sock} dev/sandbox status|send|follow …`);
+}
+
+async function raw(argv) {
+  const c = await rpc(state());
+  console.log(JSON.stringify(await c.call(argv[0], argv[1] ? JSON.parse(argv[1]) : {}), null, 2));
+  c.close();
+}
+
+function repo(argv) {
+  const o = flags(argv, { agents: 'value', claude: 'value', file: 'list', untrusted: 'bool' });
+  const name = o._[0] ?? die('usage: repo <name>');
+  const s = state();
+  // --untrusted: outside the projects folder, which `up` marks trusted for Codex and Claude Code.
+  const dir = join(SB, 'home', o.untrusted ? 'untrusted' : 'projects', name);
+  mkdirSync(dir, { recursive: true });
+  if (o.agents) writeFileSync(join(dir, 'AGENTS.md'), `${o.agents}\n`);
+  if (o.claude) writeFileSync(join(dir, 'CLAUDE.md'), `${o.claude}\n`);
+  for (const f of o.file ?? []) { const i = f.indexOf('='); mkdirSync(dirname(join(dir, f.slice(0, i))), { recursive: true }); writeFileSync(join(dir, f.slice(0, i)), `${f.slice(i + 1)}\n`); }
+  if (!existsSync(join(dir, 'README.md'))) writeFileSync(join(dir, 'README.md'), `# ${name}\n`);
+  const g = (...a) => sh(s, 'git', a, { cwd: dir });
+  g('init', '-q'); g('add', '-A'); g('-c', 'user.name=Sandbox', '-c', 'user.email=sandbox@example.com', 'commit', '-qm', 'init');
+  console.log(dir);
+}
+
+// ---- The sandbox window ----
+
+function front() {
+  const s = state();
+  if (!s.appPid) die('no sandbox Herdr window (start with `up --app`)');
+  const js = `ObjC.import('AppKit'); ObjC.import('CoreGraphics');
+    const app = $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    const wins = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0)));
+    const w = wins.find((x) => x.kCGWindowLayer === 0);
+    JSON.stringify({ app, win: w ? w.kCGWindowOwnerPID : null, bounds: w ? w.kCGWindowBounds : null })`;
+  const r = JSON.parse(spawnSync('osascript', ['-l', 'JavaScript', '-e', js], { encoding: 'utf8' }).stdout || '{}');
+  const ok = r.app === s.appPid && r.win === s.appPid;
+  return { ok, ...r, sandbox: s.appPid };
+}
+
+function input(kind, args) {
+  const f = front();
+  if (!f.ok) die(`refused: the frontmost window isn't the sandbox (front app ${f.app}, top window ${f.win}, sandbox ${f.sandbox}). Bring the sandbox window forward yourself and try again.`);
+  const js = kind === 'click'
+    ? `ObjC.import('CoreGraphics'); const p = $.CGPointMake(${Number(args[0])}, ${Number(args[1])});
+       for (const t of [$.kCGEventLeftMouseDown, $.kCGEventLeftMouseUp]) $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateMouseEvent(null, t, p, $.kCGMouseButtonLeft)); 'ok'`
+    : `Application('System Events').keystroke(${JSON.stringify(args.join(' '))}); 'ok'`;
+  const r = spawnSync('osascript', ['-l', 'JavaScript', '-e', js], { encoding: 'utf8' });
+  if (r.status !== 0) die(r.stderr.trim());
+  console.log(r.stdout.trim());
+}
+
+const [cmd, ...rest] = process.argv.slice(2);
+const commands = {
+  up: () => up(rest),
+  down,
+  env: () => { const e = env(); for (const k of ['HOME', 'HERDR_APP_HOME', 'CODEX_HOME', 'CHANNELS_MACHINE', 'HC_SANDBOX', 'PATH', ...(e.MOCK_KEY ? ['MOCK_KEY'] : [])]) console.log(`export ${k}='${e[k]}'`); },
+  run: () => { const r = spawnSync(rest[0], rest.slice(1), { env: env(), cwd: process.env.SBCWD || join(SB, 'home'), stdio: 'inherit' }); process.exit(r.status ?? 1); },
+  repo: () => repo(rest),
+  task: () => task(rest),
+  send: () => send(rest),
+  status: () => status(rest),
+  follow: () => follow(rest),
+  last: () => last(rest),
+  usage: () => raw(['account/rateLimits/read']),
+  rpc: () => raw(rest),
+  chat: () => chat(rest),
+  front: () => { const f = front(); console.log(JSON.stringify(f)); process.exit(f.ok ? 0 : 1); },
+  click: () => input('click', rest),
+  type: () => input('type', rest),
+  shot: () => { const out = resolve(rest[0] || join(SB, 'shot.png')); const r = sh(state(), 'herdr-app', ['shot', out], { stdio: 'inherit' }); if (r.status === 0) console.log(out); process.exit(r.status ?? 1); },
+};
+if (!commands[cmd]) { console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1).filter((l, i, a) => a.slice(0, i + 1).every((x) => x.startsWith('//'))).map((l) => l.replace(/^\/\/ ?/, '')).join('\n')); process.exit(cmd ? 1 : 0); }
+Promise.resolve(commands[cmd]()).catch((e) => die(e.message));
