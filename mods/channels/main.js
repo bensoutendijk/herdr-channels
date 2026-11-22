@@ -92,14 +92,22 @@ const openRemote = async (task) => {
 // claude.ai.
 const isCloud = (task) => task?.machine === "cloud";
 const cloudAttach = () => shared(DATA)?.cloud?.attach === true;
+// Harnesses (the store's "harnesses" feature): a task can run on Claude Code or another coding agent (Codex). The
+// list says which harnesses are on and installed, and gives each task not on Claude Code its harness, standing and
+// caps (what it offers). What a task's harness lacks is hidden for that task, from its caps.
+const harnessesOn = () => (has("harnesses") ? (shared(DATA)?.harnesses ?? []).filter((h) => h.on && h.installed) : []);
+const harnessLabel = (id) => (shared(DATA)?.harnesses ?? []).find((h) => h.id === id)?.label ?? id;
+const isOther = (task) => Boolean(task?.harness) && task.harness !== "claude";
+const capsOf = (task) => (isOther(task) ? task.caps ?? {} : { rename: true });
+const canRename = (task) => has("rename-task") && Boolean(task) && capsOf(task).rename !== false;
 const NOTE = K("note"); // a word after something done here: { message, at }
 const note = (message) => setShared(NOTE, { message, at: Date.now() });
 const BACK = "herdr.back";
 let viewerSource = null;
-async function attachTo(id) {
+async function attachTo(id, argv = []) {
   viewerSource ??= await readTextFile(`${appHome()}/mods/${MOD}/viewer.py`);
   if (!viewerSource) throw new Error(`mods/${MOD}/viewer.py is missing.`);
-  return ["python3", "-I", "-c", viewerSource, id];
+  return ["python3", "-I", "-c", viewerSource, id, ...argv];
 }
 const POLL_MS = 10000;
 const ROW = 40; // a channel row's height in the sidebar
@@ -217,6 +225,8 @@ async function readStore() {
     for (const t of c.tasks ?? []) {
       // A cloud task's state comes from the account's sessions list, through `channels list`.
       if (isCloud(t)) { t.standing = t.cloud?.state ?? "ready"; continue; }
+      // A task on another harness (Codex): its name and standing come from `channels list`, which asks that harness.
+      if (isOther(t)) { t.standing = B.standingOf(null, t.standing); continue; }
       const a = B.agentOf(t, indexes, fallback);
       // A copy keeps its task's name, and so does a session renamed here that Claude Code can't rename (see
       // `channels rename-task`): the list's name stands for those.
@@ -224,7 +234,7 @@ async function readStore() {
       t.standing = B.standingOf(a ? standing(a) : null, t.standing);
     }
   }
-  return { machine: head.machine ?? null, features: B.featuresOf(head), remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, timer: head.timer ?? null, channels };
+  return { machine: head.machine ?? null, features: B.featuresOf(head), remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, timer: head.timer ?? null, harnesses: Array.isArray(head.harnesses) ? head.harnesses : null, channels };
 }
 
 // Refresh: the running chats restart on what is installed now (a newer Claude Code, a new herdr-channels build), each
@@ -425,6 +435,7 @@ const showTasks = ({ remember: keep = true } = {}) => {
 // background sessions (a plain `claude`, no job) is resumed.
 async function openTask(task, where) {
   if (isCloud(task)) return openCloud(task, where);
+  if (isOther(task)) return openOther(task, where);
   const machine = herdrMachine(task);
   if (machine === undefined) throw new Error(`${task.machine} can't be reached from this computer.`);
   let address = findTerm(task, machine);
@@ -456,6 +467,43 @@ async function openCloud(task, where) {
     address = JSON.parse(r.stdout).address;
   }
   showInPanel(task, address, where);
+}
+
+// A Codex task: `codex resume <thread>` through the viewer, which attaches to the thread in Codex's own service (mid-turn
+// too); leaving it leaves the task running. A task Codex runs in a terminal of its own (terminal mode) shows that
+// terminal.
+async function openOther(task, where) {
+  const machine = herdrMachine(task);
+  if (machine === undefined) throw new Error(`${task.machine} can't be reached from this computer.`);
+  const own = task.codex?.mode === "terminal" ? task.codex.terminal : null;
+  if (own && terminals().some((x) => x.address === own && x.state === "live")) return showInPanel(task, own, where);
+  let address = findTerm(task, machine);
+  if (!address) {
+    const cmd = await attachTo(task.session_id, ["codex", "resume", task.session_id]);
+    const folder = task.folder ?? (machine ? PROJECTS : LOCAL_PROJECTS);
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", termName(task), "--cwd", folder, ...(machine ? ["--on", machine] : []),
+      "--", "sh", "-c", machine ? 'PATH="$HOME/.local/bin:$0:$PATH" exec "$@"' : 'PATH="$0:$PATH" exec "$@"', PATHS, ...cmd]);
+    if (r.code !== 0) throw new Error((r.stderr.trim() || r.stdout.trim() || `hc exited ${r.code}`).split("\n").pop());
+    address = JSON.parse(r.stdout).address;
+  }
+  showInPanel(task, address, where);
+}
+
+// A fresh session, from the tasks panel's New session menu (more than one harness): carried out by the sidebar, which
+// outlives the menu. Claude Code: `claude --bg` with no prompt, opened, then filed (as the panel's + does with only
+// Claude Code). Codex: an empty thread in Codex's service, filed, then opened, so you type its first message there.
+async function freshSession(channel, harness) {
+  const where = { channel: channels().find((c) => c.name === channel) ?? { name: channel } };
+  if (harness === "claude") {
+    const out = await store(`cd "$1" && claude --bg${remoteOn() ? " --remote-control" : ""} 2>&1`, [PROJECTS], 60000);
+    const job = out.match(/claude attach (\S+)/)?.[1] ?? null;
+    if (!job) throw new Error(out.trim().split("\n").pop() || "claude --bg gave no session");
+    await openTask({ id: `pending/${job}`, machine: storeName(), session_id: uuid(), job, name: FRESH, folder: PROJECTS }, where);
+    await store('channels file "$1" "$2" --name "$3" --folder "$4"', [channel, job, FRESH, PROJECTS]);
+    return;
+  }
+  const t = JSON.parse(await store('channels start "$1" --harness "$2" --empty --name "$3" --json', [channel, harness, FRESH], 90000));
+  await openTask({ ...t, id: `${t.machine}/${t.session_id}`, caps: { rename: true } }, where);
 }
 
 // A task card's Open: the chat's cards mod runs `channels open <task>`, which leaves the task in the store and sends
@@ -706,7 +754,7 @@ const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog])
 // like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
 // The menu's items above its line (Rename, Send, Open on claude.ai) and below it (Resolve), as render_taskmenu draws them.
-const menuTop = (task) => (has("rename-task") ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
+const menuTop = (task) => (canRename(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
 const menuItems = (task) => menuTop(task) + (task.dismissed ? 0 : 1);
 const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: 10 + 34 * menuItems(task) + (menuTop(task) && !task.dismissed ? 9 : 0), props: { taskmenu: task.id } });
 const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
@@ -812,7 +860,7 @@ function lastRun(r, t) {
 export default class Channels extends View {
   init(_props, cx) {
     const p = props() ?? {};
-    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.taskmenu ? "taskmenu" : p.head ? "head" : p.foot ? "foot" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
+    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.taskmenu ? "taskmenu" : p.newmenu ? "newmenu" : p.harnessmenu ? "harnessmenu" : p.head ? "head" : p.foot ? "foot" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
     this.hover = null;
     this.drag = null; // the channel row being held, see dragMove
     this.handle = cx.focus_handle();
@@ -941,7 +989,7 @@ export default class Channels extends View {
       const started = Date.now();
       let next;
       try { next = { ...(await readStore()), error: null, at: Date.now() }; }
-      catch (err) { next = { machine: shared(DATA)?.machine ?? null, features: shared(DATA)?.features, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, updates: shared(DATA)?.updates ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
+      catch (err) { next = { machine: shared(DATA)?.machine ?? null, features: shared(DATA)?.features, remote: shared(DATA)?.remote ?? false, cloud: shared(DATA)?.cloud ?? null, updates: shared(DATA)?.updates ?? null, harnesses: shared(DATA)?.harnesses ?? null, channels: shared(DATA)?.channels ?? [], error: String(err?.message ?? err), at: Date.now() }; }
       // Something changed here while this read was out: what it brought back is older.
       if (shared(BUSY) || (shared(OP_AT) ?? 0) > started) return;
       setShared(DATA, next);
@@ -960,7 +1008,7 @@ export default class Channels extends View {
         if (!op) break;
         setShared(OPS, rest);
         if (Date.now() - op.at > 60000) continue;
-        try { await store(op.script, op.args); }
+        try { if (op.fresh) await freshSession(op.fresh.channel, op.fresh.harness); else await store(op.script, op.args); }
         catch (err) { fail(`Couldn't ${op.what}: ${String(err?.message ?? err)}`); }
       }
       this.draining = false;
@@ -1051,7 +1099,7 @@ export default class Channels extends View {
     const t = theme();
     const data = shared(DATA);
     const here = current();
-    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: 200, height: has("routines") ? 190 : 156, props: { menu: c.name } });
+    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: harnessesOn().length > 1 ? 230 : 200, height: (has("routines") ? 190 : 156) + (harnessesOn().length > 1 ? 34 : 0), props: { menu: c.name } });
     const list = channels();
     const drag = this.drag?.moved ? this.drag : null;
     const fresh = new Set(this.knownChannels ? list.filter((c) => !this.knownChannels.has(c.name)).map((c) => c.name) : []);
@@ -1325,6 +1373,8 @@ export default class Channels extends View {
     const needs = active.filter((x) => x.standing === "needs");
     const working = active.filter((x) => x.standing === "working");
     const ready = active.filter((x) => x.standing !== "needs" && x.standing !== "working");
+    // The harness mark shows only in a channel with tasks on more than one harness, so a Claude Code-only one looks as before.
+    const mixed = new Set(active.map((x) => (isOther(x) ? x.harness : "claude"))).size > 1;
     const groups = this.tab === "active"
       ? [["Needs input", "needs", needs], ["Working", "working", working], ["Ready for review", "ready", ready]].filter((g) => g[2].length)
       : [[null, "resolved", resolved]].filter((g) => g[2].length);
@@ -1375,6 +1425,7 @@ export default class Channels extends View {
         .child(div().w(28).h(28).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().child(mark[unknown ? "unknown" : kind]()))
         .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(reachable && !unknown ? t.foreground : t.dim).when(unread, (el) => el.font_medium()).child(task.name || shortId(task)))
         .when(Boolean(cloud), (el) => el.child(svg(ICON("cloud")).size(13).flex_none().text_color(t.dim)))
+        .when(mixed && isOther(task), (el) => el.child(div().flex_none().tooltip(`${harnessLabel(task.harness)} task`).child(svg(ICON("square-terminal")).size(13).text_color(t.dim))))
         // A task with an event not seen yet (it finished, or asked something, since it was last opened) has a dot.
         .when(unread, (el) => el.child(div().id(`tk-new-${task.id}`).w(8).h(8).flex_none().rounded(4).bg(t.accent)))
         .child(div().flex_none().text_size(12).text_color(t.dim).child(right))
@@ -1400,7 +1451,9 @@ export default class Channels extends View {
         .transition("left", 200).transition("opacity", 160).text_color(t.foreground)
         .child(h_flex().pl(16).pr(8).h(HEAD).flex_none().gap(4).items_center().border_b(1).border_color(t.border)
           .child(div().flex_1().min_w(0).truncate().text_size(14).font_medium().child(here ? `Tasks in #${here.name}` : "Tasks"))
-          .when(Boolean(here), (el) => el.child(this.tool("tp-new", svg(ICON("plus")).size(16), (_e, cx) => this.startFresh(here.name, cx), t)))
+          .when(Boolean(here), (el) => el.child(this.tool("tp-new", svg(ICON("plus")).size(16), (_e, cx) => (harnessesOn().length > 1
+            ? openOverlay({ mod: MOD, kind: "popup", width: 240, height: 10 + 36 * harnessesOn().length, props: { newmenu: here.name } })
+            : this.startFresh(here.name, cx)), t)))
           .child(this.tool("tp-close", svg(ICON("x")).size(16), () => run("layout.hide", { id: TASKS_PANEL }), t)))
         .child(h_flex().px(8).pt(10).pb(4).flex_none().gap(2).child(pill("active", "Active")).child(pill("resolved", "Resolved")))
         .when(Boolean(this.failed), (el) => el.child(div().px(16).py(4).text_size(12).text_color(t.blocked).child(this.failed)))
@@ -1430,13 +1483,14 @@ export default class Channels extends View {
         .transition("left", 200).transition("opacity", 160).px(8).gap(8).items_center().text_color(t.foreground)
         .child(this.tool("th-back", svg(ICON("chevron-left")).size(16), () => showTasks(), t))
         .child(v_flex().flex_1().min_w(0).gap(2)
-          .child(div().id("th-name").truncate().text_size(14).font_medium().when(Boolean(task) && has("rename-task"), (el) => el.cursor_pointer()
+          .child(div().id("th-name").truncate().text_size(14).font_medium().when(canRename(task), (el) => el.cursor_pointer()
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => renameTask(task))).child(task?.name || FRESH))
           .child(h_flex().gap(8).items_center().text_size(12.5)
             .child(div().text_color(color).child(label))
+            .when(isOther(task), (el) => el.child(div().flex_none().text_color(t.dim).child(`${harnessLabel(task.harness)}${task.codex?.sandbox ? ` · ${task.codex.sandbox}` : ""}${task.codex?.mode === "terminal" ? " · in a terminal" : ""}`)))
             .child(this.where(task?.machine ?? storeName(), t))))
         .when(Boolean(remoteLink(task)), (el) => el.child(this.tool("th-remote", svg(ICON("external-link")).size(15), () => { openRemote(task); }, t)))
-        .when(Boolean(task) && has("rename-task"), (el) => el.child(this.tool("th-rename", svg(ICON("square-pen")).size(15), () => renameTask(task), t)))
+        .when(canRename(task), (el) => el.child(this.tool("th-rename", svg(ICON("square-pen")).size(15), () => renameTask(task), t)))
         .when(Boolean(task) && !task.dismissed, (el) => el.child(this.tool("th-done", svg(ICON("check")).size(15), resolve, t)))
         .child(this.tool("th-close", svg(ICON("x")).size(16), () => { showTasks(); run("layout.hide", { id: TASKS_PANEL }); }, t)));
   }
@@ -1454,9 +1508,49 @@ export default class Channels extends View {
       .child(item("rename", "square-pen", "Rename", "rename"))
       .child(item("instructions", "file-text", "Instructions", "instructions"))
       .when(has("routines"), (el) => el.child(item("routines", "clock", "Routines", "routines")))
+      // The harness the channel's tasks start on, when more than one is on here.
+      .when(harnessesOn().length > 1, (el) => el.child(h_flex().id("mn-harness").mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
+        .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
+        .on_click(() => { closeOverlay(p.overlay); openOverlay({ mod: MOD, kind: "popup", width: 260, height: 32 + 34 * harnessesOn().length, props: { harnessmenu: p.menu } }); })
+        .child(svg(ICON("square-terminal")).size(15)).child(div().flex_1().child("Tasks run on"))
+        .child(div().text_color(t.dim).child(`${harnessLabel(channels().find((c) => c.name === p.menu)?.harness?.tasks ?? "claude")} ›`))))
       .child(item("icon", "layers", "Change icon", "icon"))
       .child(div().mx(8).my(4).h(1).bg(t.border))
       .child(item("archive", "archive", "Archive", "archive"));
+  }
+
+  // ---------- the tasks panel's New session menu: one item per harness ----------
+
+  render_newmenu() {
+    const t = theme();
+    const p = props();
+    const item = (h) => h_flex().id(`nm-${h.id}`).mx(4).px(10).h(36).gap(10).items_center().rounded(6).cursor_pointer()
+      .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
+      .on_click(() => {
+        closeOverlay(p.overlay);
+        setShared(OPS, [...(shared(OPS) ?? []), { fresh: { channel: p.newmenu, harness: h.id }, what: `start a ${h.label} session in ${p.newmenu}`, at: Date.now() }]);
+      })
+      .child(svg(ICON(h.id === "claude" ? "plus" : "square-terminal")).size(15)).child(`New ${h.label} session`);
+    return v_flex().size_full().py(4).bg(t.popover).children(harnessesOn().map(item));
+  }
+
+  // ---------- the channel's "Tasks run on" choice ----------
+
+  render_harnessmenu() {
+    const t = theme();
+    const p = props();
+    const now = channels().find((c) => c.name === p.harnessmenu)?.harness?.tasks ?? "claude";
+    const item = (h) => h_flex().id(`hm-${h.id}`).mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
+      .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
+      .on_click(() => {
+        closeOverlay(p.overlay);
+        if (h.id === now) return;
+        submit((all) => { for (const c of all) if (c.name === p.harnessmenu) c.harness = { ...(c.harness ?? {}), tasks: h.id }; },
+          'channels harness "$1" --tasks "$2"', [p.harnessmenu, h.id], `make ${h.label} the default for ${p.harnessmenu}'s tasks`);
+      })
+      .child(div().w(15).flex_none().when(h.id === now, (el) => el.child(svg(ICON("check")).size(15)))).child(h.label);
+    return v_flex().size_full().py(4).bg(t.popover).children(harnessesOn().map(item))
+      .child(div().mx(14).mt(2).text_size(11.5).text_color(t.dim).child("For tasks the chat starts. You can still ask for the other one."));
   }
 
   // ---------- a task's menu ----------
@@ -1470,7 +1564,7 @@ export default class Channels extends View {
       .on_click(() => { closeOverlay(p.overlay); action(); })
       .child(svg(ICON(icon)).size(15)).child(label);
     return v_flex().size_full().py(4).bg(t.popover)
-      .when(has("rename-task"), (el) => el.child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); })))
+      .when(canRename(task), (el) => el.child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); })))
       .when(isCloud(task) && !task?.dismissed, (el) => el.child(item("send", "send", "Send message…", () => sendTask(task))))
       .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
       .when(Boolean(task) && !task.dismissed, (el) => el

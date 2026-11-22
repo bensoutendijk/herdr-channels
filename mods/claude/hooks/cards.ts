@@ -7,9 +7,10 @@ type Entry = {
   kind?: unknown
   at?: unknown
   text?: unknown
-  card?: { state?: unknown; waiting?: unknown; message?: unknown; options?: unknown } | null
+  card?: { state?: unknown; waiting?: unknown; message?: unknown; options?: unknown; command?: unknown; reason?: unknown } | null
   remote?: unknown
   cloud?: unknown
+  label?: unknown
 }
 
 // A claude.ai/code session link, and nothing else, is one a card opens.
@@ -36,7 +37,7 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
     if (!task || e.kind !== 'needs') continue
     const c = e.card ?? {}
     const text = str(e.text) ?? ''
-    const state = c.state === 'question' || c.state === 'prompt' ? c.state : /shows a prompt/.test(text) ? 'prompt' : 'question'
+    const state = c.state === 'question' || c.state === 'prompt' || c.state === 'approval' ? c.state : /shows a prompt/.test(text) ? 'prompt' : 'question'
     const options = Array.isArray(c.options) ? c.options.filter((o): o is string => typeof o === 'string' && o.trim() !== '') : []
     out.push({
       task,
@@ -48,6 +49,9 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
       options: state === 'question' ? [...new Set(options)] : [],
       remote: remoteOf(e.remote),
       cloud: e.cloud === true || task.startsWith('cloud/'),
+      harness: str(e.label),
+      command: state === 'approval' ? str(c.command) : null,
+      reason: state === 'approval' ? str(c.reason) : null,
     })
   }
   // Oldest first.

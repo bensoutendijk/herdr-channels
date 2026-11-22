@@ -574,13 +574,16 @@ function projectNames(projects) {
 
 // A background session for a task: `claude --bg` in the projects folder, or in one project under it. The brief is
 // its first message, and all it gets.
-async function start({ dir, deps, name, repo, title, model, mode = null, brief, wake = null, cloud = false, harness = null }) {
+async function start({ dir, deps, name, repo, title, model, mode = null, brief, wake = null, cloud = false, harness = null, empty = false }) {
   const ch = channelOf(readStore(dir), name);
-  if (!brief.trim()) fail('A task needs a brief: what the session should do.');
+  if (!brief.trim() && !empty) fail('A task needs a brief: what the session should do.');
+  if (empty && brief.trim()) fail('--empty starts a session with no brief: leave the brief out.');
   // The harness: the one asked for, else the channel's default for tasks, else Claude Code.
   const h = harnessNamed(harness ?? (cloud ? DEFAULT_HARNESS : channelHarness(ch)));
   if (cloud && !h.caps.cloud) fail(`${h.label} has no cloud tasks: --cloud starts a Claude Code cloud session. Leave out --harness ${h.id}, or --cloud.`);
   if (cloud) return startCloud({ dir, deps, name, repo, title, model, brief, wake });
+  // An empty session (the panel's New session) is one you type the first message into, in the panel.
+  if (empty && !h.startEmpty) fail(`${h.label} sessions with no brief start from the tasks panel (+), not here.`);
   // Claude Code tasks start in the permission mode the install gives (CHANNELS_PERMISSION_MODE, else auto); a task on
   // another harness in that harness's own default.
   if (mode == null && h.id === DEFAULT_HARNESS) mode = process.env.CHANNELS_PERMISSION_MODE ?? 'auto';
@@ -591,8 +594,8 @@ async function start({ dir, deps, name, repo, title, model, mode = null, brief, 
   h.checkStart?.({ mode });
   const cwd = repo ? join(deps.projects, repo) : deps.projects;
   if (!existsSync(cwd)) fail(`The projects folder ${cwd} doesn't exist. Make it, or set CHANNELS_PROJECTS.`);
-  const label = cut(oneLine(title || brief), 60);
-  const made = await h.start({ deps, cwd, brief, name: label, model, mode });
+  const label = cut(oneLine(title || brief || 'New session'), 60);
+  const made = empty ? await h.startEmpty({ deps, cwd, name: label, model, mode }) : await h.start({ deps, cwd, brief, name: label, model, mode });
   const task = {
     machine: LOCAL, session_id: made.session_id, job: made.job, ...(h.id === DEFAULT_HARNESS ? {} : { harness: h.id, [h.id]: made[h.id] ?? null }),
     name: label, repo: repo ?? null, folder: cwd,
@@ -2236,7 +2239,7 @@ export function parseArgs(args) {
   const pos = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--on' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check' || a === '--status') opts[a.slice(2)] = true;
+    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--on' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check' || a === '--status' || a === '--empty') opts[a.slice(2)] = true;
     else if (a === '--dry-run') opts.dryRun = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
@@ -2536,11 +2539,12 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       return 0;
     }
     if (sub === 'start') {
-      if (pos.length < 2) fail('channels start <channel> [--harness claude|codex] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] <brief | ->');
+      if (pos.length < (opts.empty ? 1 : 2)) fail('channels start <channel> [--harness claude|codex] [--empty] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] <brief | ->');
       const name = channelName(pos[0]);
       const brief = pos.length === 2 && pos[1] === '-' ? readStdin() : pos.slice(1).join(' ');
+      const empty = Boolean(opts.empty);
       const wake = opts.wakeOn == null ? null : wakeOn(opts.wakeOn);
-      const t = await start({ dir, deps, name, repo: opts.repo, title: opts.name, model: opts.model, mode: opts.permissionMode ?? null, brief, wake: wake === 'none' ? null : wake, cloud: Boolean(opts.cloud), harness: opts.harness ?? null });
+      const t = await start({ dir, deps, name, repo: opts.repo, title: opts.name, model: opts.model, mode: opts.permissionMode ?? null, brief, wake: wake === 'none' ? null : wake, cloud: Boolean(opts.cloud), harness: opts.harness ?? null, empty });
       if (opts.json) console.log(JSON.stringify({ channel: name, ...t }));
       else if (isCloud(t)) console.log(`Started ${taskRef(t)} in #${name} (${t.repo}, from ${t.cloud.branch || 'its branch'} on GitHub): ${t.name}${t.wake ? `. The chat is woken on its next ${t.wake.on === 'any' ? 'event' : t.wake.on}.` : ''}\nOn claude.ai: ${t.cloud.url}`);
       else {

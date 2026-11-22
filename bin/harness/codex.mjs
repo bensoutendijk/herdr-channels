@@ -251,6 +251,22 @@ function firstLine(file) {
   } catch { return null; }
 }
 
+// An empty task (the panel's New Codex session): the thread with its settings and name, and no turn; you type its first
+// message in its view in the panel (`codex resume`). Only over the service: a terminal would need a first message.
+export async function startEmpty({ deps, cwd, name, model = null, mode = null }) {
+  checkStart({ mode });
+  const m = modeOf(mode);
+  const c = await service(deps).catch((err) => fail(`Codex's service can't be reached (${cut(oneLine(err.message), 160)}): start a Codex session in a terminal instead.`));
+  try {
+    const thread = await rpc.startThread(c, {
+      cwd, sandbox: m.sandbox, approvalPolicy: m.approval, ...(m.reviewer ? { approvalsReviewer: m.reviewer } : {}), ...(model ? { model } : {}),
+      developerInstructions: QUESTION_RULE, config: { project_doc_fallback_filenames: ['CLAUDE.md'] },
+    });
+    await rpc.setThreadName(c, thread.id, name);
+    return { session_id: thread.id, job: null, codex: { mode: 'service', sandbox: m.sandbox, approval: m.approval, model: model ?? null } };
+  } finally { c.close(); }
+}
+
 // ---------- looking ----------
 
 // One look's shared state: a client of the daemon, opened on the first look at a task that needs it and closed by
@@ -496,4 +512,4 @@ export async function rename({ deps, task, name }) {
 // task in terminal mode is shown in its own terminal (`terminal`).
 export const openArgv = (t) => (t.codex?.mode === 'terminal' ? { terminal: t.codex.terminal } : { argv: ['codex', 'resume', t.session_id] });
 
-export default { id, label, caps, taskCaps, installed, checkStart, start, scan, look, withLast, row, find, read, send, approve, rename, openArgv, approvalCard };
+export default { id, label, caps, taskCaps, installed, checkStart, start, startEmpty, scan, look, withLast, row, find, read, send, approve, rename, openArgv, approvalCard };
