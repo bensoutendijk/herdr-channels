@@ -55,7 +55,7 @@ test('a task opens on the machine it runs on, or nowhere when Herdr can\'t reach
 test('features: what list --json says, else this repo\'s older command had them all, else none', () => {
   assert.deepEqual(FEATURES, B.ALL_FEATURES, 'the command and the mod agree');
   assert.deepEqual(B.featuresOf({ machine: 'x', features: ['seen', 7] }), ['seen']);
-  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => f !== 'update'), 'a command from before the list: everything but update');
+  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => f !== 'update' && f !== 'routine-edit-on'), 'a command from before the list: everything but update and routine-edit-on');
   assert.deepEqual(B.featuresOf({ machine: 'server', channels: [] }), [], 'a hub that lists none');
   assert.deepEqual(B.featuresOf(null), []);
 });

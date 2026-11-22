@@ -747,14 +747,29 @@ function whenText(iso) {
 }
 
 // A routine's last run in a few words, and the colour to say it in.
+// Switching a routine off drops its scheduled run still waiting for the chat (the command says so too): the change
+// to its last run, shown at once.
+const dropLast = (r, on) => (!on && r.last?.status === "queued" && r.last.kind !== "manual" ? { last: { ...r.last, status: "dropped" } } : {});
+
+// A routine's last run in the Routines dialog, as the store says it went: a run now reads "Queued for the chat…"
+// until the chat has it ("Delivered 10:01"), or the backend's reason it still waits (last.waiting, when it gives one).
 function lastRun(r, t) {
   const l = r.last;
+  const hm = (iso) => whenText(iso).replace(/^Today /, "");
+  // Slots the tick skipped because this run still waited for the chat (bin/routines.mjs, claimDue).
+  const s = r.skipped;
+  const skipped = s?.due_at && (!l?.due_at || s.due_at > l.due_at) ? ` · skipped ${s.count > 1 ? `${s.count}, last ` : ""}${hm(s.due_at)}` : "";
   if (!l) return ["never run", t.dim];
   if (l.status === "missed") return [`missed ${whenText(l.due_at)}`, t.blocked];
-  const at = whenText(l.kind === "manual" ? l.at : l.due_at);
-  const late = l.kind !== "manual" && l.late_min > 2 ? ` · late, ran ${whenText(l.at).replace(/^Today /, "")}` : "";
-  const waiting = l.status === "queued" ? " · waiting for the chat" : "";
-  return [`${l.kind === "manual" ? "run now " : ""}${at}${late}${waiting}`, l.status === "queued" ? t.working : t.muted];
+  const manual = l.kind === "manual";
+  const waiting = l.waiting ? `Waiting: ${l.waiting}` : null;
+  if (manual && l.status === "queued") return [`${waiting ?? "Queued for the chat…"}${skipped}`, t.working];
+  if (manual && l.status === "delivered") return [`Delivered ${hm(l.delivered_at ?? l.at)} · run now${skipped}`, t.muted];
+  const at = whenText(manual ? l.at : l.due_at);
+  const late = !manual && l.late_min > 2 ? ` · late, ran ${hm(l.at)}` : "";
+  if (l.status === "queued") return [`${at}${late} · ${waiting ? waiting.toLowerCase() : "waiting for the chat"}${skipped}`, t.working];
+  if (l.status === "dropped") return [`${manual ? "run now " : ""}${at} · dropped when switched off`, t.dim];
+  return [`${manual ? "run now " : ""}${at}${late}${skipped}`, t.muted];
 }
 
 export default class Channels extends View {
@@ -1454,10 +1469,8 @@ export default class Channels extends View {
       this.form = null; // the routine being edited or made
       this.entered = true; // false for a frame when the view changes, so it slides in
       this.confirm = null; // the routine whose Delete is waiting for a second click
-      this.sentAt = {}; // routine id -> when Run now was pressed, for the "Sent" note
       this.leavingR = new Set(); // routines collapsing out of the list
       this.knownR = null; // routines already drawn: a new one grows in
-      cx.timer.every(500, (cx) => { if (Object.values(this.sentAt).some((at) => Date.now() - at < 3500)) cx.notify(); });
       cx.timer.every(30, (cx) => { if (this.settleR) { this.settleR = false; cx.notify(); } });
       this.handle.focus();
     } else if (this.kind === "instructions") {
@@ -1697,8 +1710,12 @@ export default class Channels extends View {
     const shown = { name, prompt, schedule: f.preview?.spec ?? spec, label: f.previewFor === spec ? f.preview?.label ?? spec : spec, catchup_min: f.catchup, enabled: f.enabled, next_at: f.enabled ? f.preview?.next?.[0] ?? null : null };
     const args = [c.name, f.was ?? name, spec, String(f.catchup), prompt, name];
     if (f.id) {
-      submit((all) => { for (const ch of all) if (ch.name === c.name) for (const r of ch.routines ?? []) if (r.id === f.id) Object.assign(r, shown); },
-        `channels routine edit "$1" "$2" --schedule "$3" --catchup "$4" --prompt "$5" --rename "$6" && channels routine ${f.enabled ? "on" : "off"} "$1" "$6"`, args, `save the routine ${name}`);
+      // One command and one write when the command takes the switch with the rest (routine-edit-on); an older one
+      // gets the edit, then on or off.
+      const edit = `channels routine edit "$1" "$2" --schedule "$3" --catchup "$4" --prompt "$5" --rename "$6"`;
+      const script = has("routine-edit-on") ? `${edit} ${f.enabled ? "--on" : "--off"}` : `${edit} && channels routine ${f.enabled ? "on" : "off"} "$1" "$6"`;
+      submit((all) => { for (const ch of all) if (ch.name === c.name) for (const r of ch.routines ?? []) if (r.id === f.id) Object.assign(r, shown, dropLast(r, f.enabled)); },
+        script, args, `save the routine ${name}`);
     } else {
       submit((all) => { for (const ch of all) if (ch.name === c.name) (ch.routines ??= []).push({ id: `new-${name}`, last: null, ...shown }); },
         `channels routine add "$1" "$6" --schedule "$3" --catchup "$4" --prompt "$5"${f.enabled ? "" : " --off"}`, args, `add the routine ${name}`);
@@ -1713,11 +1730,11 @@ export default class Channels extends View {
   }
 
   toggleRoutine(r, on) {
-    this.setRoutine(r, { enabled: on, next_at: on ? r.next_at : null }, `channels routine ${on ? "on" : "off"} "$1" "$2"`, `switch ${r.name} ${on ? "on" : "off"}`);
+    this.setRoutine(r, { enabled: on, next_at: on ? r.next_at : null, ...dropLast(r, on) }, `channels routine ${on ? "on" : "off"} "$1" "$2"`, `switch ${r.name} ${on ? "on" : "off"}`);
   }
 
+  // Queued until the store says the chat has it: the row reads "Queued for the chat…", then "Delivered 10:01".
   runNow(r, cx) {
-    this.sentAt[r.id] = Date.now();
     this.setRoutine(r, { last: { kind: "manual", status: "queued", at: new Date().toISOString(), late_min: 0 } }, 'channels routine run "$1" "$2"', `run ${r.name}`);
     cx.notify();
   }
@@ -1763,11 +1780,10 @@ export default class Channels extends View {
     const hover = this.hover === key;
     const confirming = this.confirm === r.id;
     const closed = this.leavingR.has(r.id) || fresh;
-    const sent = Date.now() - (this.sentAt[r.id] ?? 0) < 3000;
     const [last, lastColor] = lastRun(r, t);
     const meta = h_flex().gap(14).text_size(12).text_color(t.dim)
       .child(h_flex().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off")))
-      .child(h_flex().gap(4).min_w(0).child("Last").child(div().truncate().text_color(lastColor).child(sent ? "sent to the chat just now" : last)));
+      .child(h_flex().gap(4).min_w(0).child("Last").child(div().truncate().text_color(lastColor).child(last)));
     return h_flex().id(`rt-${r.id}`).flex_none().overflow_hidden().h(closed ? 0 : 78).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
       .child(h_flex().id(`rt-in-${r.id}`).flex_1().min_w(0).h(74).px(12).gap(12).items_center().rounded(10)
         .when(hover || confirming, (el) => el.bg(t.raised))
@@ -1787,7 +1803,7 @@ export default class Channels extends View {
         .when(!confirming, (el) => el
           // The row's actions show on hover, and keep their place either way so nothing moves.
           .child(h_flex().gap(2).items_center().opacity(hover ? 1 : 0).transition("opacity", 120)
-            .child(this.smallButton(`rt-run-${r.id}`, h_flex().gap(5).items_center().child(svg(ICON("play")).size(11)).child("Run now"), false, (_e, cx) => this.runNow(r, cx), t))
+            .child(this.smallButton(`rt-run-${r.id}`, h_flex().gap(5).items_center().child(svg(ICON("play")).size(11)).child(r.enabled ? "Run now" : "Run once"), false, (_e, cx) => this.runNow(r, cx), t))
             .child(this.tool(`rt-edit-${r.id}`, svg(ICON("square-pen")).size(14), (_e, cx) => this.openEditor(r, cx), t))
             .child(this.tool(`rt-del-${r.id}`, svg(ICON("trash-2")).size(14), (_e, cx) => this.removeRoutine(r, cx), t)))
           .child(this.switchFor(`rt-on-${r.id}`, r.enabled, (on) => this.toggleRoutine(r, on), t))));

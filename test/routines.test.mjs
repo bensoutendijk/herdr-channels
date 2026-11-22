@@ -358,3 +358,87 @@ test('the chat prompt tells the chat how to set up a routine when the user asks'
   const p = chatPrompt(mkdtempSync(join(tmpdir(), 'routines-p-')), 'general', { projects: '/p' });
   for (const s of ['channels routine add general <name> --schedule', '"weekdays 09:00"', 'cron 0 9 * * 1-5', '[routine <name>, scheduled <time>]', 'channels routine run general <name>', 'local time']) assert.ok(p.includes(s), s);
 });
+
+// ---------- the shared engine (bin/routines.mjs) and its fixes ----------
+
+test('bin/routines.mjs touches no file or process: it imports only ./schedule.mjs and node:crypto, so it can be vendored beside schedule.mjs', () => {
+  const src = readFileSync(fileURLToPath(new URL('../bin/routines.mjs', import.meta.url)), 'utf8');
+  const imports = [...src.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]).sort();
+  assert.deepEqual(imports, ['./schedule.mjs', 'node:crypto']);
+  assert.doesNotMatch(src, /process\.|require\(|import\(/);
+});
+
+test('a slot that comes due while a run of the routine still waits for the chat is skipped, not queued again', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'hourly-check', prompt: 'Check.', spec: 'hourly :00', now: at(2026, 11, 23, 8, 30) });
+  const store = { channels: [c] };
+  const tickAt = (h) => R.claimDue(store, at(2026, 11, 23, h) + 30_000);
+  assert.deepEqual(tickAt(9).map((x) => x.action), ['fire']);
+  // The chat stays busy: 10:00 and 11:00 come due with the 09:00 run still waiting.
+  assert.deepEqual(tickAt(10).map((x) => [x.action, x.due_at]), [['skip', new Date(at(2026, 11, 23, 10)).toISOString()]]);
+  tickAt(11);
+  assert.equal(c.queue.length, 1, 'one message waits, not three');
+  const r = c.routines[0];
+  assert.deepEqual([r.last.status, r.skipped.count, r.skipped.why], ['queued', 2, 'already waiting for the chat']);
+  assert.equal(R.showRoutine(r).skipped.due_at, new Date(at(2026, 11, 23, 11)).toISOString());
+  assert.equal(R.claimLine({ channel: 'general', routine: 'hourly-check', action: 'skip', due_at: 'x', late_min: 0 }), 'skipped #general hourly-check due x: already waiting for the chat');
+  // Once the chat has it, the next slot fires again.
+  R.markDelivered(c, c.queue[0].id, at(2026, 11, 23, 11, 30));
+  assert.equal(r.last.status, 'delivered');
+  assert.deepEqual(tickAt(12).map((x) => x.action), ['fire']);
+  assert.equal(r.skipped, null);
+});
+
+test('switching a routine off drops its scheduled runs still waiting for the chat, keeps a run now, and says so', async (t) => {
+  const { ok, store, tickAt } = setup(t);
+  ok(['create', 'general']);
+  ok(['routine', 'add', 'general', 'morning-plan', '--schedule', 'daily 09:00', 'Ask me for my plan.']);
+  await tickAt(nextNine() + 20_000);
+  ok(['routine', 'run', 'general', 'morning-plan']);
+  assert.deepEqual(store().channels[0].queue.map((e) => e.kind), ['scheduled', 'manual']);
+  assert.match(ok(['routine', 'off', 'general', 'morning-plan']), /off \(Every day at 09:00\).*Dropped 1 run that was waiting for the chat\.$/m);
+  assert.deepEqual(store().channels[0].queue.map((e) => e.kind), ['manual'], 'the run now stays: the user asked for it');
+  // Off again with nothing scheduled waiting: nothing dropped, nothing said about it.
+  assert.doesNotMatch(ok(['routine', 'off', 'general', 'morning-plan']), /Dropped/);
+});
+
+test('switching off marks a dropped scheduled run on the routine\'s last run, and an old entry with no kind counts as scheduled', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'A.', spec: 'daily 09:00', now: at(2026, 11, 23, 8) });
+  R.claimDue({ channels: [c] }, at(2026, 11, 23, 9) + 30_000);
+  delete c.queue[0].kind; // written by an earlier version
+  const { routine, dropped } = R.editRoutine(c, 'a', { enabled: false }, at(2026, 11, 23, 9, 5));
+  assert.deepEqual([dropped, c.queue.length, routine.last.status], [1, 0, 'dropped']);
+  assert.equal(R.entryKind({ text: '[routine a, run now] #general\n…' }), 'manual');
+});
+
+test('routine edit takes --on or --off with the other fields, in one write; capabilities say so', (t) => {
+  const { ok, run, store } = setup(t);
+  ok(['create', 'general']);
+  ok(['routine', 'add', 'general', 'review', '--schedule', 'daily 09:00', '--off', 'Review.']);
+  const out = JSON.parse(ok(['routine', 'edit', 'general', 'review', '--schedule', 'weekly fri 16:00', '--prompt', 'Week.', '--on', '--json']));
+  assert.deepEqual([out.enabled, out.schedule, out.dropped], [true, 'weekly fri 16:00', 0]);
+  assert.deepEqual([store().channels[0].routines[0].enabled, store().channels[0].routines[0].prompt], [true, 'Week.']);
+  ok(['routine', 'edit', 'general', 'review', '--off']);
+  assert.equal(store().channels[0].routines[0].enabled, false);
+  assert.match(run(['routine', 'edit', 'general', 'review', '--on', '--off']).stderr, /--on or --off, not both/);
+  // A bad schedule with --on changes nothing: the switch doesn't land without the rest.
+  assert.match(run(['routine', 'edit', 'general', 'review', '--schedule', 'weekdays 25:00', '--on']).stderr, /isn't a time/);
+  assert.equal(store().channels[0].routines[0].enabled, false);
+  assert.ok(JSON.parse(ok(['capabilities', '--json'])).features.includes('routine-edit-on'));
+});
+
+test('the routine words name who, where and which command a backend passes in', async () => {
+  const R = await import('../bin/routines.mjs');
+  const words = { who: 'Sam', where: 'server', cli: 'hub channels' };
+  const p = R.promptText({ name: 'general', ...words });
+  for (const s of ['hub channels routine add general <name>', 'set up by Sam', "server's local time", 'hub channels routine run general <name>', 'skipped, not stacked']) assert.ok(p.includes(s), s);
+  assert.doesNotMatch(p, /this Mac|the user/);
+  const text = R.routineText({ channel: 'general', routine: { name: 'x', prompt: 'P', schedule: 'daily 09:00' }, slot: at(2026, 11, 23, 9), now: at(2026, 11, 23, 10, 40), ...words });
+  assert.match(text, /timer on server, not typed by Sam just now/);
+  assert.match(text, /because the timer on server couldn't run it then/);
+  assert.match(R.routineUsage(words), /^hub channels routine list/);
+  assert.match(R.routineUsage(words), /\[--on \| --off\]/);
+});

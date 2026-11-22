@@ -25,6 +25,7 @@ the herdr mod runs every command on the same machine. No server is involved, unl
 | `layouts/channels.json` | The herdr layout that arranges the mod |
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
+| `bin/routines.mjs` | The routine engine and its words: adding and changing routines, which runs are due, the message a run types into the chat. It touches no file, so a store on another machine can run the same copy |
 | `bin/cloud.mjs` | [Cloud tasks](#cloud-tasks): every call to Claude Code's private sessions API, standalone |
 | `bin/release.mjs` | [Versions and updates](#updating): the installed version, the check against GitHub Releases, `channels update` |
 | `install.mjs` | Installer for the command, mod and layout |
@@ -568,7 +569,10 @@ window and an on/off switch. The store keeps each routine with a record of its l
 
 **Setting one up.** Open **Routines** from the channel's `···` menu. The dialog lists the channel's
 routines with their next and last runs. You can add, edit or delete a routine, switch it on or off,
-and **Run now** sends its prompt at once without changing the schedule. You can also ask the chat
+and **Run now** queues its prompt for the chat at once without changing the schedule (on a routine
+that is off, the button says **Run once**). Its row says **Queued for the chat…** until the chat has
+it, then **Delivered** with the time. Switching a routine off drops a scheduled run of it that was
+still waiting for the chat; a run you asked for with Run now stays. You can also ask the chat
 ("every weekday at 9, ask me for my plan"): it sets the routine up with `channels routine add`.
 
 <img src="docs/routines.png" width="480" alt="The Routines dialog for the #website channel, listing one routine, morning-check, that runs on weekdays at 09:00, with its prompt, its next run and an on/off switch">
@@ -600,7 +604,9 @@ terminal while the chat runs attaches to it.
 wakes, as long as it is still within the routine's catch-up window (default 60 minutes; `0` means
 never run late). Its message then says so: `[routine <name>, scheduled 09:00, running 10:40]`.
 Missed runs never stack: after a long sleep only the latest missed time counts. A run outside the
-window is skipped and recorded as missed.
+window is skipped and recorded as missed. Nor do runs pile up behind a busy chat: when a routine's
+time comes while its last run still waits for the chat, that time is skipped and recorded as
+skipped (`routine list` and the dialog show it).
 
 **The timer** is the launchd user agent the installer adds. It runs `channels tick` every minute,
 and once when the Mac wakes. Each tick records every run that is due in the store before anything is
@@ -644,7 +650,7 @@ channels open <session>
 channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]
 channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->
-channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>]
+channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off]
 channels routine rm|run|on|off <channel> <name>
 channels routine preview <schedule> [--json]
 channels refresh [--auto] [--json]
