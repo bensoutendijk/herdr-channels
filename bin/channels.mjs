@@ -84,6 +84,8 @@ export const channelsDir = (home = homedir()) => (process.env.CHANNELS_DIR ? res
 export const projectsDir = (home = homedir()) => (process.env.CHANNELS_PROJECTS ? resolve(expand(process.env.CHANNELS_PROJECTS, home)) : join(home, 'projects'));
 
 export const LISTEN = { pollMs: 3000, readyMs: 30_000, sendTimeoutMs: 10 * 60_000, refreshMs: 15_000 };
+// How long an asked-for refresh waits for another one to finish: longer than one restart's 30 s wait for its process.
+export const REFRESH_WAIT_MS = 45_000;
 // Task notices (a task finished): pushed into the chat by its notices server (`channels notices`), a Claude Code
 // channel. One the chat's transcript doesn't show confirmMs after it was pushed (or queued, when no server took it),
 // while the chat is idle, is typed in instead. chars: how much of the task's last message the one line carries.
@@ -2428,17 +2430,20 @@ async function restartChat({ dir, deps, chat: x, ensure, self = false }) {
 
 // Restarts the chats that are behind and idle: those behind the build always; those behind Claude Code when `claude`
 // asks for it (the Refresh button), or a refresh asked for it earlier and they were mid-turn then. One refresh at a
-// time: another one running answers { busy: true }.
-export async function refreshChats({ dir, deps, claude = false, ensure = ensureChat, only = null, self = false }) {
+// time: another one running answers { busy: true }, unless `waitMs` lets it wait that long for the other to finish.
+// A refresh someone asked for (the Refresh button, the installer) waits: each chat's listener runs a short refresh of
+// its own every LISTEN.refreshMs, and meeting one of those must not read as "Another refresh is running".
+export async function refreshChats({ dir, deps, claude = false, ensure = ensureChat, only = null, self = false, waitMs = 0 }) {
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, 'refresh.lock');
-  try { closeSync(openSync(lock, 'wx')); } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
+  const take = () => { try { closeSync(openSync(lock, 'wx')); return true; } catch (err) { if (err.code !== 'EEXIST') throw err; return false; } };
+  const until = Date.now() + waitMs;
+  while (!take()) {
     let stale = false;
     try { stale = Date.now() - statSync(lock).mtimeMs > 10 * 60_000; } catch { stale = true; }
-    if (!stale) return { busy: true, chats: [] };
-    rmSync(lock, { force: true });
-    try { closeSync(openSync(lock, 'wx')); } catch { return { busy: true, chats: [] }; }
+    if (stale) { rmSync(lock, { force: true }); continue; }
+    if (Date.now() >= until) return { busy: true, chats: [] };
+    await deps.sleep(100);
   }
   try {
     let status = await updateStatus({ dir, deps });
@@ -2647,7 +2652,8 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
     if (sub === 'refresh') {
       if (pos.length) fail('channels refresh [--auto] [--json]');
       // --auto (the installer): only what a new build calls for. Without it (the mod's Refresh): Claude Code too.
-      const r = await refreshChats({ dir, deps, claude: !opts.auto });
+      // Asked for, so it waits out another refresh (a listener's own, or a restart's 30 s) rather than answer busy.
+      const r = await refreshChats({ dir, deps, claude: !opts.auto, waitMs: REFRESH_WAIT_MS });
       console.log(opts.json ? JSON.stringify({ ...r, summary: refreshSummary(r) }) : refreshSummary(r));
       return 0;
     }

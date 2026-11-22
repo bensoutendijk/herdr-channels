@@ -7,7 +7,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compareVersions, promptDraft, refreshSummary, runsChat } from '../bin/channels.mjs';
+import { compareVersions, promptDraft, refreshChats, refreshSummary, runsChat } from '../bin/channels.mjs';
 
 const cli = fileURLToPath(new URL('../bin/channels.mjs', import.meta.url));
 
@@ -249,12 +249,35 @@ test('a chat started before the restart loop ends when its claude is stopped, an
   set('draft', '');
   // Only the suggestion: the key typed replaces it, so the prompt was empty.
   const r = JSON.parse(ok(['refresh', '--auto', '--json']));
+  // The chat's own listener refreshes every LISTEN.refreshMs under the same lock: this one waits it out, never busy.
+  assert.equal(r.busy, false, 'the asked-for refresh ran');
   assert.deepEqual(lines('hc-keys.jsonl').map((k) => k.keys.join(' ')), ['x', 'backspace', 'x', 'backspace']);
   assert.deepEqual(r.chats.map((x) => [x.did, x.terminal]), [['restarted', 't10']]);
   await until(() => old.exitCode !== null);
   assert.notEqual(old.exitCode, null, 'an old chat just ends');
   const [run] = lines('hc-runs.jsonl');
   assert.deepEqual(run.argv.slice(0, 2), ['/bin/sh', '-c']);
+});
+
+test('a refresh asked for waits out another one (a listener\'s own) instead of answering busy; one not asked for doesn\'t wait', async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'refresh-lock-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const dir = join(home, 'store');
+  mkdirSync(dir, { recursive: true });
+  const deps = { home, claude: join(home, 'claude'), run: async () => ({ code: 0, out: '2.1.330 (Claude Code)' }), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+  const lock = join(dir, 'refresh.lock');
+  writeFileSync(lock, '');
+  assert.equal((await refreshChats({ dir, deps })).busy, true, 'a listener\'s refresh just skips its turn');
+  assert.ok(existsSync(lock), 'and leaves the other refresh\'s lock alone');
+  const freed = setTimeout(() => rmSync(lock, { force: true }), 300);
+  t.after(() => clearTimeout(freed));
+  const r = await refreshChats({ dir, deps, waitMs: 5000 });
+  assert.equal(r.busy, false, 'the asked-for refresh ran once the other finished');
+  assert.ok(!existsSync(lock), 'and let go of the lock');
+  writeFileSync(lock, '');
+  const started = Date.now();
+  assert.equal((await refreshChats({ dir, deps, waitMs: 200 })).busy, true, 'past its wait it still answers busy');
+  assert.ok(Date.now() - started >= 200);
 });
 
 test('the prompt on a chat\'s screen: empty, a draft, or not there', () => {
