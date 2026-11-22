@@ -224,7 +224,7 @@ async function readStore() {
       t.standing = B.standingOf(a ? standing(a) : null, t.standing);
     }
   }
-  return { machine: head.machine ?? null, features: B.featuresOf(head), remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, channels };
+  return { machine: head.machine ?? null, features: B.featuresOf(head), remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, timer: head.timer ?? null, channels };
 }
 
 // Refresh: the running chats restart on what is installed now (a newer Claude Code, a new herdr-channels build), each
@@ -301,7 +301,10 @@ function channels() {
 }
 const active = (channel) => (channel?.routines ?? []).some((r) => r.enabled);
 // The sidebar clock's hover: the channel's next routine run, "Next: morning-plan, Tomorrow 09:00".
+// A routine that needs a look (routineTint) is named instead, with its status in words.
 function nextRoutine(channel) {
+  const look = B.routineTint(channel?.routines ?? []);
+  if (look) return `${look.routine.name}: ${look.routine.status.words}`;
   const on = (channel?.routines ?? []).filter((r) => r.enabled);
   const next = on.filter((r) => r.next_at).sort((a, b) => Date.parse(a.next_at) - Date.parse(b.next_at))[0];
   if (next) return `Next: ${next.name}, ${whenText(next.next_at)}`;
@@ -785,6 +788,8 @@ const dropLast = (r, on) => (!on && r.last?.status === "queued" && r.last.kind !
 // A routine's last run in the Routines dialog, as the store says it went: a run now reads "Queued for the chat…"
 // until the chat has it ("Delivered 10:01"), or the backend's reason it still waits (last.waiting, when it gives one).
 function lastRun(r, t) {
+  // The backend's own status (routine-status): one model and its words, the same as `routine list`.
+  if (r.status?.words) return [r.status.words, { missed: t.blocked, broken: t.blocked, waiting: t.working, never: t.dim, off: t.dim }[r.status.state] ?? t.muted];
   const l = r.last;
   const hm = (iso) => whenText(iso).replace(/^Today /, "");
   // Slots the tick skipped because this run still waited for the chat (bin/routines.mjs, claimDue): only while
@@ -794,7 +799,7 @@ function lastRun(r, t) {
   if (!l) return ["never run", t.dim];
   if (l.status === "missed") return [`missed ${whenText(l.due_at)}`, t.blocked];
   const manual = l.kind === "manual";
-  const waiting = l.waiting ? `Waiting: ${l.waiting}` : null;
+  const waiting = l.waiting ? `Waiting: ${l.waiting.why ?? l.waiting}` : null;
   if (manual && l.status === "queued") return [`${waiting ?? "Queued for the chat…"}${skipped}`, t.working];
   if (manual && l.status === "delivered") return [`Delivered ${hm(l.delivered_at ?? l.at)} · run now${skipped}`, t.muted];
   const at = whenText(manual ? l.at : l.due_at);
@@ -1093,7 +1098,8 @@ export default class Channels extends View {
               .hover((st) => st.bg(selected ? t.hover : t.raised))
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click(() => openDialog("routines", c.name)))
-            .child(svg(ICON("clock")).size(13).text_color(selected ? t.muted : t.dim)))
+            // Tinted while a routine needs a look: missed or broken, or a run stuck waiting (its status, routine-status).
+            .child(svg(ICON("clock")).size(13).text_color(((tint) => (tint ? t[tint] : selected ? t.muted : t.dim))(B.routineTint(c.routines ?? [])?.tint))))
           .when(!drag && (this.hover === key || selected), (el) => el.child(this.tool(`ch-more-${c.name}`, "···", () => menu(c), t))));
     };
     // The held row is drawn last, so it passes over the others.
@@ -1780,8 +1786,10 @@ export default class Channels extends View {
       // One command and one write when the command takes the switch with the rest (routine-edit-on); an older one
       // gets the edit, then on or off.
       const edit = `channels routine edit "$1" "$2" --schedule "$3" --catchup "$4" --prompt "$5" --rename "$6"`;
-      const script = has("routine-edit-on") ? `${edit} ${f.enabled ? "--on" : "--off"}` : `${edit} && channels routine ${f.enabled ? "on" : "off"} "$1" "$6"`;
-      submit((all) => { for (const ch of all) if (ch.name === c.name) for (const r of ch.routines ?? []) if (r.id === f.id) Object.assign(r, shown, dropLast(r, f.enabled)); },
+      const by = has("routine-by") ? " --by you" : "";
+      const script = has("routine-edit-on") ? `${edit} ${f.enabled ? "--on" : `--off${by}`}` : `${edit} && channels routine ${f.enabled ? "on" : "off"} "$1" "$6"${f.enabled ? "" : by}`;
+      // The status is the backend's: until the list is read again, the row reads from the change.
+      submit((all) => { for (const ch of all) if (ch.name === c.name) for (const r of ch.routines ?? []) if (r.id === f.id) Object.assign(r, shown, dropLast(r, f.enabled), { status: undefined }); },
         script, args, `save the routine ${name}`);
     } else {
       submit((all) => { for (const ch of all) if (ch.name === c.name) (ch.routines ??= []).push({ id: `new-${name}`, last: null, ...shown }); },
@@ -1797,12 +1805,13 @@ export default class Channels extends View {
   }
 
   toggleRoutine(r, on) {
-    this.setRoutine(r, { enabled: on, next_at: on ? r.next_at : null, ...dropLast(r, on) }, `channels routine ${on ? "on" : "off"} "$1" "$2"`, `switch ${r.name} ${on ? "on" : "off"}`);
+    // --by you: the row then reads "Off since … · switched off by you" (routine-by).
+    this.setRoutine(r, { enabled: on, next_at: on ? r.next_at : null, ...dropLast(r, on), status: undefined }, `channels routine ${on ? "on" : "off"} "$1" "$2"${!on && has("routine-by") ? " --by you" : ""}`, `switch ${r.name} ${on ? "on" : "off"}`);
   }
 
   // Queued until the store says the chat has it: the row reads "Queued for the chat…", then "Delivered 10:01".
   runNow(r, cx) {
-    this.setRoutine(r, { last: { kind: "manual", status: "queued", at: new Date().toISOString(), late_min: 0 } }, 'channels routine run "$1" "$2"', `run ${r.name}`);
+    this.setRoutine(r, { last: { kind: "manual", status: "queued", at: new Date().toISOString(), late_min: 0 }, status: undefined }, `channels routine run "$1" "$2"${has("routine-by") ? " --by dialog" : ""}`, `run ${r.name}`);
     cx.notify();
   }
 
@@ -1848,10 +1857,13 @@ export default class Channels extends View {
     const confirming = this.confirm === r.id;
     const closed = this.leavingR.has(r.id) || fresh;
     const [last, lastColor] = lastRun(r, t);
+    // With the backend's status (routine-status) its words say the whole state ("Waiting 14 min: …", "Off since Mon ·
+    // switched off by you"), after Next; an older backend's row reads Next and Last.
+    const said = Boolean(r.status?.words);
     const meta = h_flex().gap(14).text_size(12).text_color(t.dim)
       // A manual routine has no next run: its label already says it runs when run.
-      .when(r.schedule !== "manual", (el) => el.child(h_flex().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off"))))
-      .child(h_flex().gap(4).min_w(0).child("Last").child(div().truncate().text_color(lastColor).child(last)));
+      .when(r.schedule !== "manual" && !(said && !r.enabled), (el) => el.child(h_flex().flex_none().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off"))))
+      .child(h_flex().gap(4).min_w(0).when(!said, (el) => el.child("Last")).child(div().id(`rt-st-${r.id}`).truncate().text_color(lastColor).tooltip(last).child(last)));
     return h_flex().id(`rt-${r.id}`).flex_none().overflow_hidden().h(closed ? 0 : 78).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
       .child(h_flex().id(`rt-in-${r.id}`).flex_1().min_w(0).h(74).px(12).gap(12).items_center().rounded(10)
         .when(hover || confirming, (el) => el.bg(t.raised))
@@ -1975,6 +1987,7 @@ export default class Channels extends View {
             .when(!ready, (e) => e.opacity(0.4).cursor_default().hover((st) => st.opacity(0.4)))));
     } else {
       const list = c?.routines ?? [];
+      const stale = has("routine-status") ? B.staleTimer(shared(DATA)?.timer, Date.now(), (iso) => whenText(iso).replace(/^Today /, "")) : null;
       const fresh = new Set(this.knownR ? list.filter((r) => !this.knownR.has(r.id)).map((r) => r.id) : []);
       this.knownR = new Set(list.map((r) => r.id));
       if (fresh.size) cx_settle(this);
@@ -1993,6 +2006,10 @@ export default class Channels extends View {
       body = v_flex().flex_1().min_h(0)
         .child(head("Routines", null).child(this.tool("dg-x", svg(ICON("x")).size(16), () => this.close(), t)))
         .child(h_flex().pb(14).gap(8).items_center().text_size(14).text_color(t.muted).child(div().text_size(15).child(iconOf(c))).child(p.channel))
+        // The timer stopped (its last tick is over 5 minutes old): routines won't come due until it runs again.
+        .when(Boolean(stale), (el) => el.child(v_flex().id("rt-stale").mb(10).px(12).py(9).gap(3).rounded(10).border_1().border_color(t.border).bg(t.raised)
+          .child(h_flex().gap(8).items_center().text_size(13).child(svg(ICON("clock")).size(14).text_color(t.working)).child(stale.text))
+          .when(Boolean(stale.hint), (e) => e.child(div().pl(22).text_size(12).text_color(t.dim).child(`Start it again: ${stale.hint}`)))))
         .child(v_flex().id("rt-list").flex_1().min_h(0).overflow_y_scrollbar().gap(2)
           .children(list.map((r) => this.routineRow(r, t, fresh.has(r.id))))
           .when(list.length === 0, (el) => el.child(v_flex().pt(18).gap(8)

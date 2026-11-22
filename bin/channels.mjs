@@ -61,13 +61,13 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, hostname } from 'node:os';
+import { homedir, hostname, uptime } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as R from './routines.mjs';
 import { catchupMinutes, RoutineError, routineName, routineText, ROUTINE_DEFAULTS, schedule, showRoutine } from './routines.mjs';
 import { timeZone } from './schedule.mjs';
-import { checkRelease, CLONE, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
+import { checkRelease, CLONE, readInstall, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
 import { cloudId, cloudUrl, listCloudSessions, probeAttach, sendToCloudSession, startCloudSession } from './cloud.mjs';
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,79}$/;
@@ -648,7 +648,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by'];
 
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
@@ -665,10 +665,12 @@ export function listChannels({ dir, home = homedir(), all = false, only = null }
     remote_control: remoteOn(),
     // Cloud tasks: on or off here, and whether `claude --cloud <id>` attaches a terminal for this account.
     cloud: { on: cloudOn(), attach: cloudOn() && cache?.attach?.state === 'on', ok_at: cache?.ok_at ? new Date(cache.ok_at).toISOString() : null, error: cache?.error?.message ?? null },
+    // The routines timer: when it last ticked (tick.json), and how to start it again when that was long ago.
+    timer: timerInfo(dir),
     channels: store.channels.filter((c) => (only ? c.name === only : all || !c.archived_at)).map((c) => ({
       id: c.id, name: c.name, position: position.get(c) ?? null, icon: c.icon ?? null, created_at: c.created_at, archived_at: c.archived_at ?? null,
       description_path: descriptionPath(dir, c.name), chat: c.chat ?? null, chat_terminal: chatRunning(dir, c.id)?.terminal ?? null,
-      routines: c.routines.map((r) => showRoutine(r)), queued: c.queue.length,
+      routines: c.routines.map((r) => showRoutine(r, Date.now(), WORDS)), queued: c.queue.length,
       tasks: c.tasks.map((t) => showTask(home, t, names, live, cache)).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`)),
     })),
   };
@@ -1845,6 +1847,7 @@ export function startListener({ dir, deps, channelId, terminal }) {
   const deliver = async (text) => {
     const r = await deps.run(deps.hc, ['send', terminal, text], { timeout: LISTEN.sendTimeoutMs });
     log(r.code === 0 ? `delivered ${text.split('\n')[0]}` : `hc send failed (${r.code}): ${oneLine(r.err || r.out).slice(0, 200)}`);
+    deliver.why = r.code === 0 ? null : `the chat's terminal didn't take it (hc send: ${cut(oneLine(r.err || r.out || `exit ${r.code}`), 120)})`;
     return r.code === 0;
   };
   // Claude Code asks, at every start, to confirm loading the notices server (a development channel): answered here.
@@ -2004,6 +2007,15 @@ async function legacyChat(deps, name) {
   return null;
 }
 
+// The timer's heartbeat (bin/routines.mjs, heartbeat), written after every tick that ran.
+const tickFile = (dir) => join(dir, 'tick.json');
+export function timerInfo(dir, now = Date.now()) {
+  const args = readInstall(dir)?.args ?? [];
+  const i = args.indexOf('--label');
+  const label = i >= 0 && args[i + 1] ? args[i + 1] : 'dev.herdr-channels.tick';
+  return { ...R.timerStatus(readJson(tickFile(dir)), now), hint: `launchctl kickstart -k gui/$(id -u)/${label}` };
+}
+
 const tickLog = (dir, line) => { try { appendFileSync(join(dir, 'tick.log'), `${new Date().toISOString()} ${line}\n`); } catch { /* no log */ } };
 
 // One look at every routine: what came due is claimed in the store first, then queued for the chat, whose
@@ -2020,8 +2032,10 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
     try { closeSync(openSync(lock, 'wx')); } catch { return { skipped: true, runs: [] }; }
   }
   try {
-    const runs = updateStore(dir, (store) => R.claimDue(store, now, WORDS));
+    const runs = updateStore(dir, (store) => R.claimDue(store, now, { ...WORDS, bootedAt: Date.now() - uptime() * 1000 }));
     for (const x of runs) tickLog(dir, R.claimLine(x));
+    let sentCount = 0;
+    let errors = 0;
     // Every channel with routine runs waiting gets its chat running: the ones queued now, and any that waited
     // through an earlier failure.
     for (const c of readStore(dir).channels) {
@@ -2031,9 +2045,15 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
         if (r.started) tickLog(dir, `started #${c.name}'s chat in the background in ${r.address}`);
         if (r.legacy) {
           const sent = await deliverQueue({ dir, channel: c, deliver: async (text) => (await deps.run(deps.hc, ['send', r.address, text], { timeout: 50_000 })).code === 0 });
+          sentCount += sent.length;
           tickLog(dir, `typed ${sent.length} of ${c.queue.length} routine runs into #${c.name}'s chat in ${r.address} (started by an earlier version)`);
         }
-      } catch (err) { tickLog(dir, `couldn't start #${c.name}'s chat: ${err.message}`); }
+      } catch (err) {
+        errors++;
+        tickLog(dir, `couldn't start #${c.name}'s chat: ${err.message}`);
+        // Why its runs still wait, on each routine's last run (the dialog shows it).
+        updateStore(dir, (s) => { const ch = s.channels.find((x) => x.id === c.id); for (const e of ch?.queue ?? []) R.markWaiting(ch, e.id, `the chat couldn't start: ${err.message}`); });
+      }
     }
     // Chats left behind by an install or a Refresh while they were mid-turn: restarted now if their turn is over.
     let refreshed = [];
@@ -2049,6 +2069,7 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
         if (now !== was && now?.latest?.version !== was?.latest?.version && now?.latest) tickLog(dir, `herdr-channels ${now.latest.version} is the latest release`);
       } catch (err) { tickLog(dir, `release check failed: ${err.message}`); }
     }
+    try { writeAtomic(tickFile(dir), `${JSON.stringify(R.heartbeat({ now: Date.now(), version: readBuild(dir)?.version ?? null, claimed: runs.length, sent: sentCount, errors }))}\n`); } catch { /* no heartbeat */ }
     return { skipped: false, runs, refreshed };
   } finally {
     rmSync(lock, { force: true });
@@ -2056,24 +2077,35 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
 }
 
 // Types a channel's waiting routine runs (its queue) into its chat, oldest first, through `deliver(text)`; each one
-// that arrived leaves the queue and its routine's last run says delivered. Stops at the first that doesn't arrive.
+// that arrived leaves the queue and its routine's last run says delivered. Its message is made now (renderRun), so it
+// says how late it really is. Stops at the first that doesn't arrive, and records why (`deliver.why`, when the
+// deliverer says) on its routine's last run.
 export async function deliverQueue({ dir, channel, deliver }) {
   const sent = [];
   for (const msg of channel.queue) {
-    if (!(await deliver(msg.text))) break;
+    const text = R.renderRun(msg, { channel: channel.name, now: Date.now(), ...WORDS });
+    if (!(await deliver(text))) {
+      updateStore(dir, (s) => { const ch = s.channels.find((x) => x.id === channel.id); if (ch) R.markWaiting(ch, msg.id, deliver.why ?? 'the chat\'s terminal didn\'t take it'); });
+      break;
+    }
     updateStore(dir, (s) => {
       const ch = s.channels.find((x) => x.id === channel.id);
       if (ch) R.markDelivered(ch, msg.id);
     });
-    sent.push(msg.text);
+    sent.push(text);
   }
   return sent;
 }
 
 // "Run now": queues the prompt for the chat at once and starts the chat if needed. The schedule doesn't move.
-async function runRoutine({ dir, deps, channel, name, now = Date.now(), ensure = ensureChat }) {
-  updateStore(dir, (store) => R.runNow(channelOf(store, channel), name, { now, ...WORDS }));
-  return ensure({ dir, deps, channel });
+async function runRoutine({ dir, deps, channel, name, by = null, now = Date.now(), ensure = ensureChat }) {
+  const entry = updateStore(dir, (store) => R.runNow(channelOf(store, channel), name, { now, by, ...WORDS }));
+  try {
+    return { ...(await ensure({ dir, deps, channel })), run: entry.id };
+  } catch (err) {
+    updateStore(dir, (s) => { const ch = s.channels.find((x) => x.name === channel); if (ch) R.markWaiting(ch, entry.id, `the chat couldn't start: ${err.message}`); });
+    throw err;
+  }
 }
 
 // Runs `claude` in this terminal, in the foreground, and answers its exit code. Ctrl+C belongs to claude, so this
@@ -2424,7 +2456,7 @@ async function routineCommand({ dir, deps, pos, opts }) {
   if (verb === 'list' || verb == null) {
     if (rest.length > 1) fail(ROUTINE_USAGE);
     const out = listChannels({ dir, home: deps.home, only: rest.length ? channelName(rest[0]) : null });
-    if (opts.json) console.log(JSON.stringify({ machine: out.machine, channels: out.channels.map((c) => ({ id: c.id, name: c.name, routines: c.routines, queued: c.queued })) }));
+    if (opts.json) console.log(JSON.stringify({ machine: out.machine, timer: out.timer, channels: out.channels.map((c) => ({ id: c.id, name: c.name, routines: c.routines, queued: c.queued })) }));
     else console.log(R.listText(out, WORDS));
     return 0;
   }
@@ -2438,6 +2470,8 @@ async function routineCommand({ dir, deps, pos, opts }) {
   const channel = channelName(rest[0]);
   const name = routineName(rest[1]);
   if (opts.on && opts.off) fail(`--on or --off, not both.\n${ROUTINE_USAGE}`);
+  // --by: who asked for a run, or switched one on or off (dialog, chat, cli, you).
+  const by = opts.by != null ? R.byName(opts.by) : null;
   if (verb === 'add') {
     if (opts.schedule == null) fail(`--schedule is needed.\n${ROUTINE_USAGE}`);
     const text = opts.prompt != null ? (opts.prompt === '-' ? readStdin() : opts.prompt) : rest.length === 3 && rest[2] === '-' ? readStdin() : rest.slice(2).join(' ');
@@ -2457,6 +2491,7 @@ async function routineCommand({ dir, deps, pos, opts }) {
       if (opts.on || opts.off) change.enabled = Boolean(opts.on);
       if (!Object.keys(change).length) fail(`Nothing to change.\n${ROUTINE_USAGE}`);
     } else change.enabled = verb === 'on';
+    if (by) change.by = by;
     const { routine, dropped } = editRoutine({ dir, channel, name, change, dry: opts.dryRun });
     console.log(opts.json ? JSON.stringify({ ...routine, dropped, ...(opts.dryRun ? { dry_run: true } : {}) }) : R.confirmation({ verb, channel, routine, dropped, dry: opts.dryRun, ...WORDS }));
     return 0;
@@ -2468,7 +2503,7 @@ async function routineCommand({ dir, deps, pos, opts }) {
     return 0;
   }
   if (verb === 'run') {
-    const r = await runRoutine({ dir, deps, channel, name });
+    const r = await runRoutine({ dir, deps, channel, name, by });
     console.log(opts.json ? JSON.stringify(r) : R.confirmation({ verb, channel, routine: name, run: r }));
     return 0;
   }

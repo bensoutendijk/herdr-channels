@@ -223,13 +223,15 @@ test('a tick fires a due routine once into a running chat, marked as a routine; 
   assert.equal(lines('hc-runs.jsonl').length, 0, 'a running chat isn\'t started again');
   const s = store().channels[0];
   assert.equal(s.queue.length, 1);
-  assert.match(s.queue[0].text, /^\[routine morning-plan, scheduled 09:00\] #general\n/);
+  assert.match(s.queue[0].text, new RegExp(`^\\[routine morning-plan · scheduled (\w+ )?09:00 · run ${c.routines[0].id}@${new Date(nine).toISOString().replace(/\./g, '\\.')}\\] #general\n`));
+  assert.equal(s.queue[0].id, `${c.routines[0].id}@${new Date(nine).toISOString()}`, 'a run\'s id is its routine and slot');
+  assert.deepEqual([s.queue[0].scheduled_for, s.queue[0].prompt, s.queue[0].first], [new Date(nine).toISOString(), 'Ask me for my plan.', true]);
   assert.match(s.queue[0].text, /<routine-prompt>\nAsk me for my plan.\n<\/routine-prompt>/);
   assert.doesNotMatch(s.queue[0].text, /running/);
   assert.deepEqual([s.routines[0].last.status, s.routines[0].last.kind, s.routines[0].done], ['queued', 'scheduled', new Date(nine).toISOString()]);
   // The listener's look types it into the chat's terminal and marks it delivered.
   const out = run(['listen', 'general', '--once']).stdout;
-  assert.match(out, /\[routine morning-plan, scheduled 09:00\]/);
+  assert.match(out, /\[routine morning-plan · scheduled (\w+ )?09:00 · run rt_/);
   const after = store().channels[0];
   assert.deepEqual([after.queue.length, after.routines[0].last.status], [0, 'delivered']);
 });
@@ -258,7 +260,7 @@ test('a run the Mac slept through fires late inside the catch-up window and says
   assert.deepEqual(r.runs.map((x) => [x.routine, x.action, x.late_min]).sort(), [['narrow', 'missed', 100], ['wide', 'fire', 100]]);
   const c = store().channels[0];
   assert.equal(c.queue.length, 1, 'missed runs never stack');
-  assert.match(c.queue[0].text, /^\[routine wide, scheduled 09:00, running 10:40\] #general/);
+  assert.match(c.queue[0].text, /^\[routine wide · scheduled 09:00, running 10:40 · run rt_\w+@[^\]]+\] #general/);
   assert.match(c.queue[0].text, /It is late: it was due at 09:00 and runs at 10:40/);
   const narrow = c.routines.find((x) => x.name === 'narrow');
   assert.deepEqual([narrow.last.status, narrow.last.late_min], ['missed', 100]);
@@ -285,7 +287,7 @@ test('a routine whose chat isn\'t running starts it in the background, where its
   assert.equal(lines('chat-launches.jsonl').length, 1);
   const [sent] = lines('hc-sends.jsonl');
   assert.equal(sent.terminal, 't10');
-  assert.match(sent.text, /^\[routine morning-plan, scheduled 09:00\]/);
+  assert.match(sent.text, /^\[routine morning-plan · scheduled (\w+ )?09:00 · run /);
   assert.equal(store().channels[0].routines[0].last.status, 'delivered');
   // While that chat runs, `channels chat` elsewhere attaches to its terminal instead of starting a second claude.
   const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
@@ -327,7 +329,7 @@ test('a chat opened by an earlier version (no record, no inbox in its listener) 
   assert.equal(lines('hc-runs.jsonl').length, 0);
   const [sent] = lines('hc-sends.jsonl');
   assert.equal(sent.terminal, 't5');
-  assert.match(sent.text, /^\[routine morning-plan, scheduled 09:00\]/);
+  assert.match(sent.text, /^\[routine morning-plan · scheduled (\w+ )?09:00 · run /);
   const c = store().channels[0];
   assert.deepEqual([c.queue.length, c.routines[0].last.status], [0, 'delivered']);
 });
@@ -348,7 +350,7 @@ test('run now sends the prompt at once, marked as run now, and leaves the schedu
   ok(['routine', 'add', 'general', 'morning-plan', '--schedule', 'daily 09:00', 'Ask me for my plan.']);
   assert.match(ok(['routine', 'run', 'general', 'morning-plan']), /started in the background \(terminal t10\)/);
   const c = store().channels[0];
-  assert.match(c.queue[0].text, /^\[routine morning-plan, run now\] #general/);
+  assert.match(c.queue[0].text, /^\[routine morning-plan · run now · run rt_\w+@manual-[^\]]+\] #general/);
   assert.deepEqual([c.routines[0].last.kind, c.routines[0].last.status, c.routines[0].done], ['manual', 'queued', null]);
   assert.equal(lines('hc-runs.jsonl').length, 1);
 });
@@ -356,7 +358,7 @@ test('run now sends the prompt at once, marked as run now, and leaves the schedu
 test('the chat prompt tells the chat how to set up a routine when the user asks', async () => {
   const { chatPrompt } = await import('../bin/channels.mjs');
   const p = chatPrompt(mkdtempSync(join(tmpdir(), 'routines-p-')), 'general', { projects: '/p' });
-  for (const s of ['channels routine add general <name> --schedule', '"weekdays 09:00"', 'cron 0 9 * * 1-5', '[routine <name>, scheduled <time>]', 'channels routine run general <name>', 'local time']) assert.ok(p.includes(s), s);
+  for (const s of ['channels routine add general <name> --schedule', '"weekdays 09:00"', 'cron 0 9 * * 1-5', '[routine <name> · scheduled <time> · run <id>]', 'channels routine run general <name>', 'local time']) assert.ok(p.includes(s), s);
 });
 
 // ---------- the shared engine (bin/routines.mjs) and its fixes ----------
@@ -592,4 +594,134 @@ test('the chat prompt teaches rounding, one-offs, --dry-run, passing the block o
     'one plain line with the outcome first',
   ]) assert.ok(p.includes(s), s);
   assert.doesNotMatch(p, /this Mac|the user/);
+});
+
+// ---------- the run ledger's seams: run ids, entries as data, one status, why a run waits, who asked ----------
+
+test('a run\'s id is its routine and slot, so a slot claimed twice is queued once and its last run is left alone', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'A.', spec: 'daily 09:00', now: at(2026, 11, 23, 8) });
+  const r = c.routines[0];
+  const slot = at(2026, 11, 23, 9);
+  const e = R.queueRun(c, r, { kind: 'scheduled', slot, now: slot + 30_000 });
+  assert.equal(e.id, `${r.id}@${new Date(slot).toISOString()}`);
+  assert.equal(R.runId(r, { slot }), e.id);
+  const before = { ...r.last };
+  assert.equal(R.queueRun(c, r, { kind: 'scheduled', slot, now: slot + 90_000 }), e, 'the same entry');
+  assert.deepEqual([c.queue.length, r.last], [1, before]);
+  assert.match(R.runId(r, { now: at(2026, 11, 23, 12) }), new RegExp(`^${r.id}@manual-2026-11-2\\dT`));
+});
+
+test('a queue entry is data, and its message is made when it is typed in: late because the chat was busy, or the old text', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'Plan.', spec: 'daily 09:00', now: at(2026, 11, 23, 8) });
+  R.claimDue({ channels: [c] }, at(2026, 11, 23, 9) + 20_000);
+  const e = c.queue[0];
+  assert.deepEqual(Object.keys(e).sort(), ['by', 'first', 'id', 'kind', 'label', 'name', 'prev', 'prompt', 'queued_at', 'routine', 'scheduled_for', 'text'].sort());
+  assert.deepEqual([e.kind, e.prompt, e.label, e.first], ['scheduled', 'Plan.', 'Every day at 09:00', true]);
+  assert.doesNotMatch(e.text, /late/, 'queued on time');
+  // The chat was busy until 09:40: the message typed then says so.
+  const text = R.renderRun(e, { channel: 'general', now: at(2026, 11, 23, 9, 40) });
+  assert.match(text, /^\[routine a · scheduled 09:00, running 09:40 · run rt_\w+@[^\]]+\] #general\n/);
+  assert.match(text, /because the chat couldn't take it until now\./);
+  assert.match(text, /This is its first run\./);
+  // An entry from before entries were data is typed as it was written.
+  assert.equal(R.renderRun({ id: 'x', routine: 'r', name: 'a', text: '[routine a, run now] #general\nOld.' }, { channel: 'general' }), '[routine a, run now] #general\nOld.');
+});
+
+test('a run after a missed one says so, and the missed one records its catch-up and why (asleep, or off when the machine booted since)', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'A.', spec: 'daily 09:00', catchupMin: 60, now: at(2026, 11, 22, 8) });
+  R.claimDue({ channels: [c] }, at(2026, 11, 23, 11, 40));
+  const r = c.routines[0];
+  assert.deepEqual([r.last.status, r.last.reason, r.last.catchup_min], ['missed', 'asleep', 60]);
+  const st = R.routineStatus(r, at(2026, 11, 23, 12), { where: 'this Mac' });
+  assert.deepEqual([st.state, st.words], ['missed', 'Skipped 09:00: this Mac was asleep until 11:40 (catch-up 1 hour)']);
+  // Booted at 10:00, after the slot: it was off.
+  const d = { name: 'd', routines: [], queue: [] };
+  R.addRoutine(d, { name: 'b', prompt: 'B.', spec: 'daily 09:00', catchupMin: 15, now: at(2026, 11, 22, 8) });
+  R.claimDue({ channels: [d] }, at(2026, 11, 23, 11, 40), { bootedAt: at(2026, 11, 23, 10) });
+  assert.match(R.routineStatus(d.routines[0], at(2026, 11, 23, 12)).words, /was off until 11:40 \(catch-up 15 min\)$/);
+  // The next day's run says the previous one was missed.
+  R.claimDue({ channels: [c] }, at(2026, 11, 24, 9) + 20_000);
+  assert.match(c.queue[0].text, /Its previous run was missed: it was due (Mon )?09:00, while this Mac was asleep\./);
+  assert.doesNotMatch(c.queue[0].text, /first run/);
+});
+
+test('routineStatus: one state for each case, in words the command and the dialog both show', async () => {
+  const R = await import('../bin/routines.mjs');
+  const now = at(2026, 11, 23, 9, 14);
+  const base = { id: 'rt_x', name: 'a', prompt: 'A.', schedule: 'daily 09:00', catchup_min: 60, enabled: true };
+  const st = (r) => { const s = R.routineStatus({ ...base, ...r }, now); return [s.state, s.words]; };
+  assert.deepEqual(st({}), ['never', 'Never run']);
+  assert.deepEqual(st({ schedule: 'daily 25:00' })[0], 'broken');
+  assert.deepEqual(st({ enabled: false }), ['off', 'Off']);
+  assert.deepEqual(st({ enabled: false, paused: { by: 'you', at: new Date(at(2026, 11, 23, 8, 2)).toISOString() } }), ['off', 'Off since 08:02 · switched off by you']);
+  assert.deepEqual(st({ enabled: false, paused: { by: 'chat', at: new Date(at(2026, 11, 21, 8)).toISOString() } }), ['off', 'Off since Sat · switched off by the chat']);
+  const q = { kind: 'scheduled', status: 'queued', due_at: new Date(at(2026, 11, 23, 9)).toISOString(), at: new Date(at(2026, 11, 23, 9)).toISOString(), message: 'm' };
+  assert.deepEqual(st({ last: q }), ['waiting', 'Waiting 14 min for the chat']);
+  assert.deepEqual(st({ last: { ...q, waiting: { why: 'a draft is typed in the chat\'s prompt', since: q.at } } }), ['waiting', 'Waiting 14 min: a draft is typed in the chat\'s prompt']);
+  assert.deepEqual(st({ last: { ...q, kind: 'manual', due_at: null, at: new Date(now - 20_000).toISOString() } }), ['waiting', 'Queued for the chat… · run now']);
+  const d = { ...q, status: 'delivered', delivered_at: new Date(at(2026, 11, 23, 9, 1)).toISOString() };
+  assert.deepEqual(st({ last: d }), ['ok', 'Delivered 09:01']);
+  assert.deepEqual(st({ last: { ...d, delivered_at: new Date(at(2026, 11, 23, 9, 12)).toISOString() } }), ['late', 'Delivered 09:12 · due 09:00, 12 min late']);
+  assert.deepEqual(st({ last: { ...q, status: 'missed', reason: null } }), ['missed', 'Skipped 09:00 (catch-up 1 hour)']);
+});
+
+test('why a run waits is kept on its last run until the chat has it', async () => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'A.', spec: 'daily 09:00', now: at(2026, 11, 23, 8) });
+  const e = R.runNow(c, 'a', { now: at(2026, 11, 23, 9), by: 'dialog' });
+  assert.equal(R.markWaiting(c, e.id, 'its claude is busy', at(2026, 11, 23, 9, 1)), true);
+  assert.equal(R.markWaiting(c, e.id, 'its claude is busy', at(2026, 11, 23, 9, 2)), false, 'the same reason again changes nothing');
+  R.markWaiting(c, e.id, 'a draft is typed in the chat\'s prompt', at(2026, 11, 23, 9, 3));
+  const r = c.routines[0];
+  assert.deepEqual(r.last.waiting, { why: 'a draft is typed in the chat\'s prompt', since: new Date(at(2026, 11, 23, 9, 1)).toISOString() });
+  R.markDelivered(c, e.id, at(2026, 11, 23, 9, 5));
+  assert.deepEqual([r.last.status, r.last.waiting, r.last.by], ['delivered', undefined, 'dialog']);
+  assert.equal(R.markWaiting(c, 'gone', 'x'), false);
+});
+
+test('--by says who asked: a run now\'s message names it, and off records who switched it off until it is on again', async (t) => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'A.', spec: 'daily 09:00', now: at(2026, 11, 23, 8) });
+  assert.match(R.runNow(c, 'a', { now: at(2026, 11, 23, 9), by: 'dialog', who: 'Sam' }).text, /Sam asked, in the Routines dialog, for this routine of #general to run now\./);
+  assert.match(R.runNow(c, 'a', { now: at(2026, 11, 23, 9, 1), by: 'chat' }).text, /This chat asked for this routine of #general to run now\./);
+  R.editRoutine(c, 'a', { enabled: false, by: 'you' }, at(2026, 11, 23, 10));
+  assert.deepEqual(c.routines[0].paused, { by: 'you', at: new Date(at(2026, 11, 23, 10)).toISOString() });
+  R.editRoutine(c, 'a', { enabled: true }, at(2026, 11, 23, 11));
+  assert.equal(c.routines[0].paused, null);
+  assert.throws(() => R.byName('two words'), /--by is who asked/);
+  // Through the command: stored, shown in list --json, and in the list's words.
+  const { ok, store } = setup(t);
+  ok(['create', 'general']);
+  ok(['routine', 'add', 'general', 'morning-plan', '--schedule', 'daily 09:00', 'Plan.']);
+  ok(['routine', 'run', 'general', 'morning-plan', '--by', 'cli']);
+  assert.deepEqual([store().channels[0].queue[0].by, store().channels[0].routines[0].last.by], ['cli', 'cli']);
+  ok(['routine', 'off', 'general', 'morning-plan', '--by', 'you']);
+  const shown = JSON.parse(ok(['list', '--json'])).channels[0].routines[0];
+  assert.equal(shown.paused.by, 'you');
+  assert.deepEqual([shown.status.state, shown.status.words.replace(/since \S+/, 'since X')], ['off', 'Off since X · switched off by you']);
+  assert.match(ok(['routine', 'list']), /morning-plan {2}off .*Off since \S+ · switched off by you/);
+  assert.ok(JSON.parse(ok(['capabilities', '--json'])).features.includes('routine-by'));
+});
+
+test('each tick writes its heartbeat, which list --json shows as the timer\'s last tick', async (t) => {
+  const { ok, dir, tickAt } = setup(t);
+  ok(['create', 'general']);
+  assert.equal(JSON.parse(ok(['list', '--json'])).timer.last_tick_at, null);
+  await tickAt(Date.now());
+  const beat = JSON.parse(readFileSync(join(dir, 'tick.json'), 'utf8'));
+  assert.deepEqual(Object.keys(beat).sort(), ['at', 'claimed', 'errors', 'sent', 'version']);
+  const timer = JSON.parse(ok(['list', '--json'])).timer;
+  assert.deepEqual([timer.last_tick_at, timer.stale], [beat.at, false]);
+  assert.match(timer.hint, /^launchctl kickstart -k gui\/\$\(id -u\)\/dev\.herdr-channels\.tick$/);
+  assert.equal(JSON.parse(ok(['routine', 'list', '--json'])).timer.last_tick_at, beat.at);
+  const R = await import('../bin/routines.mjs');
+  assert.equal(R.timerStatus(beat, Date.parse(beat.at) + 6 * MIN).stale, true);
 });
