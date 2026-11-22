@@ -160,7 +160,8 @@ With a store on another machine:
 
 - Tasks open on the machine they run on: this Mac's in a local terminal, the server's and any other
   machine's through Herdr (`hc run --on`), when Herdr reaches that machine. Their standing comes from
-  `claude agents` on the server and on this Mac.
+  `claude agents` on the server and on this Mac; a task on a third machine takes the `standing` the
+  store gives in `list --json` (`needs`, `working` or `ready`), if it gives one.
 - The mod asks the command what it can do, once each time it loads: `<command> capabilities --json`
   prints `{ "features": [...] }`. A command that doesn't know that question is judged by its
   `list --json` (`features`, if it gives them). What the command lacks is hidden rather than offered
@@ -168,6 +169,11 @@ With a store on another machine:
   resolve, rename, icon, instructions, archive). The features are `chat-bg` (the chat in a background
   terminal), `seen` (unread dots), `refresh` (the Refresh row, from `updates` in `list --json`),
   `routines` and `rename-task`.
+- With the `routines` feature, the server keeps the routines and its own timer fires them, so they run
+  while this Mac sleeps. The Routines dialog says schedules are the server's local time. The server's
+  command takes the same `routine …` commands and gives the same `routines` and `queued` in
+  `list --json` as this repo's; `bin/schedule.mjs` has no imports, so it can carry a verbatim copy of
+  it, and schedules and catch-up behave the same.
 - Updates come from GitHub Releases here too. The install keeps a small folder of its own
   (`~/.local/state/herdr-channels/<name>`: the version installed, the options it was given, the last
   check). The mod asks this clone's `channels update --status` every few minutes, which asks GitHub

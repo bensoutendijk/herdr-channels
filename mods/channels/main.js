@@ -219,7 +219,7 @@ async function readStore() {
       // A copy keeps its task's name, and so does a session renamed here that Claude Code can't rename (see
       // `channels rename-task`): the list's name stands for those.
       if (a?.name && t.how !== "copied" && !t.named) t.name = a.name;
-      t.standing = standing(a);
+      t.standing = B.standingOf(a ? standing(a) : null, t.standing);
     }
   }
   return { machine: head.machine ?? null, features: B.featuresOf(head), remote: head.remote_control === true, cloud: head.cloud ?? null, updates: head.updates ?? null, channels };
@@ -1847,14 +1847,14 @@ export default class Channels extends View {
         .child(h_flex().pt(10).min_h(40).child(scheduleLine))
         .when(f.preset === "cron" && Boolean(pv?.error), (el) => el.child(div().pt(6).text_size(12.5).text_color(t.blocked).child(pv.error)))
         .when(f.preset !== "cron" && Boolean(pv?.error), (el) => el.child(div().pt(6).text_size(12.5).text_color(t.blocked).child(pv.error)))
-        .child(label("If the Mac was asleep, still run it within"))
+        .child(label(B.routineClock(ON).missed))
         .child(this.segmented("rt-catchup", catchups, f.catchup, (v) => { f.catchup = v; }, t))
         .child(div().flex_1())
         .child(h_flex().pb(12).gap(8).items_center().text_size(12.5).text_color(f.error ? t.blocked : t.dim)
           .child(svg(ICON("clock")).size(13).text_color(t.dim))
           .child(div().truncate().child(f.error ?? (pv?.error ? "Fix the schedule to see when it runs next."
             : !next ? "Working out when it runs…"
-            : `${pv.label}. ${f.enabled ? `Next ${whenText(next[0])}${next[1] ? `, then ${whenText(next[1])}` : ""}.` : "Off: it won't run until you switch it on."} Times are this Mac's.`))))
+            : `${pv.label}. ${f.enabled ? `Next ${whenText(next[0])}${next[1] ? `, then ${whenText(next[1])}` : ""}.` : "Off: it won't run until you switch it on."} ${B.routineClock(ON).short}`))))
         .child(h_flex().gap(8).items_center()
           .when(Boolean(f.id), (el) => el.child(h_flex().id("rt-delete").h(34).px(12).items_center().rounded(9).text_size(13.5).font_medium().cursor_pointer()
             .text_color(t.blocked).hover((st) => st.bg(t.raised))
@@ -1878,7 +1878,7 @@ export default class Channels extends View {
             .child(div().pt(6).text_size(14).text_color(t.muted).child("No routines yet"))
             .child(div().text_size(12.5).text_color(t.dim).child("A routine types a prompt into this channel's chat on a schedule.")))))
         .child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
-          .child("Each routine types its prompt into this channel's chat on schedule, starting the chat if it isn't open. Times are this Mac's local time."))
+          .child(`Each routine types its prompt into this channel's chat on schedule, starting the chat if it isn't open. ${B.routineClock(ON).times}`))
         .child(h_flex().gap(8).items_center()
           .child(button("rt-new", h_flex().gap(6).items_center().child(svg(ICON("plus")).size(14)).child("New routine"), false, (_e, cx) => this.openEditor(null, cx)))
           .child(div().flex_1())
