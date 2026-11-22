@@ -62,7 +62,8 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { due, nextDue, parseSchedule, ScheduleError, shortWhen } from './schedule.mjs';
+import * as R from './routines.mjs';
+import { catchupMinutes, RoutineError, routineName, routineText, ROUTINE_DEFAULTS, schedule, showRoutine } from './routines.mjs';
 import { checkRelease, CLONE, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
 import { cloudId, cloudUrl, listCloudSessions, probeAttach, sendToCloudSession, startCloudSession } from './cloud.mjs';
 
@@ -644,7 +645,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on'];
 
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
@@ -1372,9 +1373,7 @@ export function chatPrompt(dir, name, { projects = projectsDir() } = {}) {
     '- `channels dismiss <session> --by chat`: take one of this channel\'s tasks off the panel, when the user asks or agrees it is finished with. It never stops the session.',
     `- \`channels describe ${name}\` shows the description; \`channels describe ${name} --set -\`, with the text on stdin, replaces it. Change it only when the user asks. It loads into this chat at the next launch.`,
     '',
-    `Routines: prompts this chat gets on a schedule, set up by the user. When one comes due, a message opening with "[routine <name>, scheduled <time>]" arrives here on its own, with the prompt between <routine-prompt> markers; it says "running <time>" too when it runs late because the Mac was asleep. Do what its prompt asks. When the user asks for something recurring ("every weekday at 9, ask me for my plan"), set it up:`,
-    `- \`channels routine add ${name} <name> --schedule "<schedule>" [--catchup <window>] -\`, with the prompt on stdin. <name> is short, lowercase, with dashes (morning-plan). Schedules are in this Mac's local time: "weekdays 09:00", "daily 18:30", "hourly :15", "weekly fri 16:00", or a cron line "cron 0 9 * * 1-5". The catch-up window (default 60 minutes; 15m, 2h, 1d, 0) is how late a run the Mac slept through may still happen. Write the prompt as the user would ask it of you at that time, standing on its own.`,
-    `- \`channels routine list ${name}\` shows them with their next and last runs; \`channels routine edit ${name} <name> [--schedule ...] [--catchup ...] [--prompt -]\`, \`channels routine on|off|rm ${name} <name>\` change them and \`channels routine run ${name} <name>\` runs one now. Change routines only when the user asks, and tell them the schedule and next run you set.`,
+    R.promptText({ name, ...WORDS }),
     '',
     'Never create or archive a channel: only the user does that.',
   ].join('\n');
@@ -1864,118 +1863,24 @@ export function startListener({ dir, deps, channelId, terminal }) {
 // Missed runs (the Mac asleep or off): only the latest time missed counts. It fires late, once, when it is within
 // the routine's catch-up window; otherwise it is recorded as missed. Times are this Mac's local time.
 
-export function routineName(raw) {
-  const name = `${raw ?? ''}`.trim().toLowerCase();
-  if (!NAME.test(name)) fail(`A routine name is lowercase letters, digits, "-" and "_", up to 80, e.g. morning-plan (got "${raw ?? ''}").`);
-  return name;
+// The routine itself (adding, changing, which runs are due, the words) is bin/routines.mjs, shared with the hub
+// channels command; what is here is this Mac's side: the store, the launchd tick and the listener that types runs in.
+export { catchupMinutes, routineName, routineText, ROUTINE_DEFAULTS, schedule, showRoutine };
+const WORDS = { who: 'the user', where: 'this Mac', cli: 'channels' };
+
+function addRoutine({ dir, channel, now = Date.now(), ...fields }) {
+  schedule(fields.spec);
+  return updateStore(dir, (store) => R.addRoutine(channelOf(store, channel), { ...fields, now }));
 }
 
-export function schedule(raw) {
-  try { return parseSchedule(raw); } catch (err) { if (err instanceof ScheduleError) fail(err.message); throw err; }
-}
-
-// A catch-up window: minutes, or 15m, 2h, 1d; 0, "off" and "none" mean never run late.
-export function catchupMinutes(raw) {
-  const t = `${raw ?? ''}`.trim().toLowerCase();
-  if (t === 'off' || t === 'none' || t === 'no') return 0;
-  const m = /^(\d+)\s*(m|min|mins|minutes?|h|hours?|d|days?)?$/.exec(t);
-  if (!m) fail(`A catch-up window is minutes, or a length like 15m, 2h or 1d (got "${raw}").`);
-  const n = Number(m[1]) * (m[2]?.startsWith('h') ? 60 : m[2]?.startsWith('d') ? 1440 : 1);
-  if (n > 7 * 1440) fail('A catch-up window is at most 7 days.');
-  return n;
-}
-
-export const ROUTINE_DEFAULTS = { catchupMin: 60 };
-
-function routineOf(c, name) {
-  const r = c.routines.find((x) => x.name === name);
-  if (!r) fail(`#${c.name} has no routine "${name}". Its routines: ${c.routines.map((x) => x.name).join(', ') || 'none yet'}.`);
-  return r;
-}
-
-// A routine as list --json shows it: what's stored, its schedule in words and its next run.
-export function showRoutine(r, now = Date.now()) {
-  let label = r.schedule;
-  let next = null;
-  let error = null;
-  try {
-    const s = parseSchedule(r.schedule);
-    label = s.label;
-    if (r.enabled) next = nextDue(s.cron, now);
-  } catch (err) { error = err.message; }
-  return {
-    id: r.id, name: r.name, prompt: r.prompt, schedule: r.schedule, label, catchup_min: r.catchup_min, enabled: Boolean(r.enabled),
-    created_at: r.created_at, next_at: next ? new Date(next).toISOString() : null, last: r.last ?? null, error,
-  };
-}
-
-function addRoutine({ dir, channel, name, prompt, spec, catchupMin = ROUTINE_DEFAULTS.catchupMin, enabled = true, now = Date.now() }) {
-  if (!`${prompt ?? ''}`.trim()) fail('A routine needs a prompt: what the chat is asked when it runs.');
-  const s = schedule(spec);
-  return updateStore(dir, (store) => {
-    const c = channelOf(store, channel);
-    if (c.routines.some((x) => x.name === name)) fail(`#${channel} already has a routine "${name}".`);
-    const at = new Date(now).toISOString();
-    const r = { id: `rt_${randomUUID().replace(/-/g, '').slice(0, 10)}`, name, prompt: `${prompt}`.trim(), schedule: s.spec, catchup_min: catchupMin, enabled, created_at: at, since: at, done: null, last: null };
-    c.routines.push(r);
-    return showRoutine(r, now);
-  });
-}
-
-// Changes a routine. A new schedule, or switching it on, starts it afresh: times before now don't count as missed.
+// Answers { routine, dropped } (see R.editRoutine).
 function editRoutine({ dir, channel, name, change, now = Date.now() }) {
-  if (change.schedule != null) change.schedule = schedule(change.schedule).spec;
-  if (change.prompt != null && !`${change.prompt}`.trim()) fail('A routine needs a prompt: what the chat is asked when it runs.');
-  return updateStore(dir, (store) => {
-    const c = channelOf(store, channel);
-    const r = routineOf(c, name);
-    if (change.rename != null && change.rename !== r.name) {
-      if (c.routines.some((x) => x.name === change.rename)) fail(`#${channel} already has a routine "${change.rename}".`);
-      r.name = change.rename;
-    }
-    const at = new Date(now).toISOString();
-    if (change.schedule != null && change.schedule !== r.schedule) { r.schedule = change.schedule; r.since = at; }
-    if (change.prompt != null) r.prompt = `${change.prompt}`.trim();
-    if (change.catchupMin != null) r.catchup_min = change.catchupMin;
-    if (change.enabled != null && change.enabled !== r.enabled) { r.enabled = change.enabled; if (r.enabled) r.since = at; }
-    return showRoutine(r, now);
-  });
+  const ch = R.checkChange(change);
+  return updateStore(dir, (store) => R.editRoutine(channelOf(store, channel), name, ch, now));
 }
 
 function removeRoutine({ dir, channel, name }) {
-  return updateStore(dir, (store) => {
-    const c = channelOf(store, channel);
-    const r = routineOf(c, name);
-    c.routines = c.routines.filter((x) => x !== r);
-    c.queue = c.queue.filter((x) => x.routine !== r.id);
-    return r;
-  });
-}
-
-const hm = (ms) => { const d = new Date(ms); return `${`${d.getHours()}`.padStart(2, '0')}:${`${d.getMinutes()}`.padStart(2, '0')}`; };
-const fenceRoutine = (text) => `${text}`.trim().replace(/<(\/?)routine-prompt/gi, '<$1routine_prompt');
-
-// The message a routine types into the chat. The header says it is a routine, when it was due, and when it runs if
-// that is late: "[routine morning-plan, scheduled 09:00, running 10:40]".
-export function routineText({ channel, routine, slot = null, now = Date.now(), manual = false, label = null }) {
-  const late = !manual && slot != null && now - slot > 2 * 60_000;
-  const head = manual ? `[routine ${routine.name}, run now]` : `[routine ${routine.name}, scheduled ${shortWhen(slot, now)}${late ? `, running ${hm(now)}` : ''}]`;
-  const lines = [
-    `${head} #${channel}`,
-    manual
-      ? `From the channels timer on this Mac: the user asked for this routine of #${channel} to run now.`
-      : `From the channels timer on this Mac, not typed by the user just now: a routine the user set up for #${channel} came due (${label ?? routine.schedule}).`,
-  ];
-  if (late) lines.push(`It is late: it was due at ${shortWhen(slot, now)} and runs at ${hm(now)}, because the Mac was asleep or off then.`);
-  lines.push('', 'The routine\'s prompt, as the user wrote it:', '<routine-prompt>', fenceRoutine(routine.prompt), '</routine-prompt>', '',
-    'For you: do what the prompt asks, as if the user had asked it here. If you need the user, ask; they may not be at the screen yet.');
-  return lines.join('\n');
-}
-
-function queueRun(c, r, { text, kind, slot = null, now, status = 'queued' }) {
-  const id = randomUUID();
-  if (status === 'queued') c.queue.push({ id, routine: r.id, name: r.name, text, queued_at: new Date(now).toISOString() });
-  r.last = { kind, status, due_at: slot != null ? new Date(slot).toISOString() : null, at: new Date(now).toISOString(), late_min: slot != null ? Math.max(0, Math.round((now - slot) / 60_000)) : 0, message: status === 'queued' ? id : null };
+  return updateStore(dir, (store) => R.removeRoutine(channelOf(store, channel), name));
 }
 
 // Whether the channel's chat is running: `channels chat` records its process and terminal while it runs.
@@ -2069,25 +1974,8 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
     try { closeSync(openSync(lock, 'wx')); } catch { return { skipped: true, runs: [] }; }
   }
   try {
-    const runs = updateStore(dir, (store) => {
-      const out = [];
-      for (const c of store.channels) {
-        if (c.archived_at) continue;
-        for (const r of c.routines) {
-          if (!r.enabled) continue;
-          let s;
-          try { s = parseSchedule(r.schedule); } catch { continue; }
-          const d = due({ cron: s.cron, since: r.since, done: r.done, catchupMin: r.catchup_min, now });
-          if (!d) continue;
-          r.done = new Date(d.slot).toISOString();
-          if (d.action === 'fire') queueRun(c, r, { text: routineText({ channel: c.name, routine: r, slot: d.slot, now, label: s.label }), kind: 'scheduled', slot: d.slot, now });
-          else queueRun(c, r, { kind: 'scheduled', slot: d.slot, now, status: 'missed' });
-          out.push({ channel: c.name, routine: r.name, action: d.action, due_at: r.done, late_min: Math.round(d.late_ms / 60_000) });
-        }
-      }
-      return out;
-    });
-    for (const x of runs) tickLog(dir, `${x.action === 'fire' ? 'fired' : 'missed'} #${x.channel} ${x.routine} due ${x.due_at}${x.late_min > 2 ? ` (${x.late_min} min late)` : ''}`);
+    const runs = updateStore(dir, (store) => R.claimDue(store, now, WORDS));
+    for (const x of runs) tickLog(dir, R.claimLine(x));
     // Every channel with routine runs waiting gets its chat running: the ones queued now, and any that waited
     // through an earlier failure.
     for (const c of readStore(dir).channels) {
@@ -2129,10 +2017,7 @@ export async function deliverQueue({ dir, channel, deliver }) {
     if (!(await deliver(msg.text))) break;
     updateStore(dir, (s) => {
       const ch = s.channels.find((x) => x.id === channel.id);
-      if (!ch) return;
-      ch.queue = ch.queue.filter((x) => x.id !== msg.id);
-      const r = ch.routines.find((x) => x.id === msg.routine);
-      if (r?.last && r.last.message === msg.id) Object.assign(r.last, { status: 'delivered', delivered_at: new Date().toISOString() });
+      if (ch) R.markDelivered(ch, msg.id);
     });
     sent.push(msg.text);
   }
@@ -2141,27 +2026,8 @@ export async function deliverQueue({ dir, channel, deliver }) {
 
 // "Run now": queues the prompt for the chat at once and starts the chat if needed. The schedule doesn't move.
 async function runRoutine({ dir, deps, channel, name, now = Date.now(), ensure = ensureChat }) {
-  updateStore(dir, (store) => {
-    const c = channelOf(store, channel);
-    const r = routineOf(c, name);
-    queueRun(c, r, { text: routineText({ channel: c.name, routine: r, now, manual: true }), kind: 'manual', now });
-  });
+  updateStore(dir, (store) => R.runNow(channelOf(store, channel), name, { now, ...WORDS }));
   return ensure({ dir, deps, channel });
-}
-
-function printRoutines(out) {
-  let any = false;
-  for (const c of out.channels) {
-    if (!c.routines.length) continue;
-    any = true;
-    console.log(`#${c.name}${c.queued ? `  (${c.queued} waiting for the chat)` : ''}`);
-    for (const r of c.routines) {
-      const last = r.last ? `${r.last.status} ${shortWhen(Date.parse(r.last.due_at ?? r.last.at))}${r.last.kind === 'manual' ? ' (run now)' : r.last.late_min > 2 && r.last.status !== 'missed' ? ` (${r.last.late_min} min late)` : ''}` : 'never';
-      console.log(`  ${r.name}  ${r.enabled ? 'on ' : 'off'}  ${r.label}  catch-up ${r.catchup_min} min  next ${r.next_at ? shortWhen(Date.parse(r.next_at)) : '-'}  last ${last}`);
-      console.log(`    ${JSON.stringify(cut(oneLine(r.prompt), 100))}`);
-    }
-  }
-  if (!any) console.log('No routines yet. Add one with: channels routine add <channel> <name> --schedule "weekdays 09:00" <prompt>');
 }
 
 // Runs `claude` in this terminal, in the foreground, and answers its exit code. Ctrl+C belongs to claude, so this
@@ -2491,7 +2357,7 @@ export function parseArgs(args) {
   const pos = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check' || a === '--status') opts[a.slice(2)] = true;
+    if (a === '--json' || a === '--all' || a === '--once' || a === '--hook' || a === '--bg' || a === '--off' || a === '--on' || a === '--take' || a === '--open' || a === '--cloud' || a === '--auto' || a === '--check' || a === '--status') opts[a.slice(2)] = true;
     else if (VALUED.has(a)) {
       if (i + 1 >= args.length) fail(`${a} needs a value.`);
       opts[a.slice(2).replace(/-(.)/g, (_, x) => x.toUpperCase())] = args[++i];
@@ -2504,15 +2370,7 @@ export function parseArgs(args) {
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
 const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | refresh [--auto] [--json] | update [--check] [--bg] [--json] | tick';
-const ROUTINE_USAGE = [
-  'channels routine list [<channel>] [--json]',
-  'channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->',
-  'channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>]',
-  'channels routine rm|run|on|off <channel> <name>',
-  'channels routine preview <schedule> [--json]',
-  'Schedules (this Mac\'s local time): "weekdays 09:00", "daily 09:00", "hourly :15", "weekly fri 16:00", or "cron <5 fields>".',
-  'A catch-up window (default 60 minutes): how late a run missed while the Mac slept may still fire, e.g. 15m, 2h, 1d or 0.',
-].join('\n');
+const ROUTINE_USAGE = R.routineUsage(WORDS);
 
 async function routineCommand({ dir, deps, pos, opts }) {
   const [verb, ...rest] = pos;
@@ -2520,61 +2378,50 @@ async function routineCommand({ dir, deps, pos, opts }) {
     if (rest.length > 1) fail(ROUTINE_USAGE);
     const out = listChannels({ dir, home: deps.home, only: rest.length ? channelName(rest[0]) : null });
     if (opts.json) console.log(JSON.stringify({ machine: out.machine, channels: out.channels.map((c) => ({ id: c.id, name: c.name, routines: c.routines, queued: c.queued })) }));
-    else printRoutines(out);
+    else console.log(R.listText(out, WORDS));
     return 0;
   }
   if (verb === 'preview') {
     // For the Routines dialog: a schedule in words and its next runs, or what is wrong with it.
-    const now = Date.now();
-    let out;
-    try {
-      const s = parseSchedule(rest.join(' '));
-      const next = [];
-      for (let t = now, i = 0; i < 3; i++) { t = nextDue(s.cron, t); if (t == null) break; next.push(new Date(t).toISOString()); }
-      out = { spec: s.spec, label: s.label, next };
-    } catch (err) {
-      if (!(err instanceof ScheduleError)) throw err;
-      out = { error: err.message };
-    }
-    console.log(opts.json ? JSON.stringify(out) : out.error ?? `${out.label}. Next: ${out.next.map((x) => shortWhen(Date.parse(x), now)).join(', ')}`);
+    const out = R.preview(rest.join(' '));
+    console.log(opts.json ? JSON.stringify(out) : R.previewText(out));
     return out.error && !opts.json ? 1 : 0;
   }
   if (rest.length < 2) fail(ROUTINE_USAGE);
   const channel = channelName(rest[0]);
   const name = routineName(rest[1]);
-  const said = (r) => `${r.name}: ${r.enabled ? r.label : `off (${r.label})`}${r.next_at ? `, next ${shortWhen(Date.parse(r.next_at))}` : ''}, catch-up ${r.catchup_min} min.`;
+  if (opts.on && opts.off) fail(`--on or --off, not both.\n${ROUTINE_USAGE}`);
   if (verb === 'add') {
     if (opts.schedule == null) fail(`--schedule is needed.\n${ROUTINE_USAGE}`);
     const text = opts.prompt != null ? (opts.prompt === '-' ? readStdin() : opts.prompt) : rest.length === 3 && rest[2] === '-' ? readStdin() : rest.slice(2).join(' ');
     const r = addRoutine({ dir, channel, name, prompt: text, spec: opts.schedule, catchupMin: opts.catchup == null ? undefined : catchupMinutes(opts.catchup), enabled: !opts.off });
-    console.log(opts.json ? JSON.stringify(r) : `Added a routine to #${channel}: ${said(r)}`);
+    console.log(opts.json ? JSON.stringify(r) : R.confirmation({ verb, channel, routine: r }));
     return 0;
   }
   if (rest.length !== 2) fail(ROUTINE_USAGE);
-  if (verb === 'edit') {
+  if (verb === 'edit' || verb === 'on' || verb === 'off') {
+    // edit takes --on or --off too, so the Routines dialog saves every field and the switch in one write.
     const change = {};
-    if (opts.schedule != null) change.schedule = opts.schedule;
-    if (opts.catchup != null) change.catchupMin = catchupMinutes(opts.catchup);
-    if (opts.prompt != null) change.prompt = opts.prompt === '-' ? readStdin() : opts.prompt;
-    if (opts.rename != null) change.rename = routineName(opts.rename);
-    if (!Object.keys(change).length) fail(`Nothing to change.\n${ROUTINE_USAGE}`);
-    const r = editRoutine({ dir, channel, name, change });
-    console.log(opts.json ? JSON.stringify(r) : `Changed #${channel}'s routine ${said(r)}`);
-    return 0;
-  }
-  if (verb === 'on' || verb === 'off') {
-    const r = editRoutine({ dir, channel, name, change: { enabled: verb === 'on' } });
-    console.log(opts.json ? JSON.stringify(r) : `#${channel}'s routine ${said(r)}`);
+    if (verb === 'edit') {
+      if (opts.schedule != null) change.schedule = opts.schedule;
+      if (opts.catchup != null) change.catchupMin = catchupMinutes(opts.catchup);
+      if (opts.prompt != null) change.prompt = opts.prompt === '-' ? readStdin() : opts.prompt;
+      if (opts.rename != null) change.rename = routineName(opts.rename);
+      if (opts.on || opts.off) change.enabled = Boolean(opts.on);
+      if (!Object.keys(change).length) fail(`Nothing to change.\n${ROUTINE_USAGE}`);
+    } else change.enabled = verb === 'on';
+    const { routine, dropped } = editRoutine({ dir, channel, name, change });
+    console.log(opts.json ? JSON.stringify({ ...routine, dropped }) : R.confirmation({ verb, channel, routine, dropped }));
     return 0;
   }
   if (verb === 'rm') {
     removeRoutine({ dir, channel, name });
-    console.log(`Removed #${channel}'s routine ${name}.`);
+    console.log(R.confirmation({ verb, channel, routine: name }));
     return 0;
   }
   if (verb === 'run') {
     const r = await runRoutine({ dir, deps, channel, name });
-    console.log(opts.json ? JSON.stringify(r) : `Sent #${channel}'s routine ${name} to its chat${r.started ? `, which was started in the background (terminal ${r.address})` : ` (terminal ${r.address})`}.`);
+    console.log(opts.json ? JSON.stringify(r) : R.confirmation({ verb, channel, routine: name, run: r }));
     return 0;
   }
   fail(ROUTINE_USAGE);
@@ -2700,7 +2547,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       const r = await tick({ dir, deps });
       if (opts.json) console.log(JSON.stringify(r));
       else if (r.skipped) console.log('Another tick is running.');
-      else for (const x of r.runs) console.log(`${x.action === 'fire' ? 'Fired' : 'Missed'} #${x.channel} ${x.routine} (due ${when(x.due_at)})`);
+      else for (const x of r.runs) console.log(`${x.action === 'fire' ? 'Fired' : x.action === 'skip' ? 'Skipped' : 'Missed'} #${x.channel} ${x.routine} (due ${when(x.due_at)})${x.action === 'skip' ? `: ${R.SKIP_WHY}` : ''}`);
       return 0;
     }
     if (sub === 'listen') {
@@ -2845,7 +2692,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
     if (sub === 'help' || sub === '-h') { console.log(USAGE); return 0; }
     fail(USAGE);
   } catch (err) {
-    if (err instanceof UsageError) { console.error(err.message); return 1; }
+    if (err instanceof UsageError || err instanceof RoutineError) { console.error(err.message); return 1; }
     throw err;
   }
 }

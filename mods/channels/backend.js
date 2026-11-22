@@ -72,7 +72,9 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - rename-task: `rename-task <task> <name>`
 // - refresh: `refresh --json`, and `updates` in the list
 // - update: `update --bg --json` installs the latest herdr-channels release, and `updates.release` in the list
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update"];
+// - routine-edit-on: `routine edit … --on|--off` saves a routine's fields and its switch in one write; without it
+//   the dialog saves with edit, then on or off
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
