@@ -14,7 +14,7 @@
 // question card shows what it needs and one Open; Open runs `channels link <task> --open`, so it opens on claude.ai.
 // No button starts a turn of the chat. Acting on a card takes
 // it out of the inbox, so it doesn't ride along with the user's next message as well. What the user doesn't act on
-// still rides along: the chat's UserPromptSubmit hook (`channels pending --hook`) takes it.
+// still rides along, unless the chat was told of it as a notice: the chat's UserPromptSubmit hook (`channels pending --hook`) takes it.
 // Outside a channel's chat (no CHANNELS_CHANNEL) the mod draws nothing.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -242,7 +242,7 @@ export const register: Register = on => {
         )}
         {all.length > SHOWN ? (
           <Text dimColor>
-            {'  '}+{all.length - SHOWN} more: the tasks panel has them, and they ride along with your next message.
+            {'  '}+{all.length - SHOWN} more: the tasks panel has them, and the chat hears of them.
           </Text>
         ) : null}
       </Box>

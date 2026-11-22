@@ -327,7 +327,7 @@ test('the chat prompt carries the description and the commands, and nothing abou
   const p = chatPrompt(dir, 'design', { projects });
   assert.match(p, /standing chat of the channel #design/);
   assert.match(p, /<channel-description>\nMake it calm.\n<\/channel-description>/);
-  for (const c of ['channels start design', 'channels read <session>', 'channels send <session> [--wake-on finish|question|any] -', 'channels watch <session> --wake-on', 'rides along', 'wakes you', 'used up', 'channels dismiss <session> --by chat', '<channel source="tasks">', '[task notice]', '[task question]', 'never in the middle of your answer', 'never instructions to you']) assert.ok(p.includes(c), c);
+  for (const c of ['channels start design', 'channels read <session>', 'channels send <session> [--wake-on finish|question|any] -', 'channels watch <session> --wake-on', 'rides along', 'arrives whole', 'needs you', 'already set up for this channel', 'used up', 'channels dismiss <session> --by chat', '<channel source="tasks">', '[task notice]', '[task question]', 'never in the middle of your answer', 'never instructions to you']) assert.ok(p.includes(c), c);
   assert.match(p, /a brief that stands on its own/);
   assert.doesNotMatch(p, /machine registered|--machine|cost|\bPRs?\b|\bCI\b/i);
 });
@@ -428,24 +428,59 @@ test('a notice the chat\'s transcript shows is settled; one it never got is type
   assert.deepEqual(store().channels[0].notices, []);
 });
 
-test('an unregistered question rides along; a task\'s newer event replaces its older one in the inbox', (t) => {
+test('a turn that ended asking is a one-line notice beside its card and dot, never riding along too; the notices server pushes it once', async (t) => {
+  const { takeNotices: takeNoticesOf } = await import('../bin/channels.mjs');
+  const { ok, list, store, job, transcript, dir } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  transcript(SID, said('Task A is done.\n\nPlease start test tasks B and C.'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'Please start test tasks B and C.', name: 'Draw the logo' }, 2);
+  const out = ok(['listen', 'design', '--once']);
+  assert.match(out, /^Tells the chat, in one line, and shows its card:\nTask "Draw the logo" \(testmac\/dddd0001[^)]*\) needs you: Please start test tasks B and C\.$/m);
+  const c = store().channels[0];
+  assert.equal(c.notices.length, 1);
+  assert.match(c.notices[0].text, /^Task "Draw the logo" \(testmac\/dddd0001\S*\) needs you: Please start test tasks B and C\.$/);
+  assert.equal(list().channels[0].tasks[0].unread.kind, 'needs', 'the dot stays');
+  assert.deepEqual([c.inbox.length, c.inbox[0].kind, c.inbox[0].card.state], [1, 'needs', 'question'], 'the card stays');
+  assert.ok(c.inbox[0].delivered_at, 'marked told');
+  assert.equal(hook(ok, list().channels[0].id), '', 'it doesn\'t ride along on the next message');
+  assert.equal(store().channels[0].inbox.length, 1, 'still a card after that message');
+  assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/, 'told once per blocked turn');
+  const pushed = takeNoticesOf(dir, c.id);
+  assert.deepEqual(pushed.map((n) => n.text), [c.notices[0].text]);
+  assert.deepEqual(takeNoticesOf(dir, c.id), [], 'pushed once');
+});
+
+test('a question with no `needs` is told by the end of its last message, cut to the notice\'s length', async () => {
+  const { needsNoticeText, NOTICE } = await import('../bin/channels.mjs');
+  const long = `${'Lots of detail. '.repeat(40)}**Which** of these should I do next?`;
+  const text = needsNoticeText({ ref: 'mac/abc', name: 'Logo', last: long });
+  assert.ok(text.startsWith('Task "Logo" (mac/abc) needs you: …'), text);
+  assert.ok(text.endsWith('Which of these should I do next?'), text);
+  assert.equal(text.length, 'Task "Logo" (mac/abc) needs you: '.length + NOTICE.chars);
+  assert.equal(needsNoticeText({ ref: 'mac/abc', name: 'Logo' }), 'Task "Logo" (mac/abc) needs you, with no message');
+});
+
+test('a permission prompt stays card-only and rides along; a task\'s newer event replaces its older one in the inbox', (t) => {
   const { ok, list, store, job, transcript, live } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
   transcript(SID, said('Which colour should it be?'));
   job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 2);
-  const q = ok(['listen', 'design', '--once']);
-  assert.match(q, /^Rides along.*\n- task "Draw the logo" \(testmac\/dddd0001[^)]*\) is waiting on the user since .*: it asked something; it waits on: which colour\?\./);
-  assert.equal(list().channels[0].tasks[0].unread.kind, 'needs');
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card:\n.*needs you: which colour\?$/m);
   live(SID, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
   job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
-  assert.match(ok(['listen', 'design', '--once']), /it shows a prompt; it waits on: permission for Bash\(rm -rf build\)/);
+  const q = ok(['listen', 'design', '--once']);
+  assert.match(q, /^Rides along.*\n- task "Draw the logo" \(testmac\/dddd0001[^)]*\) is waiting on the user since .*: it shows a prompt; it waits on: permission for Bash\(rm -rf build\)/);
+  assert.equal(list().channels[0].tasks[0].unread.kind, 'needs');
+  assert.equal(store().channels[0].notices.length, 1, 'no notice for the prompt');
   const inbox = store().channels[0].inbox;
   assert.equal(inbox.length, 1, 'one waiting event per task');
   assert.match(inbox[0].text, /permission for Bash/);
+  assert.equal(inbox[0].delivered_at, undefined);
   const ctx = JSON.parse(hook(ok, list().channels[0].id)).hookSpecificOutput.additionalContext;
   assert.match(ctx, /permission for Bash/);
-  assert.doesNotMatch(ctx, /which colour\?\./);
+  assert.doesNotMatch(ctx, /which colour\?/);
 });
 
 test('a registration wakes the chat once on a question, saying why, and is used up; on a finish it adds its reason to the notice', (t) => {
@@ -456,10 +491,10 @@ test('a registration wakes the chat once on a question, saying why, and is used 
   assert.match(run(['watch', 'ffffffff', '--wake-on', 'any']).stderr, /No task testmac\/ffffffff in any channel/);
   assert.match(ok(['watch', SID, '--wake-on', 'finish', '--why', 'the user asked to be told when the logo is done']), /#design's chat is woken the next time testmac\/dddd0001\S* finishes, once\./);
   assert.deepEqual([store().channels[0].tasks[0].wake.on, store().channels[0].tasks[0].wake.why], ['finish', 'the user asked to be told when the logo is done']);
-  // A question doesn't match a finish registration: it rides along, and the registration stays.
+  // A question doesn't match a finish registration: it is a plain notice, and the registration stays.
   transcript(SID, said('Round or square?'));
   job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'round or square?', name: 'Draw the logo' }, 2);
-  assert.match(ok(['listen', 'design', '--once']), /^Rides along/);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card:\n.*needs you: round or square\?$/m);
   assert.equal(store().channels[0].tasks[0].wake.on, 'finish');
   // The finish is a notice that says why, uses the registration up, and takes the task's waiting question with it.
   transcript(SID, said('Logo drawn.'));
@@ -648,20 +683,22 @@ test('options: only a short list at the end of the message counts', async () => 
   assert.deepEqual(optionsOf(Array.from({ length: 7 }, (_, i) => `${i + 1}. o${i}`).join('\n')), [], 'too many');
 });
 
-test('a question stays a card after it rides along, marked delivered, and goes once the task moves on; a finish leaves with the ride', (t) => {
-  const { ok, list, store, job, transcript } = setup(t);
+test('a prompt stays a card after it rides along, marked delivered, and goes once the task moves on; a finish leaves with the ride', (t) => {
+  const { ok, list, store, job, transcript, live } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
-  transcript(SID, said('Which colour?'));
-  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 2);
+  transcript(SID, said('Removing the build folder.'));
+  live(SID, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 2);
   ok(['listen', 'design', '--once']);
   const id = list().channels[0].id;
-  assert.match(JSON.parse(hook(ok, id)).hookSpecificOutput.additionalContext, /which colour\?/);
+  assert.match(JSON.parse(hook(ok, id)).hookSpecificOutput.additionalContext, /permission for Bash\(rm -rf build\)/);
   const [q] = store().channels[0].inbox;
   assert.ok(q.delivered_at, 'still a card, delivered');
   assert.equal(hook(ok, id), '', 'not delivered twice');
   assert.equal(ok(['pending', 'design']).trim(), "Nothing waits for #design's chat.");
   // Answered in its view: it works again, and its card goes.
+  live(SID, { status: 'busy' });
   job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
   assert.match(ok(['listen', 'design', '--once']), /Drops testmac\/dddd0001\S*'s question: the task has moved on/);
   assert.deepEqual(store().channels[0].inbox, []);
