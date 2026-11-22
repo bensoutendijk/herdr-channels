@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.6.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.5.0...v1.6.0) (2026-11-22)
+
+### Features
+
+* A task that ends asking for something tells the chat right away, as a one-line notice ([#43](https://github.com/bensoutendijk/herdr-channels/issues/43)) ([bb50c36](https://github.com/bensoutendijk/herdr-channels/commit/bb50c3654478154c9549dd6317a6488f73961f8f))
+
 ## [1.5.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.4.1...v1.5.0) (2026-11-22)
 
 ### Features
