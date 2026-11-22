@@ -193,7 +193,7 @@ With a store on another machine:
 
 <img src="docs/remote-footer.png" width="280" alt="The foot of the channels sidebar with a store on another machine: a green dot, a server icon, server, connected">
 <img src="docs/remote-menu.png" width="200" alt="A channel's ··· menu for a store that has no routines: Rename, Instructions, Change icon and Archive">
-<img src="docs/routines-server.png" width="420" alt="The New routine form for a store on another machine: name morning-plan, prompt Ask me for my plan for today, and what could get in the way, Weekdays at 09:00, If server was off, still run it within 1 hour, and the line Weekdays at 09:00. Next Mon 09:00, then Tue 09:00. Times are server's.">
+<img src="docs/routines-server.png" width="420" alt="The New routine form for a store on another machine: name morning-check, prompt Ask me for my plan for today, and what could get in the way, Weekdays at 09:00 with Manual among the presets, If server was off, still run it within 1 hour, and the lines Weekdays at 09:00. Next Tomorrow 09:00, then Tue 09:00; If server is off at 09:00, it runs when server is back until 10:00, else it's skipped. Times are server's (America/Chicago).">
 
 The mod keeps its state under its own name (`channels-hc.data`, ...), so a copy installed this way
 beside another channels mod never reads the other's. To go back, switch layouts (`⌘⇧L`, or
