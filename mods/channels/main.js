@@ -119,7 +119,7 @@ const storeName = () => shared(DATA)?.machine ?? ON ?? localName();
 // once, a store on this computer is this repo's command, and one on another machine is taken to have none of them.
 // Updating this install is this computer's business, not the store's: with a store on another machine it is there
 // when install.mjs set up the updater (config.js `updater`).
-const FEATURES = K("features"); // { list: [...] | null (the command doesn't say), at }
+const FEATURES = K("features"); // { list: [...] | null (the command doesn't say), clock: the zone its routine times are in | null, at }
 const has = (feature) => {
   if (feature === "update" && ON) return Boolean(CONFIG.updater?.script && CONFIG.updater?.dir);
   return (shared(FEATURES)?.list ?? shared(DATA)?.features ?? (ON ? [] : B.ALL_FEATURES)).includes(feature);
@@ -129,8 +129,10 @@ async function askFeatures() {
   if (askedFeatures && (shared(FEATURES)?.list || Date.now() - askedFeatures < 600000)) return;
   askedFeatures = Date.now();
   const r = await sh("channels capabilities --json", [], { timeout: 30000 });
-  setShared(FEATURES, { list: r.code === 0 ? B.capabilitiesOf(r.stdout) : null, at: Date.now() });
+  setShared(FEATURES, { list: r.code === 0 ? B.capabilitiesOf(r.stdout) : null, clock: r.code === 0 ? B.clockOf(r.stdout) : null, at: Date.now() });
 }
+// Whose clock routines keep, in words, naming its zone when the command said which (routine preview's `tz` first).
+const routineClock = (tz) => B.routineClock(ON, tz ?? shared(FEATURES)?.clock ?? null);
 
 function uuid() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -298,6 +300,13 @@ function channels() {
   return [...all].sort((a, b) => at(a) - at(b) || `${a.created_at}`.localeCompare(`${b.created_at}`));
 }
 const active = (channel) => (channel?.routines ?? []).some((r) => r.enabled);
+// The sidebar clock's hover: the channel's next routine run, "Next: morning-plan, Tomorrow 09:00".
+function nextRoutine(channel) {
+  const on = (channel?.routines ?? []).filter((r) => r.enabled);
+  const next = on.filter((r) => r.next_at).sort((a, b) => Date.parse(a.next_at) - Date.parse(b.next_at))[0];
+  if (next) return `Next: ${next.name}, ${whenText(next.next_at)}`;
+  return on.length ? "Routines: none on a schedule, they run when you run them" : "Routines";
+}
 const liveTasks = (channel) => (channel?.tasks ?? []).filter((t) => !t.dismissed).sort((a, b) => `${b.added_at}`.localeCompare(`${a.added_at}`));
 const doneTasks = (channel) => (channel?.tasks ?? []).filter((t) => t.dismissed).sort((a, b) => `${b.dismissed_at}`.localeCompare(`${a.dismissed_at}`));
 
@@ -688,7 +697,7 @@ function current() {
 }
 
 const ask = (dialog, channel, width, height) => openOverlay({ mod: MOD, kind: "dialog", width, height, props: { dialog, channel } });
-const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], icon: [560, 560], routines: [640, 640], archive: [440, 190] };
+const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], icon: [560, 560], routines: [640, 680], archive: [440, 190] };
 const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog]);
 // A task's menu (Rename, Open on claude.ai when it has a link, Resolve) opens at the pointer; its Rename dialog looks
 // like a channel's.
@@ -716,16 +725,37 @@ const cx_settle = (view) => { view.settleR = true; };
 
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEK = [1, 2, 3, 4, 5, 6, 0]; // the order the day buttons show, Monday first
-const PRESETS = [["weekdays", "Weekdays", 86], ["daily", "Daily", 62], ["hourly", "Hourly", 66], ["weekly", "Weekly", 70], ["cron", "Cron", 56]];
-const CATCHUP = [[0, "Don't", 62], [15, "15 min", 66], [60, "1 hour", 66], [240, "4 hours", 72], [1440, "1 day", 58]];
+// Manual (no time, Run now only) shows when the store's command has routine-manual.
+const PRESETS = [["weekdays", "Weekdays", 86], ["daily", "Daily", 62], ["hourly", "Hourly", 66], ["weekly", "Weekly", 70], ["cron", "Cron", 56], ["manual", "Manual", 70]];
+const CATCHUP = [[0, "Skip it", 66], [15, "15 min", 66], [60, "1 hour", 66], [240, "4 hours", 72], [1440, "1 day", 58]];
+// The catch-up window a new routine starts with, by preset, until one is picked: short for hourly, so a late run
+// can't land almost on the next one. Cron takes the command's answer (preview's catchup_min).
+const CATCHUP_BY_PRESET = { weekdays: 60, daily: 60, hourly: 15, weekly: 240, cron: 60, manual: 60 };
 const pad2 = (n) => `${n}`.padStart(2, "0");
+
+// One-click starters on the empty Routines list: each opens the editor filled in.
+const STARTERS = [
+  { name: "morning-plan", schedule: "weekdays 09:00", label: "Weekdays at 09:00", prompt: "Ask me for my plan for today, and turn it into tasks where that helps." },
+  { name: "weekly-review", schedule: "weekly fri 16:00", label: "Fridays at 16:00", prompt: "Summarize what this channel's tasks finished this week and what is still open." },
+  { name: "end-of-day", schedule: "weekdays 17:30", label: "Weekdays at 17:30", prompt: "List what's still running or waiting on me before I stop for the day." },
+];
+
+// A routine name from its prompt's first words: "Check whether any task is waiting on me" → check-whether-any-task.
+const FILLER = new Set(["a", "an", "the", "me", "my", "i", "you", "your", "us", "our", "please", "can", "could", "would", "for", "to", "of", "and", "it", "this", "that", "on", "in", "at", "with", "is", "are"]);
+function suggestName(prompt) {
+  const words = `${prompt ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const kept = words.filter((w) => !FILLER.has(w));
+  return (kept.length ? kept : words).slice(0, 4).join("-").slice(0, 40).replace(/-+$/, "");
+}
 
 // A routine's stored schedule ("weekdays 09:00", "cron 0 9 * * 1-5") as the dialog's fields.
 function scheduleFields(spec) {
   const f = { preset: "weekdays", time: "09:00", minute: "00", day: 1, cron: "0 9 * * 1-5" };
   let m;
-  if ((m = /^(weekdays|daily) (\d\d:\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: m[1], time: m[2] });
+  if (spec === "manual") f.preset = "manual";
+  else if ((m = /^(weekdays|daily) (\d\d:\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: m[1], time: m[2] });
   else if ((m = /^hourly :(\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: "hourly", minute: m[1] });
   else if ((m = /^weekly ([a-z]{3}) (\d\d:\d\d)$/.exec(spec ?? ""))) Object.assign(f, { preset: "weekly", day: Math.max(0, DAYS.indexOf(m[1])), time: m[2] });
   else if ((m = /^cron (.+)$/.exec(spec ?? ""))) Object.assign(f, { preset: "cron", cron: m[1] });
@@ -743,7 +773,8 @@ function whenText(iso) {
   if (diff === 1) return `Tomorrow ${hm}`;
   if (diff === -1) return `Yesterday ${hm}`;
   if (Math.abs(diff) < 6) return `${DAY_LABELS[d.getDay()]} ${hm}`;
-  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()}, ${hm}`;
+  // Month names by hand: the mod's runtime ignores toLocaleString's options (it gave "12/04/2026, 04:00:00 PM").
+  return `${MONTH_LABELS[d.getMonth()]} ${d.getDate()}, ${hm}`;
 }
 
 // A routine's last run in a few words, and the colour to say it in.
@@ -1054,9 +1085,13 @@ export default class Channels extends View {
           .on_mouse_down("right", () => menu(c))
           .child(div().w(20).flex_none().text_size(15).child(iconOf(c)))
           .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(selected || lifted ? t.foreground : t.muted).child(c.name))
-          // A small clock while the channel has a routine switched on.
-          .child(div().id(`ch-clock-${c.name}`).flex_none().w(active(c) ? 14 : 0).h(14).overflow_hidden().opacity(active(c) ? 1 : 0)
-            .transition("opacity", 180).transition("width", 180)
+          // A small clock while the channel has a routine switched on: hover names the next run, a click opens Routines.
+          .child(div().id(`ch-clock-${c.name}`).flex_none().w(active(c) ? 20 : 0).h(20).overflow_hidden().opacity(active(c) ? 1 : 0)
+            .transition("opacity", 180).transition("width", 180).rounded(5).flex().items_center().justify_center()
+            .when(active(c) && has("routines"), (el) => el.cursor_pointer().tooltip(nextRoutine(c))
+              .hover((st) => st.bg(selected ? t.hover : t.raised))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click(() => openDialog("routines", c.name)))
             .child(svg(ICON("clock")).size(13).text_color(selected ? t.muted : t.dim)))
           .when(!drag && (this.hover === key || selected), (el) => el.child(this.tool(`ch-more-${c.name}`, "···", () => menu(c), t))));
     };
@@ -1649,27 +1684,59 @@ export default class Channels extends View {
     cx.notify();
   }
 
-  openEditor(r, cx) {
-    const f = scheduleFields(r?.schedule ?? "weekdays 09:00");
+  // `r` is the routine to edit; `starter` (no `r`) fills a new one in from STARTERS.
+  openEditor(r, cx, starter = null) {
+    const from = r ?? starter;
+    const f = scheduleFields(from?.schedule ?? "weekdays 09:00");
     const input = (value, placeholder) => {
       const st = InputState.new({ placeholder, value });
       st.on("change", (_e, cx) => this.previewSoon(cx));
       st.on("submit", (_e, cx) => this.saveRoutine(cx));
       return st;
     };
-    this.form = {
-      id: r?.id ?? null, was: r?.name ?? null, preset: f.preset, day: f.day, catchup: r?.catchup_min ?? 60, enabled: r ? r.enabled : true,
-      name: input(r?.name ?? "", "morning-plan"), time: input(f.time, "09:00"), minute: input(f.minute, "00"), cron: input(f.cron, "0 9 * * 1-5"),
-      prompt: TextareaState.new({ placeholder: "What the chat is asked each time, e.g. Ask me for my plan for today.", value: r?.prompt ?? "" }),
-      preview: null, previewFor: null, error: null,
+    const form = {
+      id: r?.id ?? null, was: r?.name ?? null, preset: f.preset, day: f.day, enabled: r ? r.enabled : true,
+      // A new routine's catch-up follows its preset until one is picked; a saved one keeps its own.
+      catchup: r?.catchup_min ?? CATCHUP_BY_PRESET[f.preset], catchupPicked: Boolean(r),
+      name: input(from?.name ?? "", "morning-plan"), time: input(f.time, "09:00"), minute: input(f.minute, "00"), cron: input(f.cron, "0 9 * * 1-5"),
+      prompt: TextareaState.new({ placeholder: "What the chat is asked each time, e.g. Ask me for my plan for today.", value: from?.prompt ?? "" }),
+      // The name fills itself from the prompt until it is typed in (or it came with the routine).
+      nameTyped: Boolean(from?.name), filling: false,
+      preview: null, previewFor: null,
     };
+    form.name.on("change", (_e, cx) => { if (!form.filling) form.nameTyped = `${form.name.value() ?? ""}`.trim() !== ""; cx.notify(); });
+    form.prompt.on("change", (_e, cx) => {
+      if (!form.nameTyped) { form.filling = true; form.name.set_value(suggestName(form.prompt.value())); form.filling = false; }
+      cx.notify();
+    });
+    this.form = form;
     this.slideTo("edit", cx);
-    cx.timer.after(60, () => (r ? this.form?.prompt.focus() : this.form?.name.focus()));
+    cx.timer.after(60, () => (from ? this.form?.prompt.focus() : this.form?.name.focus()));
     this.previewSoon(cx, 0);
+  }
+
+  pickPreset(f, preset, cx) {
+    f.preset = preset;
+    if (!f.catchupPicked) f.catchup = CATCHUP_BY_PRESET[preset];
+    this.previewSoon(cx, 0);
+  }
+
+  // What stops the form from saving, by field, worked out on every draw: { name, prompt, schedule, reason }.
+  // `reason` is the first of them in a few words, for beside the dimmed Create.
+  problems(f, c) {
+    const name = `${f.name.value() ?? ""}`.trim().toLowerCase();
+    const out = { name: null, prompt: null, schedule: null, reason: null };
+    if (name && !NAME.test(name)) out.name = "Lowercase letters, digits, - and _, like morning-plan.";
+    else if (name && (c?.routines ?? []).some((r) => r.name === name && r.id !== f.id)) out.name = `#${c.name} already has a routine called ${name}.`;
+    const spec = this.specOf(f);
+    if (f.previewFor === spec && f.preview?.error) out.schedule = f.preview.error;
+    out.reason = !name ? "Needs a name" : out.name ? "Fix the name" : !`${f.prompt.value() ?? ""}`.trim() ? "Needs a prompt" : out.schedule ? "Fix the schedule" : null;
+    return out;
   }
 
   specOf(f) {
     const v = (st) => `${st.value() ?? ""}`.trim();
+    if (f.preset === "manual") return "manual";
     if (f.preset === "hourly") return `hourly :${v(f.minute).replace(/^:/, "") || "00"}`;
     if (f.preset === "weekly") return `weekly ${DAYS[f.day]} ${v(f.time)}`;
     if (f.preset === "cron") return `cron ${v(f.cron)}`;
@@ -1689,6 +1756,8 @@ export default class Channels extends View {
         if (this.form !== f || f.want !== spec) return;
         f.preview = JSON.parse(out);
         f.previewFor = spec;
+        // A cron line's default window is the command's to judge (several runs a day get a short one).
+        if (!f.catchupPicked && f.preset === "cron" && Number.isFinite(f.preview?.catchup_min)) f.catchup = f.preview.catchup_min;
         cx.notify();
       }).catch((err) => { f.preview = { error: String(err?.message ?? err) }; cx.notify(); });
     });
@@ -1702,11 +1771,8 @@ export default class Channels extends View {
     const name = `${f.name.value() ?? ""}`.trim().toLowerCase();
     const prompt = `${f.prompt.value() ?? ""}`.trim();
     const spec = this.specOf(f);
-    const say = (error) => { f.error = error; cx.notify(); };
-    if (!NAME.test(name)) return say("Name it with lowercase letters, digits, - and _, like morning-plan.");
-    if ((c.routines ?? []).some((r) => r.name === name && r.id !== f.id)) return say(`#${c.name} already has a routine called ${name}.`);
-    if (!prompt) return say("Write the prompt: what the chat is asked each time.");
-    if (f.previewFor === spec && f.preview?.error) return say(f.preview.error);
+    // Create is dimmed until the form is good; the reasons show at their fields.
+    if (this.problems(f, c).reason) return cx.notify();
     const shown = { name, prompt, schedule: f.preview?.spec ?? spec, label: f.previewFor === spec ? f.preview?.label ?? spec : spec, catchup_min: f.catchup, enabled: f.enabled, next_at: f.enabled ? f.preview?.next?.[0] ?? null : null };
     const args = [c.name, f.was ?? name, spec, String(f.catchup), prompt, name];
     if (f.id) {
@@ -1782,7 +1848,8 @@ export default class Channels extends View {
     const closed = this.leavingR.has(r.id) || fresh;
     const [last, lastColor] = lastRun(r, t);
     const meta = h_flex().gap(14).text_size(12).text_color(t.dim)
-      .child(h_flex().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off")))
+      // A manual routine has no next run: its label already says it runs when run.
+      .when(r.schedule !== "manual", (el) => el.child(h_flex().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off"))))
       .child(h_flex().gap(4).min_w(0).child("Last").child(div().truncate().text_color(lastColor).child(last)));
     return h_flex().id(`rt-${r.id}`).flex_none().overflow_hidden().h(closed ? 0 : 78).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
       .child(h_flex().id(`rt-in-${r.id}`).flex_1().min_w(0).h(74).px(12).gap(12).items_center().rounded(10)
@@ -1834,68 +1901,107 @@ export default class Channels extends View {
       const field = (el, w) => el.px(12).rounded(9).border_1().border_color(t.border).bg(t.background).text_size(14).text_color(t.foreground).when(Boolean(w), (e) => e.w(w));
       const spec = this.specOf(f);
       const pv = f.previewFor === spec ? f.preview : null;
+      const bad = this.problems(f, c);
+      // An error sits under the field it is about, and only there.
+      const fieldError = (text) => div().pt(6).text_size(12.5).text_color(t.blocked).child(text);
+      const presets = PRESETS.filter(([v]) => v !== "manual" || has("routine-manual") || f.preset === "manual");
       const scheduleLine = {
-        weekdays: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Monday to Friday at")).child(field(Input.new(f.time).h(30), 84)),
-        daily: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Every day at")).child(field(Input.new(f.time).h(30), 84)),
-        hourly: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Every hour at minute")).child(field(Input.new(f.minute).h(30), 64)),
+        weekdays: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Monday to Friday at")).child(field(Input.new(f.time).h(30), 84).when(Boolean(bad.schedule), (e) => e.border_color(t.blocked))),
+        daily: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Every day at")).child(field(Input.new(f.time).h(30), 84).when(Boolean(bad.schedule), (e) => e.border_color(t.blocked))),
+        hourly: () => h_flex().gap(10).items_center().child(div().text_size(13).text_color(t.muted).child("Every hour at minute")).child(field(Input.new(f.minute).h(30), 64).when(Boolean(bad.schedule), (e) => e.border_color(t.blocked))),
         weekly: () => h_flex().gap(10).items_center()
           .child(RadioGroup.new("rt-days").flex().flex_row().gap(4).children(WEEK.map((d) => Radio.new(`rt-day-${d}`).checked(f.day === d)
             .on_change((_on, cx) => { f.day = d; this.previewSoon(cx); }).w(40).h(30).flex().items_center().justify_center().rounded(8).text_size(12.5).cursor_pointer()
             .bg(f.day === d ? t.accent : t.raised).text_color(f.day === d ? t.accent_foreground : t.muted).when(f.day !== d, (el) => el.hover((st) => st.text_color(t.foreground)))
             .child(DAY_LABELS[d]))))
-          .child(div().text_size(13).text_color(t.muted).child("at")).child(field(Input.new(f.time).h(30), 84)),
+          .child(div().text_size(13).text_color(t.muted).child("at")).child(field(Input.new(f.time).h(30), 84).when(Boolean(bad.schedule), (e) => e.border_color(t.blocked))),
         cron: () => v_flex().gap(6).flex_1()
-          .child(field(Input.new(f.cron).h(34)).border_color(pv?.error ? t.blocked : t.border))
+          .child(field(Input.new(f.cron).h(34)).border_color(bad.schedule ? t.blocked : t.border))
           .child(h_flex().gap(18).pl(12).text_size(11.5).text_color(t.dim).children(["minute", "hour", "day", "month", "weekday"].map((x) => div().child(x)))),
+        manual: () => h_flex().items_center().text_size(13).text_color(t.muted).child("No time: it runs when you press Run now in the list."),
       }[f.preset]();
       const catchups = CATCHUP.some((o) => o[0] === f.catchup) ? CATCHUP : [...CATCHUP, [f.catchup, f.catchup % 60 ? `${f.catchup} min` : `${f.catchup / 60} h`, 64]];
-      const next = pv?.error ? null : pv?.next ?? null;
+      const next = pv && !pv.error ? pv.next ?? [] : null;
+      const clock = routineClock(pv?.tz);
+      // The catch-up window as an outcome, for the next run's time of day.
+      let rule = "";
+      if (next?.[0]) {
+        const at = new Date(next[0]);
+        const until = new Date(at.getTime() + Math.max(2, f.catchup) * 60000);
+        const hm = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+        rule = B.catchupRule(ON, hm(at), f.catchup ? `${hm(until)}${f.catchup >= 1440 ? " the next day" : ""}` : null);
+      }
+      const line = (icon, text, color) => h_flex().gap(8).items_start().min_w(0).text_color(color ?? t.dim)
+        .child(icon ? svg(ICON(icon)).size(13).mt(2).flex_none().text_color(color ?? t.dim) : div().w(13).flex_none())
+        .child(div().flex_1().min_w(0).child(text));
+      const previewLines = !pv ? [line("clock", "Working out when it runs…")]
+        : pv.error ? [line("clock", "When it runs shows here once the schedule reads right.")]
+        : pv.manual ? [line("clock", `${pv.label}.`)]
+        : [
+          line("clock", `${pv.label}. ${f.enabled ? (next[0] ? `Next ${whenText(next[0])}${next[1] ? `, then ${whenText(next[1])}` : ""}.` : "It doesn't come due again.") : "Off: it won't run until you switch it on."}`),
+          line(null, `${rule} ${clock.short}`.trim()),
+          ...(pv.warnings ?? []).map((w) => line("triangle-alert", w, t.ansi3 ?? t.working)),
+        ];
+      const ready = !bad.reason;
       body = v_flex().flex_1().min_h(0)
         .child(head(f.id ? "Edit routine" : "New routine", (_e, cx) => { this.form = null; this.slideTo("list", cx); })
           .child(div().text_size(13).text_color(t.muted).child(f.enabled ? "On" : "Off"))
           .child(this.switchFor("rt-enabled", f.enabled, (on) => { f.enabled = on; }, t)))
         .child(div().pb(8).text_size(13.5).font_medium().child("Name"))
-        .child(field(Input.new(f.name).h(38)))
+        .child(field(Input.new(f.name).h(38)).when(Boolean(bad.name), (e) => e.border_color(t.blocked)))
+        .when(Boolean(bad.name), (el) => el.child(fieldError(bad.name)))
+        .when(!bad.name && !f.nameTyped && !f.id && Boolean(`${f.name.value() ?? ""}`.trim()), (el) => el.child(div().pt(6).text_size(12).text_color(t.dim).child("Suggested from the prompt. Edit it to keep your own.")))
         .child(label("Prompt"))
         .child(field(Textarea.new(f.prompt).h(92).py(10)))
         .child(label("Schedule"))
-        .child(this.segmented("rt-preset", PRESETS, f.preset, (v, cx) => { f.preset = v; this.previewSoon(cx, 0); }, t))
+        .child(this.segmented("rt-preset", presets, f.preset, (v, cx) => this.pickPreset(f, v, cx), t))
         .child(h_flex().pt(10).min_h(40).child(scheduleLine))
-        .when(f.preset === "cron" && Boolean(pv?.error), (el) => el.child(div().pt(6).text_size(12.5).text_color(t.blocked).child(pv.error)))
-        .when(f.preset !== "cron" && Boolean(pv?.error), (el) => el.child(div().pt(6).text_size(12.5).text_color(t.blocked).child(pv.error)))
-        .child(label(B.routineClock(ON).missed))
-        .child(this.segmented("rt-catchup", catchups, f.catchup, (v) => { f.catchup = v; }, t))
+        .when(Boolean(bad.schedule), (el) => el.child(fieldError(bad.schedule)))
+        .when(f.preset !== "manual", (el) => el
+          .child(label(clock.missed))
+          .child(this.segmented("rt-catchup", catchups, f.catchup, (v) => { f.catchup = v; f.catchupPicked = true; }, t)))
         .child(div().flex_1())
-        .child(h_flex().pb(12).gap(8).items_center().text_size(12.5).text_color(f.error ? t.blocked : t.dim)
-          .child(svg(ICON("clock")).size(13).text_color(t.dim))
-          .child(div().truncate().child(f.error ?? (pv?.error ? "Fix the schedule to see when it runs next."
-            : !next ? "Working out when it runs…"
-            : `${pv.label}. ${f.enabled ? `Next ${whenText(next[0])}${next[1] ? `, then ${whenText(next[1])}` : ""}.` : "Off: it won't run until you switch it on."} ${B.routineClock(ON).short}`))))
+        .child(v_flex().pb(12).gap(4).text_size(12.5).children(previewLines))
         .child(h_flex().gap(8).items_center()
           .when(Boolean(f.id), (el) => el.child(h_flex().id("rt-delete").h(34).px(12).items_center().rounded(9).text_size(13.5).font_medium().cursor_pointer()
             .text_color(t.blocked).hover((st) => st.bg(t.raised))
             .on_click((_e, cx) => { const r = (c?.routines ?? []).find((x) => x.id === f.id); if (r) { this.confirm = r.id; this.removeRoutine(r, cx); } })
             .child("Delete")))
           .child(div().flex_1())
+          .when(!ready, (el) => el.child(div().pr(4).text_size(12.5).text_color(t.dim).child(bad.reason)))
           .child(button("rt-cancel", "Cancel", false, (_e, cx) => { this.form = null; this.slideTo("list", cx); }))
-          .child(button("rt-save", f.id ? "Save" : "Create", true, (_e, cx) => this.saveRoutine(cx))));
+          .child(button("rt-save", f.id ? "Save" : "Create", true, (_e, cx) => this.saveRoutine(cx))
+            .when(!ready, (e) => e.opacity(0.4).cursor_default().hover((st) => st.opacity(0.4)))));
     } else {
       const list = c?.routines ?? [];
       const fresh = new Set(this.knownR ? list.filter((r) => !this.knownR.has(r.id)).map((r) => r.id) : []);
       this.knownR = new Set(list.map((r) => r.id));
       if (fresh.size) cx_settle(this);
+      // With no routines yet the list teaches by example: starters that open the editor filled in, and the chat.
+      const starter = (s) => h_flex().id(`rt-start-${s.name}`).flex_none().px(12).py(10).gap(12).items_center().rounded(10)
+        .border_1().border_color(t.border).bg(t.raised).cursor_pointer().hover((st) => st.bg(t.hover))
+        .on_click((_e, cx) => this.openEditor(null, cx, s))
+        .child(div().w(30).h(30).flex_none().rounded(8).bg(t.background).flex().items_center().justify_center()
+          .child(svg(ICON("clock")).size(15).text_color(t.accent)))
+        .child(v_flex().flex_1().min_w(0).gap(3)
+          .child(h_flex().gap(8).items_baseline().min_w(0)
+            .child(div().flex_none().text_size(14).font_medium().child(s.name))
+            .child(div().truncate().text_size(12.5).text_color(t.muted).child(s.label)))
+          .child(div().truncate().text_size(12.5).text_color(t.dim).child(s.prompt)))
+        .child(svg(ICON("chevron-right")).size(14).text_color(t.dim));
       body = v_flex().flex_1().min_h(0)
         .child(head("Routines", null).child(this.tool("dg-x", svg(ICON("x")).size(16), () => this.close(), t)))
         .child(h_flex().pb(14).gap(8).items_center().text_size(14).text_color(t.muted).child(div().text_size(15).child(iconOf(c))).child(p.channel))
         .child(v_flex().id("rt-list").flex_1().min_h(0).overflow_y_scrollbar().gap(2)
           .children(list.map((r) => this.routineRow(r, t, fresh.has(r.id))))
-          .when(list.length === 0, (el) => el.child(v_flex().pt(48).gap(6).items_center()
-            .child(svg(ICON("clock")).size(22).text_color(t.dim))
-            .child(div().pt(6).text_size(14).text_color(t.muted).child("No routines yet"))
-            .child(div().text_size(12.5).text_color(t.dim).child("A routine types a prompt into this channel's chat on a schedule.")))))
-        .child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
-          .child(`Each routine types its prompt into this channel's chat on schedule, starting the chat if it isn't open. ${B.routineClock(ON).times}`))
-        .child(h_flex().gap(8).items_center()
+          .when(list.length === 0, (el) => el.child(v_flex().pt(18).gap(8)
+            .child(div().text_size(14).child("No routines yet"))
+            .child(div().pb(8).text_size(12.5).text_color(t.dim).child(`A routine types its prompt into this channel's chat on a schedule, and starts the chat if it isn't open. ${routineClock().times} Start from one of these:`))
+            .children(STARTERS.map(starter))
+            .child(h_flex().pt(10).gap(4).text_size(12.5).text_color(t.dim).child("or ask the chat:").child(div().text_color(t.muted).child("\"every weekday at 9, ask me for my plan\""))))))
+        .when(list.length > 0, (el) => el.child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
+          .child(`Each routine types its prompt into this channel's chat on schedule, starting the chat if it isn't open. ${routineClock().times}`)))
+        .child(h_flex().gap(8).items_center().when(list.length === 0, (el) => el.pt(14))
           .child(button("rt-new", h_flex().gap(6).items_center().child(svg(ICON("plus")).size(14)).child("New routine"), false, (_e, cx) => this.openEditor(null, cx)))
           .child(div().flex_1())
           .child(button("rt-done", "Done", true, () => this.close())));

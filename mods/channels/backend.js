@@ -74,7 +74,8 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - update: `update --bg --json` installs the latest herdr-channels release, and `updates.release` in the list
 // - routine-edit-on: `routine edit … --on|--off` saves a routine's fields and its switch in one write; without it
 //   the dialog saves with edit, then on or off
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on"];
+// - routine-manual: `routine add|edit … --schedule manual`, a routine with no time that runs only when run
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
@@ -84,6 +85,14 @@ export function capabilitiesOf(text) {
   try {
     const out = JSON.parse(`${text ?? ""}`.trim());
     return Array.isArray(out?.features) ? out.features.filter((f) => typeof f === "string") : null;
+  } catch { return null; }
+}
+
+// The zone routine times are in, from `capabilities --json` ({ clock: { tz } }): null when the command doesn't say.
+export function clockOf(text) {
+  try {
+    const tz = JSON.parse(`${text ?? ""}`.trim())?.clock?.tz;
+    return typeof tz === "string" && tz ? tz : null;
   } catch { return null; }
 }
 
@@ -127,10 +136,20 @@ export function standingOf(fromAgent, fromStore) {
 
 // Whose clock a routine keeps, in the Routines dialog's words: this computer's, or the store machine's (`on`), where
 // the timer runs, and so what a missed run waited on.
-export function routineClock(on) {
+// `tz` is the zone that clock keeps, when the command said (capabilities' clock.tz).
+export function routineClock(on, tz = null) {
+  const zone = tz ? ` (${tz})` : "";
   return on
-    ? { times: `Times are ${on}'s local time.`, short: `Times are ${on}'s.`, missed: `If ${on} was off, still run it within` }
-    : { times: "Times are this Mac's local time.", short: "Times are this Mac's.", missed: "If the Mac was asleep, still run it within" };
+    ? { times: `Times are ${on}'s local time${zone}.`, short: `Times are ${on}'s${zone}.`, missed: `If ${on} was off, still run it within` }
+    : { times: `Times are this Mac's local time${zone}.`, short: `Times are this Mac's${zone}.`, missed: "If the Mac was asleep, still run it within" };
+}
+
+// What the catch-up window means for a run at `at` ("09:00"), in words: it still runs late until `until`, or with no
+// window (`until` null) it is skipped.
+export function catchupRule(on, at, until) {
+  if (!at) return "";
+  if (on) return until ? `If ${on} is off at ${at}, it runs when ${on} is back until ${until}, else it's skipped.` : `If ${on} is off at ${at}, that run is skipped.`;
+  return until ? `If the Mac sleeps through ${at}, it runs on wake until ${until}, else it's skipped.` : `If the Mac sleeps through ${at}, that run is skipped.`;
 }
 
 // How the sidebar's footer names the store's machine and its link: Herdr's machines() entry for it.

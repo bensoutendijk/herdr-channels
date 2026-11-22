@@ -64,6 +64,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as R from './routines.mjs';
 import { catchupMinutes, RoutineError, routineName, routineText, ROUTINE_DEFAULTS, schedule, showRoutine } from './routines.mjs';
+import { timeZone } from './schedule.mjs';
 import { checkRelease, CLONE, releaseStatus, update as updateClone, UpdateRefused, updateInBackground } from './release.mjs';
 import { cloudId, cloudUrl, listCloudSessions, probeAttach, sendToCloudSession, startCloudSession } from './cloud.mjs';
 
@@ -645,7 +646,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual'];
 
 export function listChannels({ dir, home = homedir(), all = false, only = null }) {
   const store = readStore(dir);
@@ -2506,7 +2507,8 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
     }
     if (sub === 'capabilities') {
       if (pos.length) fail('channels capabilities [--json]');
-      console.log(opts.json ? JSON.stringify({ features: FEATURES }) : FEATURES.join('\n'));
+      // clock: the zone routine times are in, which the Routines dialog names.
+      console.log(opts.json ? JSON.stringify({ features: FEATURES, clock: { tz: timeZone() } }) : FEATURES.join('\n'));
       return 0;
     }
     if (sub === 'update') {
