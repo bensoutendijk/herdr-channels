@@ -505,7 +505,7 @@ Each answered by the real run (§10):
     `dev/sandbox up --codex real` before phase 2 and phase 3 merge.
 11. **New: approvals from a card in phase 2?** *Recommended: yes* (§3). About a day more in phase 2.
 12. **New: show the account's Codex usage?** `account/rateLimits/read` gives the plan's 5-hour and weekly
-    windows as percentages. *Recommended: later, as a line in the Refresh row's harness list*, not in phase 2.
+    windows as percentages. *Recommended: later, as a line in the Refresh row's harness list*, not in phase 2. **Decided: no** (Ben).
 
 ### Decided
 
@@ -515,8 +515,8 @@ Ben's answers to the four questions the real run left open (2026-11-22):
 | --- | --- |
 | The "how to ask" rule in each Codex task's developer instructions (5) | **Yes** |
 | Allow / Deny on Codex approval cards, in phase 2 (11) | **Yes** |
-| The chat's hook-trust prompt (6) | **The listener answers "Trust all" once**, and the README says so; Ben accepted that it also trusts his own new hooks. `thread/inject_items` is the fallback until it's trusted |
-| Codex usage in the panel (12) | **Later**, as a line in the Refresh row |
+| The chat's hook-trust prompt (6) | **The listener answers "Trust all" once**, and the README says so; Ben is fine with it also trusting his own new hooks. `thread/inject_items` is the fallback until it's trusted |
+| Codex usage in the panel (12) | **No**: not shown, now or later |
 
 ## 9. Phases
 
@@ -526,7 +526,7 @@ Ben's answers to the four questions the real run left open (2026-11-22):
 | 2. Codex tasks | M–L (4–6 days) | `bin/harness/codex.mjs`, `bin/codex-rpc.mjs` (seeded by `dev/codex-rpc.mjs`); `channels start --harness codex` with the question rule and the `CLAUDE.md` fallback, read, send (queued while working), rename, file, dismiss; events and cards in the Claude Code chat; approval cards with Allow / Deny, answered by the listener's client; the panel's standing, harness mark and New session menu; `install.mjs --codex`; `harnesses` in `capabilities` and `list`; terminal mode as the fallback; a README section, and screenshots per the repo's rule |
 | 3. A Codex chat | M (2–3 days) | The per-chat app-server; notices by `turn/start` and the queue; the ride-along hook, its trust prompt answered once by the listener (and `thread/inject_items` until then); routines queued; refresh for a Codex chat; the chat's prompt worded per harness; `channels harness <channel> --chat`, and the channel menu's choice |
 | 4. The hub | M (2–3 days, its own repo) | §7's list, in the server's command; `capabilities` says `harnesses` once it's done |
-| 5. Later, as wanted | S each | The account's Codex usage in the Refresh row; Codex Cloud as a cloud placement; "Pair with the Codex app"; Codex's `request_user_input` answered from a card |
+| 5. Later, as wanted | S each | Codex Cloud as a cloud placement; "Pair with the Codex app"; Codex's `request_user_input` answered from a card |
 
 Tasks come before the chat because they need no chat changes at all: the Claude Code chat starts, reads,
 answers and hears about Codex tasks through the same `channels` commands, and its cards work for them. That
@@ -583,7 +583,7 @@ window and 1% of its week. A typical small task used 19k–160k tokens, mostly c
 looking (19k), a one-file fix (95k), setting up a test runner (161k). That is roughly a quarter of a percent of
 the 5-hour window each, so a Plus plan carries dozens of small tasks per window. With an API key instead, the
 same tokens are billed per token, and the account type is visible to the harness (`account/read`'s
-`authMode` and `planType`), so a usage line could show either.
+`authMode` and `planType`).
 
 **What carries over to phases 2–4.** `dev/sandbox` holds the recipe: `task`, `follow --approve`, `send`, `chat`,
 `last` and `usage` are the calls phase 2's `bin/harness/codex.mjs` makes, and `dev/codex-rpc.mjs` is the client
