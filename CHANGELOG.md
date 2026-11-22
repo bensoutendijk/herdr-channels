@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.1.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.1.0...v1.1.1) (2026-11-22)
+
+### Bug Fixes
+
+* a Refresh waits out a chat listener's own refresh instead of answering busy ([#33](https://github.com/bensoutendijk/herdr-channels/issues/33)) ([cb4f730](https://github.com/bensoutendijk/herdr-channels/commit/cb4f73097495b6e412a28377e498c350cd414d45))
+
 ## [1.1.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.0.2...v1.1.0) (2026-11-21)
 
 ### Features
