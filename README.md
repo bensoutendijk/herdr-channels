@@ -406,7 +406,7 @@ Every question and permission prompt also shows as a card in the chat, in the ba
 prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
 the chat:
 
-<img src="docs/task-cards.png" width="540" alt="The #website chat: a one-line notice, ← tasks: Task Pick a hero headline finished, and the chat's one-sentence answer; below it two cards above the prompt: Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open; and Build the site waits on a permission prompt, with Open">
+<img src="docs/task-cards.png" width="480" alt="The #website chat: a notice, ← tasks: Task Pick a homepage headline, which Claude Code shows cut to two lines, and the chat's answer that the task waits on the user's pick among three headlines, with its own view; below it a card above the prompt: Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open">
 
 | Card | Shows | Buttons |
 |---|---|---|
