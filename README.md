@@ -577,6 +577,25 @@ that is off, the button says **Run once**). Its row says **Queued for the chatâ€
 it, then **Delivered** with the time. Switching a routine off drops a scheduled run of it that was
 still waiting for the chat; a run you asked for with Run now stays. You can also ask the chat
 ("every weekday at 9, ask me for my plan"): it sets the routine up with `channels routine add`.
+A request no schedule fits ("every 90 minutes") gets the nearest one that does, and the chat says
+what it chose. Something once ("remind me at 3 tomorrow") becomes a routine on that date that
+removes itself when it runs. When it rounded a schedule or isn't sure what you meant, the chat
+first proposes the routine with `--dry-run`, which runs every check and prints what it would set
+up without saving. Either way it passes on the block the command prints:
+
+```
+Added a routine to #general:
+  Routine:   morning-plan in #general
+  When:      Weekdays at 09:00, this Mac's time
+  Status:    on
+  Next runs: Mon Nov 23, 09:00 and Tue Nov 24, 09:00
+  Catch-up:  runs up to 1 hour late if this Mac was asleep or off at the time
+  Prompt:    "Ask me for my plan for today."
+  To change: ask in #general's chat, or open Routines in #general's menu (channels routine edit general morning-plan â€¦)
+```
+
+Ask the chat why a routine didn't run and it reads `channels routine list --json`: whether the
+routine was off, and whether its last run was queued, delivered, missed or skipped, and when.
 
 In the editor, the name fills itself from the prompt's first words until you type one. A problem
 shows under the field it is about, and Create stays dimmed with the reason (Needs a name, Needs a
@@ -608,7 +627,10 @@ clocks go forward (02:30 in most of the US and Europe), the editor warns that th
 **When a routine fires**, its prompt is typed into the channel's chat by the chat's listener, the
 way a task report the chat registered for is (`hc send`, which waits while you are typing), as a
 message that starts with `[routine <name>, scheduled 09:00]`. It wakes the chat: it doesn't wait for
-your next message. The chat then decides what to do.
+your next message. The message ends with what the chat's reply should be: one plain line with the
+outcome first (when there is nothing for you, that line is the whole reply), any limits the prompt
+sets on days or times checked against the actual weekday and time, which the message states, and a
+question only when the chat can't go on without one.
 
 **If the chat isn't running**, the routine starts it in the background: the same chat session, so
 its history is kept, in a herdr-core terminal named `chat-<channel id>`. Selecting the channel in
@@ -635,6 +657,7 @@ in the store. Check that the timer is loaded with
 
 ```sh
 channels routine add general morning-plan --schedule "weekdays 09:00" "Ask me for my plan for today."
+channels routine add general standup --schedule "weekdays 09:30" --dry-run "Ask me for my plan."
 channels routine list
 channels routine run general morning-plan
 ```
@@ -667,8 +690,8 @@ channels notices <channel id>
 channels open <session>
 channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]
-channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] <prompt | ->
-channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off]
+channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] [--dry-run] <prompt | ->
+channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--dry-run]
 channels routine rm|run|on|off <channel> <name>
 channels routine preview <schedule> [--json]
 channels refresh [--auto] [--json]
