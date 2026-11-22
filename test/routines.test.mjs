@@ -512,9 +512,10 @@ test('preview names the time zone and warns of a time the clocks skip', (t) => {
   assert.equal(chicago.tz, 'America/Chicago');
   assert.equal(chicago.warnings.length, 1);
   assert.match(chicago.warnings[0], /^02:30 doesn't happen on Mar \d+, \d{4} \(the clocks go forward\), so that run is skipped\.$/);
-  const half = JSON.parse(ok(['routine', 'preview', 'cron */30 * * * *', '--json'], undefined, { TZ: 'Europe/Amsterdam' }));
+  const half = JSON.parse(ok(['routine', 'preview', 'cron 0,30 2 * * *', '--json'], undefined, { TZ: 'Europe/Amsterdam' }));
   assert.equal(half.tz, 'Europe/Amsterdam');
   assert.match(half.warnings[0], /^The clocks go forward on Mar \d+, \d{4}, so the runs from 02:00 to 02:30 are skipped\.$/);
+  assert.deepEqual(JSON.parse(ok(['routine', 'preview', 'cron */30 * * * *', '--json'], undefined, { TZ: 'Europe/Amsterdam' })).warnings, [], 'every half hour: just a run fewer that night');
   assert.deepEqual(JSON.parse(ok(['routine', 'preview', 'daily 09:00', '--json'], undefined, { TZ: 'America/Chicago' })).warnings, [], 'a time every day has');
   assert.deepEqual(JSON.parse(ok(['routine', 'preview', 'daily 02:30', '--json'], undefined, { TZ: 'Asia/Tokyo' })).warnings, [], 'a zone without clock changes');
   assert.deepEqual(JSON.parse(ok(['capabilities', '--json'], undefined, { TZ: 'Europe/Amsterdam' })).clock, { tz: 'Europe/Amsterdam' });

@@ -167,8 +167,10 @@ export function skippedTimes(cron, from = Date.now(), { days = 366, max = 2 } = 
   return out;
 }
 
-// The first of skippedTimes as a sentence, for the Routines dialog (an empty list when there is none).
+// The first of skippedTimes as a sentence, for the Routines dialog (an empty list when there is none). Only for a
+// schedule with a few fixed times a day: one that runs every hour or more often just has a run fewer that night.
 export function scheduleWarnings(cron, from = Date.now()) {
+  if (!cron || cron.hour.size * cron.minute.size > 4) return [];
   return skippedTimes(cron, from, { max: 1 }).map(({ day, times }) => {
     const [y, mo, d] = day.split('-').map(Number);
     const on = `${MONTHS[mo - 1][0].toUpperCase()}${MONTHS[mo - 1].slice(1)} ${d}, ${y}`;

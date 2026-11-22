@@ -725,6 +725,7 @@ const cx_settle = (view) => { view.settleR = true; };
 
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEK = [1, 2, 3, 4, 5, 6, 0]; // the order the day buttons show, Monday first
 // Manual (no time, Run now only) shows when the store's command has routine-manual.
 const PRESETS = [["weekdays", "Weekdays", 86], ["daily", "Daily", 62], ["hourly", "Hourly", 66], ["weekly", "Weekly", 70], ["cron", "Cron", 56], ["manual", "Manual", 70]];
@@ -772,7 +773,8 @@ function whenText(iso) {
   if (diff === 1) return `Tomorrow ${hm}`;
   if (diff === -1) return `Yesterday ${hm}`;
   if (Math.abs(diff) < 6) return `${DAY_LABELS[d.getDay()]} ${hm}`;
-  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()}, ${hm}`;
+  // Month names by hand: the mod's runtime ignores toLocaleString's options (it gave "12/04/2026, 04:00:00 PM").
+  return `${MONTH_LABELS[d.getMonth()]} ${d.getDate()}, ${hm}`;
 }
 
 // A routine's last run in a few words, and the colour to say it in.
@@ -1929,9 +1931,9 @@ export default class Channels extends View {
         const hm = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
         rule = B.catchupRule(ON, hm(at), f.catchup ? `${hm(until)}${f.catchup >= 1440 ? " the next day" : ""}` : null);
       }
-      const line = (icon, text, color) => h_flex().gap(8).items_center().min_w(0).text_color(color ?? t.dim)
-        .child(icon ? svg(ICON(icon)).size(13).text_color(color ?? t.dim) : div().w(13).flex_none())
-        .child(div().truncate().child(text));
+      const line = (icon, text, color) => h_flex().gap(8).items_start().min_w(0).text_color(color ?? t.dim)
+        .child(icon ? svg(ICON(icon)).size(13).mt(2).flex_none().text_color(color ?? t.dim) : div().w(13).flex_none())
+        .child(div().flex_1().min_w(0).child(text));
       const previewLines = !pv ? [line("clock", "Working out when it runs…")]
         : pv.error ? [line("clock", "When it runs shows here once the schedule reads right.")]
         : pv.manual ? [line("clock", `${pv.label}.`)]
