@@ -203,3 +203,30 @@ export function linkState(backend, machineList = [], error = null) {
 // The keys this mod keeps in herdr's shared state are its folder's name and a word ("channels.data"), so two copies
 // installed side by side (mods/channels and mods/channels-hc) never read each other's.
 export const keyOf = (mod, word) => `${mod || "channels"}.${word}`;
+
+// What a channel has waiting for the person, for its row in the sidebar (`now` in ms):
+// - needs: tasks that wait on them now (a question, a permission prompt, a Codex approval: standing "needs"). A
+//   question nobody answered in two days doesn't count: its card has gone (QUESTION_TTL_MS), and the task waits on
+//   in the panel. `asking` ({ state, at }, from `channels list`) says which kind and since when; a store that doesn't
+//   give it has every "needs" task counted.
+// - unread: other tasks with an event not seen yet (most often a finish), when the store marks tasks seen (`seen`);
+//   without that, nothing would ever clear the mark, so there is none.
+// - held: room for events a notice gate holds back for a catch-up. Nothing holds any yet.
+// An archived channel has nothing waiting: the sidebar doesn't list it.
+export const QUESTION_TTL_MS = 2 * 86_400_000;
+export function agedOut(task, now) {
+  // A task that asked before the store recorded `asking`: its unread mark, while there is one, says since when.
+  const a = task?.asking ?? (task?.unread?.kind === "needs" ? { state: "question", at: task.unread.at } : null);
+  const at = Date.parse(a?.at ?? "");
+  return (a?.state ?? "question") === "question" && Number.isFinite(at) && now - at > QUESTION_TTL_MS;
+}
+export function waitingOf(channel, { now = Date.now(), seen = false } = {}) {
+  const out = { needs: 0, unread: 0, held: 0 };
+  if (!channel || channel.archived_at) return out;
+  for (const t of channel.tasks ?? []) {
+    if (t.dismissed) continue;
+    if (t.standing === "needs" && !agedOut(t, now)) out.needs++;
+    else if (seen && t.unread && t.standing !== "needs") out.unread++;
+  }
+  return out;
+}

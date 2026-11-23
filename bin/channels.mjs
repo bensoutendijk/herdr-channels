@@ -424,7 +424,7 @@ function taskRow(t, sessionId, name, remote = null) {
     id: `${t.machine}/${sessionId ?? `job:${t.job}`}`, machine: t.machine, session_id: sessionId, job: t.job ?? null,
     name, repo: t.repo ?? null, folder: t.folder ?? null, added_at: t.added_at, how: t.how,
     dismissed: Boolean(t.dismissed_at), dismissed_at: t.dismissed_at ?? null, dismissed_by: t.dismissed_by ?? null,
-    superseded_by: t.superseded_by ?? null, copy_of: t.copy_of ?? null, named: t.named ?? null, unread: t.unread ?? null, wake: t.wake ?? null,
+    superseded_by: t.superseded_by ?? null, copy_of: t.copy_of ?? null, named: t.named ?? null, unread: t.unread ?? null, asking: t.asking ?? null, wake: t.wake ?? null,
     remote_url: remote,
   };
 }
@@ -1376,11 +1376,13 @@ async function listenOnce({ dir, home, deps = { home }, channelId, deliver, look
       // A repeat is marked as looked at, so it isn't looked at again, and keeps the fingerprint it repeats.
       task.told = repeat ? { ...now.mark, key: t.told.key ?? now.mark.key, last: now.mark.last ?? t.told.last } : now.mark;
       if (repeat) return;
+      const filed = new Date().toISOString();
       task.unread = { kind: now.kind, at };
+      task.asking = askingOf(now.kind, card, filed);
       // The task's older waiting event says less than this one: it is replaced, or, on a wake, taken.
       ch.inbox = (ch.inbox ?? []).filter((e) => e.task !== ref);
       if (reg) task.wake = null;
-      else ch.inbox.push({ task: ref, name, kind: now.kind, at, text: note, card, ...(remote ? { remote } : {}), ...harnessMark(t), filed_at: new Date().toISOString() });
+      else ch.inbox.push({ task: ref, name, kind: now.kind, at, text: note, card, ...(remote ? { remote } : {}), ...harnessMark(t), filed_at: filed });
     });
     if (!repeat) out.push({ level: reg ? 'wake' : 'ride-along', task: ref, text: text ?? note });
   }
@@ -1441,10 +1443,12 @@ async function listenOnce({ dir, home, deps = { home }, channelId, deliver, look
         if (follow) task.name = follow;
         task.told = repeat ? { ...mark, key: t.told.key ?? mark.key, last: mark.last ?? t.told.last } : mark;
         if (repeat) return;
+        const filed = new Date().toISOString();
         task.unread = { kind, at };
+        task.asking = askingOf(kind, card, filed);
         ch.inbox = (ch.inbox ?? []).filter((e) => e.task !== ref);
         if (reg) task.wake = null;
-        else ch.inbox.push({ task: ref, name, kind, at, text: note, card, remote: snap.url, cloud: true, filed_at: new Date().toISOString() });
+        else ch.inbox.push({ task: ref, name, kind, at, text: note, card, remote: snap.url, cloud: true, filed_at: filed });
       });
       if (!repeat) out.push({ level: reg ? 'wake' : 'ride-along', task: ref, text: text ?? note });
     }
@@ -1486,6 +1490,11 @@ async function listenOnce({ dir, home, deps = { home }, channelId, deliver, look
 // from when it was filed: `at` is when the task's turn ended, which may be long before a listener saw it. An entry
 // from before filed_at was kept counts from when it was told or delivered. A live permission prompt or an approval is
 // the task's own dialog, still up: those wait as long as it does.
+// What a task asks now, for the sidebar's mark on its channel (`asking` in `channels list --json`): which kind (a
+// question ages out after QUESTION_TTL_DAYS as its card does; a prompt or an approval doesn't) and since when it was
+// filed. A finish clears it.
+export const askingOf = (kind, card, at) => (kind === 'needs' ? { state: card?.state ?? 'question', at } : null);
+
 export const QUESTION_TTL_DAYS = 2;
 export const QUESTION_TTL_MS = QUESTION_TTL_DAYS * 86_400_000;
 export function staleQuestion(e, nowMs = Date.now()) {
@@ -1513,11 +1522,12 @@ function queueNotice({ dir, channelId, t, mark, repeat, reg, ref, name, at, text
     task.told = repeat ? { ...mark, key: t.told.key ?? mark.key, last: mark.last ?? t.told.last } : mark;
     if (repeat) return;
     task.unread = asks ? { kind: 'needs', at } : null;
+    const now = new Date().toISOString();
+    task.asking = asks ? askingOf('needs', asks.card, now) : null;
     if (reg) task.wake = null;
     ch.inbox = (ch.inbox ?? []).filter((e) => e.task !== ref);
     if (asks) {
       const { note, ...rest } = asks;
-      const now = new Date().toISOString();
       ch.inbox.push({ task: ref, name, kind: 'needs', at, text: note, ...rest, delivered_at: now, told_at: now, filed_at: now });
     }
     ch.notices = [...(ch.notices ?? []).filter((n) => n.task !== ref), { id: `n-${randomUUID().slice(0, 8)}`, task: ref, name, at, text, queued_at: new Date().toISOString(), pushed_at: null }];
