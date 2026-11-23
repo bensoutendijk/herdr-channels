@@ -353,7 +353,20 @@ listener alongside it. Every 3 seconds the listener reads Claude Code's records 
 tasks (`~/.claude/jobs` and `~/.claude/sessions`). A task finishing, or stopping to ask a question
 or show a permission prompt, is an *event*.
 
-**A task that finished** reaches the chat as a one-line notice, the way a subagent's result reaches
+**Whose turn it was.** The chat hears about the turns it has a stake in: the task's first turn,
+from `channels start`, and each turn from `channels send` (a card's Send counts: the card is the
+chat's). The store records each of those asks on the task, and the first turn end after it answers it.
+A turn you start yourself, by typing in the task's own view, tells the chat nothing: no notice, no
+turn, and nothing riding along with your next message, since you were there. The panel still shows
+it (the task goes to ready for review, and a question still gets its dot and its card). Say the task
+gives a long report, you type "rephrase that more concisely" in its view, and it answers: the chat
+heard about the report, and doesn't hear about the rephrasing. A [registration](#registrations) is
+the exception: it fires on the task's next matching event whoever started the turn. The same holds
+for Codex and cloud tasks; a message sent from the panel's **Send message…** on a cloud task is
+yours, not the chat's. A task filed into a channel (`channels file`) or started empty from the panel
+has no ask until the chat sends it something.
+
+**A task that finished a turn the chat asked for** reaches the chat as a one-line notice, the way a subagent's result reaches
 the session that started it:
 
 ```
@@ -375,7 +388,7 @@ listener answers it. The listener then checks the chat's transcript for each not
 that hasn't arrived a minute later, once the chat is idle (an older Claude Code, or an account where
 an administrator keeps channels off), is typed into the chat as a `[task notice]` line instead.
 
-**A task that ended its turn asking for something** (a question, or a hand-off such as "Task A is
+**A task that ended a turn the chat asked for asking for something** (a question, or a hand-off such as "Task A is
 done. Please start B and C") reaches the chat as a one-line notice too, through the same channel, once
 per blocked turn:
 
@@ -396,7 +409,7 @@ card answers it. It is delivered at one of three levels:
 | Level | When | What happens |
 |---|---|---|
 | **panel** | Every prompt and question | The task gets a dot in the tasks panel until you open it there. |
-| **ride-along** | The default for a prompt | The chat takes no turn. The prompt shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
+| **ride-along** | The default for a prompt in a turn the chat asked for (one in a turn you started in the task's view shows only its card) | The chat takes no turn. The prompt shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
 | **wake** | Only when a registration exists for that task | The listener pastes a `[task question]`, with the task's whole last message, into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. It takes the place of a question's notice. |
 
 A cloud task can't be told apart this way: claude.ai's list says only that it waits on you
@@ -411,6 +424,7 @@ isn't attached again. A question nobody answers in two days goes too: a task tha
 asking stays that way in Claude Code's records, so it would never move on by itself. The task
 still waits in the tasks panel, and `channels send` still answers it.
 
+<a id="registrations"></a>
 A registration asks for the chat to be woken by a task's next matching event:
 
 ```
@@ -420,7 +434,8 @@ channels send <session> --wake-on finish|question|any <text | ->
 ```
 
 `question` matches a question or permission prompt, `finish` a task finishing, and `any` either.
-A finish always reaches the chat as a notice; a registration for it adds its `--why` to the notice.
+A finish of a turn the chat asked for reaches it as a notice anyway; a registration also brings the
+finish (or question) of a turn you started in the task's view, and adds its `--why` to the notice.
 A registration is used up when it fires; `--wake-on none` cancels one. `--why` is shown in the
 wake message (for example, the words the user used to ask to be told). The chat registers when it
 is waiting on a task's answer in order to report back, or when you ask it to tell you about a task.
@@ -638,8 +653,9 @@ claude.ai, another Mac).
 **Tracking.** While a channel has an open cloud task, its listener asks for the account's session list every
 20 seconds: one call covers every session and every channel, and uses no model. A session that is running shows
 as Working, one waiting on you (`requires_action`) as Needs input, one whose turn ended as Ready for review. The
-row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a finish is a
-one-line notice in the chat; so is a question (`Cloud task "…" needs you: …`), with a dot in the panel and a card
+row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a finish of a turn the chat asked for is a
+one-line notice in the chat (one you started on claude.ai or the phone tells the chat nothing, as a turn typed in
+a local task's view); so is a question (`Cloud task "…" needs you: …`), with a dot in the panel and a card
 above the chat's prompt, or a wake when the chat registered for it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
 (Claude Code hasn't refreshed the login yet) it waits a minute; any other failure shows state unknown until a
 call works again.
