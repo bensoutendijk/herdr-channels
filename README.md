@@ -292,7 +292,7 @@ lists the `refresh-all` feature.
   to a channel's name means it has a routine switched on: hover it for the next run, click it to
   open the channel's Routines.
 
-  <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Routines, Change icon and Archive">
+  <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Notifications, Routines, Tasks run on Claude Code, Change icon and Archive">
 
 - **What waits for you.** A red dot on a channel's icon means one of its tasks needs you: a question,
   a permission prompt or a Codex approval (hover the icon for how many). A channel's name turns bold
@@ -353,7 +353,63 @@ listener alongside it. Every 3 seconds the listener reads Claude Code's records 
 tasks (`~/.claude/jobs` and `~/.claude/sessions`). A task finishing, or stopping to ask a question
 or show a permission prompt, is an *event*.
 
-**A task that finished** reaches the chat as a one-line notice, the way a subagent's result reaches
+**Which events reach the chat: the notice gate.** Each notice costs the chat a turn, so a gate decides
+first, on its own: it tells the chat what needs it, and keeps out the rest, including what you already
+saw. Nothing is saved up for later. It goes in this order, and the first rule that matches wins:
+
+| # | If | Then |
+|---|---|---|
+| 1 | The chat [registered](#registrations) for this event | It wakes the chat, whoever started the turn. |
+| 2 | It's a permission prompt or a Codex approval | It gets its [card](#task-cards). It rides along with your next message only if the chat started that turn. |
+| 3 | You started the turn yourself, by typing in the task's view | The panel only: you were there. |
+| 4 | You had the task open in the panel when it ended | The panel only: you saw it. |
+| 5 | You sent the turn from the panel (**Send message…**) | The panel only. |
+| 6 | The chat's turn failed | It wakes the chat. |
+| 7 | The chat's turn ended asking something | It wakes the chat ("needs you"), beside its card. |
+| 8 | Your rules say otherwise (below) | The panel only, or it wakes the chat. |
+| 9 | The chat's turn finished | A judge decides. |
+
+Who started a turn: the chat asked for the task's first turn (`channels start`), and for each turn it
+sends with `channels send` (a card's Send counts: the card is the chat's). The store keeps each ask
+on the task, and the first turn end after it answers it. A turn with no ask before its end is one you
+started. Say the task gives a long report and you type "rephrase that more concisely" in its view:
+the chat hears about the report and never about the rephrasing. Codex and cloud tasks work the same way.
+A task filed into a channel (`channels file`) or started empty from the panel has no ask until the
+chat sends it something. The panel says which task is open with `channels viewing` (every minute while
+it stays open).
+
+**The judge.** An ordinary finish of a turn the chat asked for goes to a small `claude -p` call on
+your own Claude sign-in (Sonnet by default; it takes a few seconds and costs about half a cent). It
+gets the chat's ask, the task's report, the chat's last few messages and your rules for the channel,
+and it answers *wake* (the goal is reached, a next step the chat planned can start, or a problem turned
+up) or *skip* (polish, rephrasing, small follow-ups, "done, nothing notable", or what your rules say
+to leave out). A skipped finish shows in the panel as ready for review, like any other; the chat never
+hears of it, and `channels read <session>` has it if you ask the chat. The judge runs with no tools, no
+MCP servers, no settings and no saved session, in an empty folder. Every text it reads goes in a marked
+data block, and its answer is checked against a schema, so a task's report can't steer it into anything
+but those two answers. When it can't answer, the finish is skipped. After three failures in a row it
+rests for an hour, and so it does past 30 calls an hour in one channel. `CHANNELS_JUDGE=off` turns it
+off (those finishes are skipped); `CHANNELS_JUDGE_MODEL` picks another model.
+
+**Your rules** are optional. The channel menu's **Notifications** (or `channels notify <channel> --set -`)
+holds plain-words rules, one per line, and you can also just tell the chat ("stop telling me about small
+edits"): it updates them.
+
+<img src="docs/notify-dialog.png" width="480" alt="The Notifications dialog for #website: a line saying when the chat hears about the channel's tasks, then the rules quiet 19:00-8:00; don't bother me with rephrasings or small copy edits; wake me when a PR is opened; and a hint listing the rules understood as is, above Cancel and Save">
+
+| Rule | Read by | What it does |
+|---|---|---|
+| `all` | the gate | Every finish of a turn the chat asked for wakes it, with no judge. |
+| `only when blocked or failed` | the gate | Only failures and questions wake the chat. |
+| `quiet 18:00-8:00` | the gate | In those hours, only failures and questions wake the chat. |
+| `don't bother me with rephrasings or small edits` | the judge | Such finishes are skipped. |
+| `wake me when a PR is opened` | the judge | A finish that opens a PR wakes the chat. |
+
+**Why a task's event did or didn't reach the chat:** `channels why <session>` shows the gate's last
+decisions on it. Every decision is also a line in `gate.jsonl` beside the store.
+`docs/notice-gate-design.md` has the design and the research behind it.
+
+**A task's finish that the gate lets through** reaches the chat as a one-line notice, the way a subagent's result reaches
 the session that started it:
 
 ```
@@ -375,7 +431,7 @@ listener answers it. The listener then checks the chat's transcript for each not
 that hasn't arrived a minute later, once the chat is idle (an older Claude Code, or an account where
 an administrator keeps channels off), is typed into the chat as a `[task notice]` line instead.
 
-**A task that ended its turn asking for something** (a question, or a hand-off such as "Task A is
+**A task that ended a turn the chat asked for asking for something** (a question, or a hand-off such as "Task A is
 done. Please start B and C") reaches the chat as a one-line notice too, through the same channel, once
 per blocked turn:
 
@@ -396,7 +452,7 @@ card answers it. It is delivered at one of three levels:
 | Level | When | What happens |
 |---|---|---|
 | **panel** | Every prompt and question | The task gets a dot in the tasks panel until you open it there. |
-| **ride-along** | The default for a prompt | The chat takes no turn. The prompt shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
+| **ride-along** | The default for a prompt in a turn the chat asked for (one in a turn you started in the task's view shows only its card) | The chat takes no turn. The prompt shows as a [card](#task-cards) above the chat's prompt, and waits in the store to be attached to your next message in the chat as background context. The chat mentions it only if it's relevant or blocking, in one line. |
 | **wake** | Only when a registration exists for that task | The listener pastes a `[task question]`, with the task's whole last message, into the chat's herdr terminal with `hc send`, which waits until you stop typing. This starts a turn, and the message says why it woke the chat. It takes the place of a question's notice. |
 
 A cloud task can't be told apart this way: claude.ai's list says only that it waits on you
@@ -411,6 +467,7 @@ isn't attached again. A question nobody answers in two days goes too: a task tha
 asking stays that way in Claude Code's records, so it would never move on by itself. The task
 still waits in the tasks panel, and `channels send` still answers it.
 
+<a id="registrations"></a>
 A registration asks for the chat to be woken by a task's next matching event:
 
 ```
@@ -420,7 +477,8 @@ channels send <session> --wake-on finish|question|any <text | ->
 ```
 
 `question` matches a question or permission prompt, `finish` a task finishing, and `any` either.
-A finish always reaches the chat as a notice; a registration for it adds its `--why` to the notice.
+A registration skips the gate: it also brings the finish (or question) of a turn you started in the
+task's view, or one the judge would hold, and adds its `--why` to the notice.
 A registration is used up when it fires; `--wake-on none` cancels one. `--why` is shown in the
 wake message (for example, the words the user used to ask to be told). The chat registers when it
 is waiting on a task's answer in order to report back, or when you ask it to tell you about a task.
@@ -638,8 +696,9 @@ claude.ai, another Mac).
 **Tracking.** While a channel has an open cloud task, its listener asks for the account's session list every
 20 seconds: one call covers every session and every channel, and uses no model. A session that is running shows
 as Working, one waiting on you (`requires_action`) as Needs input, one whose turn ended as Ready for review. The
-row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a finish is a
-one-line notice in the chat; so is a question (`Cloud task "…" needs you: …`), with a dot in the panel and a card
+row has a cloud glyph and the session's cost so far. Each change is an event, as for a local task: a finish of a turn the chat asked for is a
+one-line notice in the chat (one you started on claude.ai or the phone tells the chat nothing, as a turn typed in
+a local task's view); so is a question (`Cloud task "…" needs you: …`), with a dot in the panel and a card
 above the chat's prompt, or a wake when the chat registered for it. A finish's text is claude.ai's one-line summary of the turn; the whole session is on claude.ai. After a 401
 (Claude Code hasn't refreshed the login yet) it waits a minute; any other failure shows state unknown until a
 call works again.
@@ -851,6 +910,9 @@ channels read <session> [--limit <n>] [--json]
 channels send <session> [--wake-on <on>] <text | ->
 channels watch <session> --wake-on finish|question|any|none [--why <text>]
 channels seen <session>
+channels viewing <session> | --none
+channels notify <channel> [--set <text> | --set -] [--json]
+channels why <session>
 channels link <session> [--open] [--json]
 channels rename-task <session> <new-name>
 channels dismiss <session> [--by <who>]
@@ -938,6 +1000,8 @@ command says so.
 | `CODEX_HOME` | `~/.codex` | Codex's own folder: its daemon's socket and session files |
 | `CHANNELS_CODEX_SOCKET` | the daemon's | Another Codex app-server socket to use (tests, the dev sandbox) |
 | `CHANNELS_CODEX_MODE` | | `terminal` runs Codex tasks in terminals instead of the service |
+| `CHANNELS_JUDGE` | on | `off` stops the [notice gate](#task-events)'s judge: finishes it would judge are skipped |
+| `CHANNELS_JUDGE_MODEL` | `sonnet` | The model the judge runs on |
 | `CHANNELS_UPDATE_CHECK` | on | `off` stops the routines timer from looking up new releases on GitHub |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values

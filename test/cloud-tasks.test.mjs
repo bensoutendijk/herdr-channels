@@ -72,7 +72,7 @@ function setup(t, { on = true } = {}) {
   const store = () => JSON.parse(readFileSync(join(dir, 'channels.json'), 'utf8'));
   const list = async () => JSON.parse(await ok(['list', '--json']));
   // A session as the list gives it.
-  const session = (extra = {}) => ({ id: SID, cse_id: `cse_${SFX}`, url: URL_, kind: 'anthropic_cloud', title: 'Fix the footer', status: 'active', worker_status: 'running', last_event_at: '2026-11-19T20:00:00Z', summary: null, needs: null, detail: null, cost_usd: 0.05, branch: 'claude/fix', ...extra });
+  const session = (extra = {}) => ({ id: SID, cse_id: `cse_${SFX}`, url: URL_, kind: 'anthropic_cloud', title: 'Fix the footer', status: 'active', worker_status: 'running', last_event_at: '2099-11-19T20:00:00Z', summary: null, needs: null, detail: null, cost_usd: 0.05, branch: 'claude/fix', ...extra });
   // One listener look, as if CLOUD.pollMs had passed since the last.
   const tick = async (channel = 'design') => {
     const c = store().channels.find((x) => x.name === channel);
@@ -129,9 +129,9 @@ test('the listener: working → asks you → done, each once: a question as a no
   fake.sessions = [session()];
   assert.deepEqual(await tick(), [], 'working is no event');
   // Idle with no summary yet (a session that has only just been made) is no finish either.
-  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:00:05Z' })];
+  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2099-11-19T20:00:05Z' })];
   assert.deepEqual(await tick(), []);
-  fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2026-11-19T20:01:00Z', needs: 'Should the /press link go, or point to the media kit?', cost_usd: 0.2 })];
+  fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2099-11-19T20:01:00Z', needs: 'Should the /press link go, or point to the media kit?', cost_usd: 0.2 })];
   let did = await tick();
   // requires_action doesn't say a question from a permission prompt, so both are told as a notice, beside the card.
   assert.deepEqual(did.map((e) => [e.level, e.task]), [['asks', ref]]);
@@ -147,18 +147,19 @@ test('the listener: working → asks you → done, each once: a question as a no
   assert.equal(c.tasks[0].cloud.cost_usd, 0.2);
   assert.deepEqual(await tick(), [], 'the same state again is no event');
   // Answered on claude.ai: it works again, and the question's card goes.
-  fake.sessions = [session({ worker_status: 'running', last_event_at: '2026-11-19T20:02:00Z' })];
+  fake.sessions = [session({ worker_status: 'running', last_event_at: '2099-11-19T20:02:00Z' })];
   did = await tick();
   assert.deepEqual(did.map((e) => e.level), ['gone']);
   assert.equal(store().channels[0].inbox.length, 0);
-  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:05:00Z', summary: 'Pointed /press at the media kit and opened PR #31', cost_usd: 0.41 })];
+  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2099-11-19T20:05:00Z', summary: 'Pointed /press at the media kit and opened PR #31', cost_usd: 0.41 })];
   did = await tick();
-  assert.deepEqual(did.map((e) => e.level), ['notice']);
+  // Answered on claude.ai, the turn after the question is the user's own: the panel shows its finish, the chat isn't told.
+  assert.deepEqual(did.map((e) => e.level), ['quiet']);
   assert.equal(did[0].text, `Cloud task "Fix the footer" (${ref}) finished: Pointed /press at the media kit and opened PR #31`);
   c = store().channels[0];
   assert.deepEqual([c.inbox, c.notices.map((n) => n.task), c.tasks[0].unread, c.tasks[0].cloud.cost_usd], [[], [ref], null, 0.41]);
   // Seen on claude.ai later: last_event_at moves with the same summary. No new event.
-  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:09:00Z', summary: 'Pointed /press at the media kit and opened PR #31', cost_usd: 0.41 })];
+  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2099-11-19T20:09:00Z', summary: 'Pointed /press at the media kit and opened PR #31', cost_usd: 0.41 })];
   assert.deepEqual(await tick(), []);
 });
 
@@ -166,7 +167,7 @@ test('the listener wakes the chat on a cloud task when registered, with a cloud 
   const { ok, fake, store, session, tick } = setup(t);
   await ok(['create', 'design']);
   await ok(['start', 'design', '--cloud', '--repo', 'site', '--wake-on', 'question', 'Fix the footer links']);
-  fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2026-11-19T20:01:00Z', needs: 'Which page?' })];
+  fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2099-11-19T20:01:00Z', needs: 'Which page?' })];
   const did = await tick();
   assert.equal(did[0].level, 'wake');
   assert.match(did[0].text, /^\[task question\] #design · task "Fix the footer" \(cloud\/session_/);
@@ -228,7 +229,7 @@ test('file adopts a cloud session by id, cse id or link; its state then isn\'t n
   const { ok, cli, fake, store, session, tick } = setup(t);
   await ok(['create', 'design']);
   await ok(['create', 'ops']);
-  fake.sessions = [session({ worker_status: 'idle', summary: 'Done already', last_event_at: '2026-11-19T19:00:00Z' }), session({ id: OTHER, url: `https://claude.ai/code/${OTHER}`, title: 'Phone task' })];
+  fake.sessions = [session({ worker_status: 'idle', summary: 'Done already', last_event_at: '2099-11-19T19:00:00Z' }), session({ id: OTHER, url: `https://claude.ai/code/${OTHER}`, title: 'Phone task' })];
   assert.match(await ok(['file', 'design', `https://claude.ai/code/${SID}?from=cli&m=0`]), new RegExp(`^Filed cloud/${SID} into #design: Fix the footer\\nOn claude\\.ai: `));
   assert.match((await cli(['file', 'ops', `cse_${SFX}`])).err, /is a task in #design; dismiss it there first/);
   await ok(['file', 'ops', `cloud/${OTHER}`, '--name', 'My phone task']);
@@ -243,13 +244,13 @@ test('send: claude -p … --cloud, with the channel\'s line; behind an open ques
   const { ok, fake, store, session, tick } = setup(t);
   await ok(['create', 'design']);
   await ok(['start', 'design', '--cloud', '--repo', 'site', 'Fix the footer links']);
-  fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2026-11-19T20:01:00Z', needs: 'Which page?' })];
+  fake.sessions = [session({ worker_status: 'requires_action', last_event_at: '2099-11-19T20:01:00Z', needs: 'Which page?' })];
   await tick();
   const out = await ok(['send', `cloud/${SID}`, 'The media kit.']);
   assert.equal(out, `Sent to cloud/${SID}. It has a question open: your text waits behind it until the question is answered on claude.ai.`);
   assert.deepEqual(fake.sent, [{ id: SID, text: "From the user via #design's chat: The media kit." }]);
   assert.equal(store().channels[0].inbox.length, 1, 'the question card stays');
-  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:05:00Z', summary: 'Done' })];
+  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2099-11-19T20:05:00Z', summary: 'Done' })];
   await tick();
   assert.match(await ok(['send', SID, '--wake-on', 'finish', 'Now the header.']), /It takes this as its next message, in the cloud\. The chat is woken when it finishes\./);
   const s = store();
@@ -261,7 +262,7 @@ test('read, link, rename, dismiss and the card commands on a cloud task', async 
   const { ok, cli, fake, store, session, tick, opened } = setup(t);
   await ok(['create', 'design']);
   await ok(['start', 'design', '--cloud', '--repo', 'site', '--name', 'Fix the footer', 'Fix the footer links']);
-  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2026-11-19T20:05:00Z', summary: 'Opened PR #31', detail: 'PR open', cost_usd: 0.4123 })];
+  fake.sessions = [session({ worker_status: 'idle', last_event_at: '2099-11-19T20:05:00Z', summary: 'Opened PR #31', detail: 'PR open', cost_usd: 0.4123 })];
   await tick();
   const read = await ok(['read', `cloud/${SID}`]);
   assert.match(read, /^Fix the footer {2}cloud\/session_\S+\ndone: PR open {2}\(site\)\nOn claude\.ai: https:\/\/claude\.ai\/code\/session_\S+\nCost so far: \$0\.41\nIts last turn, as claude\.ai sums it up: Opened PR #31\nA cloud task's messages are on claude\.ai/);
@@ -277,7 +278,7 @@ test('read, link, rename, dismiss and the card commands on a cloud task', async 
   assert.equal(store().channels[0].inbox.length, 0);
   // Rename: here only, said so; claude.ai's title no longer replaces it.
   assert.match(await ok(['rename-task', SID, 'Footer links']), /to "Footer links" here only: Claude Code has no supported way to rename a cloud session from outside/);
-  fake.sessions = [session({ title: 'Something on claude.ai', worker_status: 'running', last_event_at: '2026-11-19T20:06:00Z' })];
+  fake.sessions = [session({ title: 'Something on claude.ai', worker_status: 'running', last_event_at: '2099-11-19T20:06:00Z' })];
   await tick();
   assert.equal(store().channels[0].tasks[0].name, 'Footer links');
   // Dismiss points to claude.ai for archiving.
