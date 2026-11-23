@@ -731,6 +731,56 @@ test('card dismiss takes a card quietly; card tell takes it and prints the whole
   assert.match(run(['card', 'tell', 'ffffffff']).stderr, /No task testmac\/ffffffff in any channel/);
 });
 
+// The stuck card: a task that ended its turn on a question stays "blocked" in Claude Code's records for days, so its
+// look never says it moved on. Its card goes once nobody answered it in two days, counted from when it was filed.
+test('a question nobody answered in two days leaves the inbox; the task still waits; a prompt that old stays', (t) => {
+  const { ok, list, store, dir, job, transcript, live } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  transcript(SID, said('Done: the logo is drawn. Shall I also make a dark version?'));
+  // Its turn ended long ago, but the listener only now sees it: a fresh card, not dropped at once.
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'a dark version?', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 2);
+  ok(['listen', 'design', '--once']);
+  const [q] = store().channels[0].inbox;
+  assert.equal(q.card.state, 'question');
+  assert.ok(q.filed_at, 'filed now');
+  assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/);
+  assert.equal(store().channels[0].inbox.length, 1, 'still blocked, still a card');
+  // Three days on, still blocked and unanswered.
+  const age = (e) => ({ ...e, filed_at: new Date(Date.now() - 3 * 86_400_000).toISOString() });
+  const s = store();
+  s.channels[0].inbox = s.channels[0].inbox.map(age);
+  writeFileSync(join(dir, 'channels.json'), JSON.stringify(s));
+  assert.match(ok(['listen', 'design', '--once']), /Drops testmac\/dddd0001\S*'s question: nobody answered it in 2 days \(it still waits in the tasks panel\)\./);
+  assert.deepEqual(store().channels[0].inbox, []);
+  assert.equal(list().channels[0].tasks[0].dismissed_at, null, 'the task itself is left as it was');
+  assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/, 'not filed again');
+  // A live permission prompt that old is still the task's own dialog: its card stays.
+  live(SID, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
+  ok(['listen', 'design', '--once']);
+  const p = store();
+  p.channels[0].inbox = p.channels[0].inbox.map(age);
+  writeFileSync(join(dir, 'channels.json'), JSON.stringify(p));
+  ok(['listen', 'design', '--once']);
+  assert.deepEqual(store().channels[0].inbox.map((e) => e.card.state), ['prompt']);
+});
+
+test('staleQuestion: questions only, from when filed, an older entry from when it was told', async () => {
+  const { staleQuestion, QUESTION_TTL_MS } = await import('../bin/channels.mjs');
+  const now = Date.parse('2026-11-23T12:00:00Z');
+  const ago = (ms) => new Date(now - ms).toISOString();
+  const old = ago(QUESTION_TTL_MS + 1000);
+  const fresh = ago(1000);
+  assert.equal(staleQuestion({ kind: 'needs', at: old, filed_at: old, card: { state: 'question' } }, now), true);
+  assert.equal(staleQuestion({ kind: 'needs', at: old, filed_at: fresh, card: { state: 'question' } }, now), false, 'turn long over, filed just now');
+  assert.equal(staleQuestion({ kind: 'needs', at: old, told_at: old, delivered_at: old, card: { state: 'question' } }, now), true, 'an entry from before filed_at');
+  assert.equal(staleQuestion({ kind: 'needs', at: old, card: { state: 'prompt' } }, now), false);
+  assert.equal(staleQuestion({ kind: 'needs', at: old, card: { state: 'approval' } }, now), false);
+  assert.equal(staleQuestion({ kind: 'needs', at: old, text: 'it shows a prompt' }, now), false);
+  assert.equal(staleQuestion({ kind: 'needs', at: old, text: 'it asks' }, now), true, 'an older entry without a card');
+});
+
 test('an answer sent to a task takes its question card with it', (t) => {
   const { ok, store, job, transcript } = setup(t);
   ok(['create', 'design']);

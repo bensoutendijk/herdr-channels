@@ -1376,7 +1376,7 @@ async function listenOnce({ dir, home, deps = { home }, channelId, deliver, look
       // The task's older waiting event says less than this one: it is replaced, or, on a wake, taken.
       ch.inbox = (ch.inbox ?? []).filter((e) => e.task !== ref);
       if (reg) task.wake = null;
-      else ch.inbox.push({ task: ref, name, kind: now.kind, at, text: note, card, ...(remote ? { remote } : {}), ...harnessMark(t) });
+      else ch.inbox.push({ task: ref, name, kind: now.kind, at, text: note, card, ...(remote ? { remote } : {}), ...harnessMark(t), filed_at: new Date().toISOString() });
     });
     if (!repeat) out.push({ level: reg ? 'wake' : 'ride-along', task: ref, text: text ?? note });
   }
@@ -1440,38 +1440,54 @@ async function listenOnce({ dir, home, deps = { home }, channelId, deliver, look
         task.unread = { kind, at };
         ch.inbox = (ch.inbox ?? []).filter((e) => e.task !== ref);
         if (reg) task.wake = null;
-        else ch.inbox.push({ task: ref, name, kind, at, text: note, card, remote: snap.url, cloud: true });
+        else ch.inbox.push({ task: ref, name, kind, at, text: note, card, remote: snap.url, cloud: true, filed_at: new Date().toISOString() });
       });
       if (!repeat) out.push({ level: reg ? 'wake' : 'ride-along', task: ref, text: text ?? note });
     }
   }
   // A question whose task has moved on (it was answered in its view, or it was stopped) has nothing left to ask:
-  // its card goes, and it doesn't ride along.
+  // its card goes, and it doesn't ride along. So does a question nobody answered in QUESTION_TTL_DAYS: a session that
+  // ended its turn asking stays "blocked" in Claude Code's records for as long as they are kept, so without an age
+  // its card would never go. The task still waits in the panel, and `channels send` still answers it.
   const asked = (c.inbox ?? []).filter((e) => e.kind === 'needs');
   if (asked.length) {
-    const moved = new Set();
+    const moved = new Map();
+    const nowMs = Date.now();
     for (const e of asked) {
+      if (staleQuestion(e, nowMs)) { moved.set(e.task, `nobody answered it in ${QUESTION_TTL_DAYS} days (it still waits in the tasks panel)`); continue; }
       const t = c.tasks.find((x) => taskRef(x) === e.task || (x.session_id && e.task === `${LOCAL}/${x.session_id}`));
       if (t && isCloud(t) && !t.dismissed_at) {
         // Only a fresh list says a cloud question moved on; without one it stays.
         const s = freshCloud(cache) ? cache.sessions?.[t.session_id] : undefined;
-        if (s !== undefined && s?.worker_status !== 'requires_action') moved.add(e.task);
+        if (s !== undefined && s?.worker_status !== 'requires_action') moved.set(e.task, null);
         continue;
       }
       const now = t && !t.dismissed_at ? await lookTask(scans, deps, t) : null;
       // A task whose harness can't say where it stands now (off here, or its service down) keeps its card.
       if (t && !t.dismissed_at && harnessId(t) !== DEFAULT_HARNESS && (now === null || now.st?.state === 'unknown')) continue;
-      if (now?.kind !== 'needs') moved.add(e.task);
+      if (now?.kind !== 'needs') moved.set(e.task, null);
     }
     if (moved.size) {
       updateStore(dir, (s) => {
         const ch = s.channels.find((x) => x.id === channelId);
         if (ch) ch.inbox = (ch.inbox ?? []).filter((e) => !(e.kind === 'needs' && moved.has(e.task)));
       });
-      for (const task of moved) out.push({ level: 'gone', task, text: null });
+      for (const [task, why] of moved) out.push({ level: 'gone', task, text: why });
     }
   }
   return out;
+}
+
+// How long a question's card waits for an answer before it goes (the cards mod draws none older, either), counted
+// from when it was filed: `at` is when the task's turn ended, which may be long before a listener saw it. An entry
+// from before filed_at was kept counts from when it was told or delivered. A live permission prompt or an approval is
+// the task's own dialog, still up: those wait as long as it does.
+export const QUESTION_TTL_DAYS = 2;
+export const QUESTION_TTL_MS = QUESTION_TTL_DAYS * 86_400_000;
+export function staleQuestion(e, nowMs = Date.now()) {
+  const state = e?.card?.state ?? (/shows a prompt/.test(e?.text ?? '') ? 'prompt' : 'question');
+  const at = Date.parse(e?.filed_at ?? e?.told_at ?? e?.delivered_at ?? e?.at ?? '');
+  return e?.kind === 'needs' && state === 'question' && Number.isFinite(at) && nowMs - at > QUESTION_TTL_MS;
 }
 
 // What an inbox entry says of its task's harness, when it isn't Claude Code: the card names it.
@@ -1498,7 +1514,7 @@ function queueNotice({ dir, channelId, t, mark, repeat, reg, ref, name, at, text
     if (asks) {
       const { note, ...rest } = asks;
       const now = new Date().toISOString();
-      ch.inbox.push({ task: ref, name, kind: 'needs', at, text: note, ...rest, delivered_at: now, told_at: now });
+      ch.inbox.push({ task: ref, name, kind: 'needs', at, text: note, ...rest, delivered_at: now, told_at: now, filed_at: now });
     }
     ch.notices = [...(ch.notices ?? []).filter((n) => n.task !== ref), { id: `n-${randomUUID().slice(0, 8)}`, task: ref, name, at, text, queued_at: new Date().toISOString(), pushed_at: null }];
   });
@@ -2446,7 +2462,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       if (pos.length !== 1 || !opts.once) fail('channels listen <channel> --once   (one look, as the listener takes: prints what it did, and records it)');
       const c = channelOf(readStore(dir), channelName(pos[0]));
       const did = await listenTick({ dir, home: deps.home, deps, channelId: c.id, deliver: async () => true, look: () => cloudLook({ dir, deps }) });
-      for (const e of did) console.log(e.level === 'routine' ? `Types a routine run into the chat:\n${e.text}\n` : e.level === 'wake' ? `Wakes the chat with:\n${e.text}\n` : e.level === 'gone' ? `Drops ${e.task}'s question: the task has moved on.\n` : e.level === 'notice' ? `Tells the chat, in one line:\n${e.text}\n` : e.level === 'asks' ? `Tells the chat, in one line, and shows its card:\n${e.text}\n` : `Rides along with the chat's next message:\n${e.text}\n`);
+      for (const e of did) console.log(e.level === 'routine' ? `Types a routine run into the chat:\n${e.text}\n` : e.level === 'wake' ? `Wakes the chat with:\n${e.text}\n` : e.level === 'gone' ? `Drops ${e.task}'s question: ${e.text ?? 'the task has moved on'}.\n` : e.level === 'notice' ? `Tells the chat, in one line:\n${e.text}\n` : e.level === 'asks' ? `Tells the chat, in one line, and shows its card:\n${e.text}\n` : `Rides along with the chat's next message:\n${e.text}\n`);
       if (!did.length) console.log('Nothing new to report.');
       return 0;
     }

@@ -11,6 +11,9 @@ type Entry = {
   remote?: unknown
   cloud?: unknown
   label?: unknown
+  filed_at?: unknown
+  told_at?: unknown
+  delivered_at?: unknown
 }
 
 // A claude.ai/code session link, and nothing else, is one a card opens.
@@ -44,6 +47,7 @@ export function cardsOf(storeText: string, channelId: string): Card[] {
       name: str(e.name) ?? task,
       state,
       at: str(e.at) ?? '',
+      since: str(e.filed_at) ?? str(e.told_at) ?? str(e.delivered_at) ?? str(e.at) ?? '',
       waiting: str(c.waiting),
       message: str(c.message),
       options: state === 'question' ? [...new Set(options)] : [],
@@ -84,3 +88,12 @@ export function questionOf(card: Card): string {
 }
 
 export const OTHER = '__something_else__'
+
+// A question nobody answered in two days (from when it was filed) isn't drawn: its task ended its turn asking and
+// stays "blocked" in Claude Code's records, so nothing else would ever take its card away. The listener drops it from
+// the store too (QUESTION_TTL_DAYS in bin/channels.mjs). A prompt or an approval is the task's own dialog: it stays.
+export const QUESTION_TTL_MS = 2 * 86_400_000
+export function stale(card: Card, now: number): boolean {
+  const at = Date.parse(card.since)
+  return card.state === 'question' && Number.isFinite(at) && now - at > QUESTION_TTL_MS
+}

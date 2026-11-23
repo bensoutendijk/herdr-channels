@@ -6,6 +6,8 @@ export type Card = {
   name: string
   state: CardState
   at: string
+  // When the card was filed (the listener saw it), which its age out counts from; `at` is when the turn ended.
+  since: string
   waiting: string | null
   message: string | null
   options: string[]
