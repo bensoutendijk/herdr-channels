@@ -1,17 +1,20 @@
-// A small client for Codex's app-server (the `codex app-server` daemon), with no dependencies.
+// Every call herdr-channels makes to Codex's app-server (the `codex app-server` daemon), with no dependencies, as
+// bin/cloud.mjs holds every call to Claude Code's sessions API. When Codex changes its protocol, only this file should
+// have to change. It has no imports outside Node, so another channels store (a hub) can carry a verbatim copy.
 //
 // The daemon's control socket ($CODEX_HOME/app-server-control/app-server-control.sock) speaks JSON-RPC (without the
 // "jsonrpc" field) inside WebSocket frames over the unix socket; plain JSON lines get no answer. This file does the
-// handshake and the framing, `initialize`, and gives `call`, `notify` and an event stream.
+// handshake and the framing, `initialize`, and gives `call`, `notify` and an event stream, then one function per
+// method channels uses (below `connect`).
 //
-//   import { connect } from './codex-rpc.mjs';
+//   import { connect, readThread } from './codex-rpc.mjs';
 //   const c = await connect({ socket });          // socket defaults to the daemon's control socket
-//   const r = await c.call('thread/list', {});
+//   const thread = await readThread(c, id);
 //   c.on((msg) => …);                             // every notification and server request
 //   c.respond(id, result);                        // answer a server request (an approval, say)
 //   c.close();
 import net from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -29,7 +32,7 @@ function frame(text) {
   return Buffer.concat([head, mask, data]);
 }
 
-export function connect({ socket = controlSocket(), client = 'herdr-channels-dev', timeoutMs = 10000 } = {}) {
+export function connect({ socket = controlSocket(), client = 'herdr-channels', timeoutMs = 10000 } = {}) {
   return new Promise((resolve, reject) => {
     const sock = net.connect({ path: socket });
     const pending = new Map();
@@ -40,9 +43,12 @@ export function connect({ socket = controlSocket(), client = 'herdr-channels-dev
     const timer = setTimeout(() => { sock.destroy(); reject(new Error(`no answer from ${socket}`)); }, timeoutMs);
     const write = (o) => sock.write(frame(JSON.stringify(o)));
     const api = {
-      call: (method, params = {}) => new Promise((done, fail) => {
+      // A call that gets no answer in callMs fails, so a stuck daemon can't hold up whoever asked.
+      call: (method, params = {}, { callMs = 20000 } = {}) => new Promise((done, fail) => {
         const n = ++id;
-        pending.set(n, (m) => (m.error ? fail(Object.assign(new Error(`${method}: ${m.error.message}`), { rpc: m.error })) : done(m.result)));
+        const t = setTimeout(() => { pending.delete(n); fail(Object.assign(new Error(`${method}: no answer in ${callMs / 1000}s`), { rpc: { code: 'timeout' } })); }, callMs);
+        t.unref?.();
+        pending.set(n, (m) => { clearTimeout(t); if (m.error) fail(Object.assign(new Error(`${method}: ${m.error.message}`), { rpc: m.error })); else done(m.result); });
         write({ id: n, method, params });
       }),
       notify: (method, params) => write(params === undefined ? { method } : { method, params }),
@@ -88,3 +94,47 @@ export function connect({ socket = controlSocket(), client = 'herdr-channels-dev
     });
   });
 }
+
+// ---------- the methods channels uses ----------
+
+// A message as Codex takes it: one text input.
+export const textInput = (text) => [{ type: 'text', text, text_elements: [] }];
+
+// A new thread with its settings (cwd, sandbox, approvalPolicy, approvalsReviewer, model, developerInstructions,
+// config): the thread keeps them, so a later turn passes none. Answers the thread ({ id, path, status, … }).
+export const startThread = async (c, params) => (await c.call('thread/start', params)).thread;
+export const setThreadName = (c, threadId, name) => c.call('thread/name/set', { threadId, name });
+export const startTurn = (c, threadId, text) => c.call('turn/start', { threadId, input: textInput(text) });
+// A thread with its status ({ type: 'idle' | 'active' | 'notLoaded' | 'systemError', activeFlags }), name, cwd,
+// updatedAt and session file (`path`), without its turns.
+export const readThread = async (c, threadId) => (await c.call('thread/read', { threadId })).thread;
+// Loads a thread the daemon unloaded, and subscribes this connection to it: a pending approval is sent to it again.
+export const resumeThread = async (c, threadId) => (await c.call('thread/resume', { threadId })).thread;
+// A message that runs once the current turn ends. Codex wants an id of the client's own for each one.
+export const queueMessage = (c, threadId, text) => c.call('thread/queue/add', { threadId, clientUserMessageId: randomUUID(), input: textInput(text) });
+export const queuedMessages = async (c, threadId) => (await c.call('thread/queue/list', { threadId })).data ?? [];
+export const listThreads = async (c, params = {}) => (await c.call('thread/list', params)).data ?? [];
+
+// The requests a thread waits on the user for, which Codex sends to a client that subscribes to it (resumeThread),
+// also to one that connects after the request was made. Collected for up to `ms` after subscribing; nothing is
+// answered. Answers [{ id, method, params }].
+export const APPROVAL_METHODS = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput'];
+export async function waitingRequests(c, threadId, { ms = 1500 } = {}) {
+  const got = [];
+  let wake = null;
+  const off = c.on((m) => {
+    if (m.id == null || !m.method || !APPROVAL_METHODS.includes(m.method)) return;
+    if (m.params?.threadId && m.params.threadId !== threadId) return;
+    got.push({ id: m.id, method: m.method, params: m.params ?? {} });
+    wake?.();
+  });
+  try {
+    await resumeThread(c, threadId);
+    if (!got.length) await new Promise((r) => { wake = r; setTimeout(r, ms).unref?.(); });
+    await new Promise((r) => setTimeout(r, 50)); // others replayed in the same breath
+    return got;
+  } finally { off(); }
+}
+
+// Answers an approval request: 'accept' or 'decline' (a command, or a file change).
+export const answerApproval = (c, request, decision) => c.respond(request.id, { decision });

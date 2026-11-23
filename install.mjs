@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Installs herdr-channels on this Mac, from this clone:
-//   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--no-timer] [--no-switch] [--dry-run]
+//   node install.mjs [--app-home <dir>] [--bin <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--codex | --no-codex] [--no-timer] [--no-switch] [--dry-run]
 //   node install.mjs --on <machine> --command <command> --local <name> --projects <dir> [--by <who>] [--name <name>] [--app-home <dir>] [--no-switch] [--dry-run]
 //   node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--label <label>]
 //
@@ -32,6 +32,10 @@
 //    `channels start --cloud` runs tasks as Claude Code cloud sessions at claude.ai/code. It rides on Claude Code's
 //    private sessions API and reads Claude Code's stored claude.ai login (see the README, "Cloud tasks"). --no-cloud
 //    turns it off again; an install with neither keeps what the command had. Claude Code's settings are never touched.
+// 7b. Codex tasks (on when `codex` is found, unless --no-codex): the command gets CHANNELS_CODEX, and `channels start
+//    --harness codex` (or a channel's default) runs a task on OpenAI's Codex CLI, in Codex's own background service
+//    (see the README, "Codex tasks"). An install with neither flag keeps what the command had; a command from before
+//    Codex tasks gets them when codex is found. Codex's settings are never touched.
 // 8. Stamps the build (build.json in the store: an id over the code and settings a channel's chat runs, and the
 //    version, from the clone's release tag), and restarts the chats that run an older one: each idle chat at once, on
 //    the same session; one that is mid-turn when its turn ends (the timer's next tick). Nothing has to be restarted by
@@ -54,11 +58,11 @@ const MOD_MARK = '.herdr-channels.json';
 // What herdr writes into a mod folder itself: never copied, and left alone in an installed copy.
 const GENERATED = new Set(['gpui-kit.d.ts', 'jsconfig.json', MOD_MARK, 'config.js']);
 
-const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--name <name>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --on <machine> --command <command> --local <name> --projects <dir> [--by <who>] [--name <name>] [--app-home <dir>] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
+const usage = 'usage: node install.mjs [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--store <dir>] [--projects <dir>] [--by <who>] [--name <name>] [--label <label>] [--remote-control | --no-remote-control] [--cloud | --no-cloud] [--codex | --no-codex] [--no-timer] [--no-switch] [--dry-run]\n       node install.mjs --on <machine> --command <command> --local <name> --projects <dir> [--by <who>] [--name <name>] [--app-home <dir>] [--no-switch] [--dry-run]\n       node install.mjs --uninstall [--app-home <dir>] [--bin <dir>] [--chat-mod <dir>] [--label <label>]';
 export const LABEL = 'dev.herdr-channels.tick';
 
 export function parse(argv, env = process.env, home = homedir()) {
-  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL, remote: null, cloud: null, on: null, command: null, local: null, name: null };
+  const o = { appHome: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'), bin: join(home, '.local', 'bin'), chatMod: join(home, '.local', 'share', 'herdr-channels', 'chat-mod'), store: join(home, '.local', 'state', 'herdr-channels'), projects: join(home, 'projects'), by: 'user', switch: true, dryRun: false, timer: true, uninstall: false, label: LABEL, remote: null, cloud: null, codex: null, on: null, command: null, local: null, name: null };
   const valued = { '--app-home': 'appHome', '--bin': 'bin', '--chat-mod': 'chatMod', '--store': 'store', '--projects': 'projects', '--by': 'by', '--label': 'label', '--on': 'on', '--command': 'command', '--local': 'local', '--name': 'name' };
   const given = new Set();
   for (let i = 0; i < argv.length; i++) {
@@ -71,6 +75,8 @@ export function parse(argv, env = process.env, home = homedir()) {
     else if (a === '--no-remote-control') o.remote = false;
     else if (a === '--cloud') o.cloud = true;
     else if (a === '--no-cloud') o.cloud = false;
+    else if (a === '--codex') o.codex = true;
+    else if (a === '--no-codex') o.codex = false;
     else if (a === '-h' || a === '--help') { console.log(usage); process.exit(0); }
     else if (valued[a]) {
       if (i + 1 >= argv.length) throw new Error(`${a} needs a value.\n${usage}`);
@@ -120,6 +126,16 @@ export function installedCloud(bin) {
   } catch { return null; }
 }
 
+// Whether the installed command has Codex tasks on: null when there is no command from this install yet, or one from
+// before Codex tasks (it says neither).
+export function installedCodex(bin) {
+  try {
+    const text = readFileSync(join(bin, 'channels'), 'utf8');
+    if (!text.includes(MARK)) return null;
+    return /CHANNELS_CODEX:-1/.test(text) ? true : /CHANNELS_CODEX:-0/.test(text) ? false : null;
+  } catch { return null; }
+}
+
 export const REMOTE_QUESTION = [
   'Remote Control for channel chats and tasks?',
   "With it on, each channel's chat and every task channels starts also shows at claude.ai/code",
@@ -131,7 +147,7 @@ export const REMOTE_QUESTION = [
 
 const sq = (s) => `'${`${s}`.replace(/'/g, `'\\''`)}'`;
 
-export function wrapperText({ node, script, store, projects, path, chatMod = null, mod = null, appHome = null, app = null, remote = false, cloud = false }) {
+export function wrapperText({ node, script, store, projects, path, chatMod = null, mod = null, appHome = null, app = null, remote = false, cloud = false, codex = false }) {
   const keep = (name, value) => (value ? [`export ${name}="\${${name}:-${`${value}`.replace(/["\\$`]/g, '\\$&')}}"`] : []);
   return [
     '#!/bin/sh',
@@ -150,6 +166,9 @@ export function wrapperText({ node, script, store, projects, path, chatMod = nul
     ...keep('CHANNELS_REMOTE_CONTROL', remote ? '1' : null),
     // Cloud tasks (channels start --cloud): install.mjs --cloud, --no-cloud.
     ...keep('CHANNELS_CLOUD', cloud ? '1' : null),
+    // Codex tasks (channels start --harness codex): install.mjs --codex, --no-codex. Written either way, so an update
+    // keeps an install's "off".
+    ...keep('CHANNELS_CODEX', codex ? '1' : '0'),
     `exec ${sq(node)} ${sq(script)} "$@"`,
     '',
   ].join('\n');
@@ -348,10 +367,13 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   const remote = o.remote ?? was ?? false;
   const cloudWas = installedCloud(o.bin);
   const cloud = o.cloud ?? cloudWas ?? false;
-  if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+  const codexWas = installedCodex(o.bin);
+  const codexAt = found.codex ?? findProgram('codex', { env, home });
+  const codex = o.codex ?? codexWas ?? Boolean(codexAt);
+  if (o.dryRun) return { wrapper, modDir, layoutFile, name, update, config, found, selected: null, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false, codex, codexWas: codexWas ?? false, codexAt };
 
   mkdirSync(o.bin, { recursive: true });
-  const wrapperBody = wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home), remote, cloud });
+  const wrapperBody = wrapperText({ node, script, store: o.store, projects: o.projects, path, chatMod: o.chatMod, mod: name, appHome: o.appHome, app: herdrApp(home), remote, cloud, codex });
   writeAtomic(wrapper, wrapperBody);
   spawnSync('chmod', ['755', wrapper]);
   copyChatMod(join(REPO, 'mods', 'claude'), o.chatMod);
@@ -365,7 +387,7 @@ export function install(o, { home = homedir(), env = process.env, log = console.
   writeAtomic(join(o.store, 'build.json'), `${JSON.stringify({ id, label: commitLabel(REPO) ?? id, version, at: new Date().toISOString() })}\n`);
   writeInstall(o.store, { repo: REPO, args: installArgs(o, name), at: new Date().toISOString() });
   const refreshed = refreshChats(wrapper);
-  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, refreshed, build: id, version, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false };
+  return { wrapper, modDir, layoutFile, name, update, config, found, selected, timer, refreshed, build: id, version, chatMod: o.chatMod, remote, was: was ?? false, cloud, cloudWas: cloudWas ?? false, codex, codexWas: codexWas ?? false, codexAt };
 }
 
 // The options an update installs with again: this install's, with the name it got. Remote Control and cloud tasks
@@ -473,12 +495,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (r.selected) console.log(`  The ${r.name} layout is ${r.selected}.`);
     console.log(`  remote   ${r.remote ? 'on: new tasks and chats show at claude.ai/code (--no-remote-control turns it off)' : 'off (--remote-control turns it on; see the README, "Remote Control")'}`);
     console.log(`  cloud    ${r.cloud ? 'on: channels start --cloud runs tasks at claude.ai/code (--no-cloud turns it off)' : 'off (--cloud turns it on; see the README, "Cloud tasks")'}`);
+    console.log(`  codex    ${r.codex ? `on: channels start --harness codex runs tasks on Codex${r.codexAt ? '' : ' (codex isn\'t installed yet)'} (--no-codex turns it off)` : `off (--codex turns it on${r.codexAt ? '' : ', once codex is installed'}; see the README, "Codex tasks")`}`);
     if (r.timer) console.log(`  timer    ${r.timer.plist ? `${r.timer.plist}: ` : ''}${r.timer.state}`);
     if (r.refreshed) console.log(`  chats    ${r.refreshed.summary ?? `not refreshed: ${r.refreshed.error}. The Refresh row in the channels sidebar does it.`}`);
     if (missing.length) console.log(`\nNot found: ${missing.join(', ')}. Install ${missing.includes('hc') ? 'the herdr app (it brings hc), ' : ''}${missing.filter((m) => m !== 'hc').join(' and ') || ''} and run this again.`);
     if (!`${process.env.PATH}`.split(delimiter).includes(o.bin)) console.log(`\n${o.bin} isn't on your PATH. Add it to use \`channels\` in a terminal; the mod and chats find it without that.`);
     if (!o.dryRun && o.remote != null && r.remote !== r.was) console.log(`\nRemote Control is now ${r.remote ? 'on' : 'off'} for what channels starts from here. Running chats have restarted with it (or do when their turn ends). Tasks keep what they started with.`);
     if (!o.dryRun && o.cloud != null && r.cloud !== r.cloudWas) console.log(`\nCloud tasks are now ${r.cloud ? 'on' : 'off'} here. Running chats have restarted ${r.cloud ? 'and watch their cloud tasks' : 'and stop watching cloud tasks'} (or do when their turn ends).${r.cloud ? ' They read Claude Code\'s stored claude.ai login and call its private API: see the README, "Cloud tasks".' : ''}`);
+    if (!o.dryRun && r.codex !== r.codexWas && (o.codex != null || r.codex)) console.log(`\nCodex tasks are ${r.codex ? 'on' : 'off'} here. ${r.codex ? 'Tasks run on Claude Code unless you ask for Codex (channels start --harness codex, the panel\'s + menu, or a channel\'s Tasks run on). Codex must be signed in (codex login).' : 'Codex tasks already filed stay listed with what was last known.'}`);
     console.log(`\nClaude Code starts background sessions only in a folder you trust: run \`claude\` once in ${o.projects} and accept, if you haven't.`);
   } catch (err) {
     console.error(err.message);

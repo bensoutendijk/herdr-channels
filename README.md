@@ -26,7 +26,8 @@ the herdr mod runs every command on the same machine. No server is involved, unl
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
 | `bin/routines.mjs` | The routine engine and its words: adding and changing routines, which runs are due, the message a run types into the chat. It touches no file, so a store on another machine can run the same copy |
-| `bin/harness/` | The coding agents a task runs on, one module each behind the same interface ([docs/harnesses.md](docs/harnesses.md)): `claude.mjs` is Claude Code's sessions, records and messages |
+| `bin/harness/` | The coding agents a task runs on, one module each behind the same interface ([docs/harnesses.md](docs/harnesses.md)): `claude.mjs` is Claude Code's sessions, records and messages; `codex.mjs` is [Codex tasks](#codex-tasks) |
+| `bin/codex-rpc.mjs` | [Codex tasks](#codex-tasks): every call to Codex's app-server (its background service), standalone |
 | `bin/cloud.mjs` | [Cloud tasks](#cloud-tasks): every call to Claude Code's private sessions API, standalone |
 | `bin/release.mjs` | [Versions and updates](#updating): the installed version, the check against GitHub Releases, `channels update` |
 | `install.mjs` | Installer for the command, mod and layout |
@@ -113,7 +114,8 @@ The installer:
 On a first install in a terminal, the installer asks whether to turn on [Remote Control](#remote-control);
 the answer is no unless you type `y`. An install with neither `--remote-control` nor `--no-remote-control`
 keeps what the Mac had. [Cloud tasks](#cloud-tasks) are never asked about: they stay off unless
-`--cloud` turns them on.
+`--cloud` turns them on. [Codex tasks](#codex-tasks) are on when the installer finds `codex`, unless `--no-codex`
+turns them off; Claude Code stays the default either way.
 
 It never overwrites existing files. If a mod or layout named `channels` already exists and was not
 installed by this repository, the copy is installed under the next free name (`channels-2`, and so
@@ -132,6 +134,8 @@ on). Running the installer again updates a previous installation in place.
 | `--no-remote-control` | | Turn Remote Control off again |
 | `--cloud` | off | Let channels run tasks as Claude Code cloud sessions; reads Claude Code's stored login and calls its private API (see [Cloud tasks](#cloud-tasks)) |
 | `--no-cloud` | | Turn cloud tasks off again |
+| `--codex` | on when `codex` is found | Let tasks run on OpenAI's Codex CLI as well as Claude Code (see [Codex tasks](#codex-tasks)) |
+| `--no-codex` | | Turn Codex tasks off again |
 | `--no-timer` | | Install without the routines timer |
 | `--no-switch` | | Install without selecting the layout |
 | `--dry-run` | | Show what would be installed without writing anything |
@@ -582,6 +586,64 @@ call works again.
 
 `channels read cloud/<id>` shows its state, summary, cost and link; `channels link cloud/<id> --open` opens it.
 
+## Codex tasks
+
+A task can run on OpenAI's [Codex CLI](https://github.com/openai/codex) instead of Claude Code. Claude Code stays
+the default for every task, and a channel's chat is always Claude Code: a Codex task is started, followed, answered
+and reported on from the same chat, panel and cards as any other.
+
+**Requirements.** `codex` installed and signed in (`codex login`). The installer turns Codex tasks on when it finds
+`codex` (`--no-codex` turns them off; `node install.mjs --codex` turns them on later). Off, nothing calls Codex.
+
+**Starting one.**
+
+- Ask the chat: "have Codex do it". It starts the task with `--harness codex` and says which harness it used.
+- `channels start <channel> --harness codex [--repo <project>] [--name <name>] <brief | ->`.
+- A channel's default: the channel's ··· menu, **Tasks run on**, or `channels harness <channel> --tasks codex`. Its
+  tasks then start on Codex unless one asks for Claude Code (`--harness claude`, or "use Claude Code for this").
+- The tasks panel's **+** becomes a menu, **New Claude Code session** or **New Codex session**. A new Codex session
+  is an empty thread opened in the panel, where you type its first message.
+
+**Where it runs.** In Codex's own background service: the app-server daemon that Codex's own terminal app starts and
+uses. So a Codex task is an ordinary Codex session: `codex resume` lists it, and when Codex's remote control is on
+(`codex remote-control start`, paired with the Codex app), it shows in the Codex app on your phone like any session
+you started, **with its name and brief**. When the service can't be reached, the task runs in a herdr-core terminal
+of its own instead ("in a terminal" in its header); then it can't be renamed from outside and its prompts are
+answered in that terminal.
+
+**What it gets.** Its brief; the repo's `AGENTS.md`, or its `CLAUDE.md` when it has no `AGENTS.md`; and one rule:
+when it can't go on without you, end with the question as its own last line. Codex has no "I'm asking" signal in
+its default mode, so that last line is how channels tells a question from a finish. It runs with Codex's default
+permissions: the `workspace-write` sandbox, asking before it leaves it (the network, files outside the repo).
+`--permission-mode` picks another: `plan` (read-only), `auto` (Codex's automatic reviewer answers approvals) or
+`bypassPermissions` (no sandbox, no approvals).
+
+**Following it.** Everything in [Task events](#task-events) holds: a finish, or a question, reaches the chat as a
+one-line notice; a question is a card you can answer; the unread dot and Tell chat work as before. A Codex task's
+row in the panel has a small mark when the channel has tasks on both harnesses, and its header names the harness
+and its sandbox. Opening it runs `codex resume` in the panel: you watch and type into the live session, mid-turn too;
+leaving it leaves the task running.
+
+![The tasks panel of a channel with two tasks ready for review: a Claude Code task, and a Codex task with a small terminal mark by its age](docs/codex-panel.png)
+
+**Approvals from a card.** When a Codex task asks to run a command (or change files) outside its sandbox, its card
+shows what it would run and why, with **Allow** and **Deny**. Either answers it in Codex's service, the task goes on,
+and its own view in the panel clears the prompt by itself. `channels approve <session> allow|deny` does the same.
+Claude Code tasks' permission prompts still offer Open only.
+
+![A channel's chat with a Codex task's approval card above the prompt (curl to example.com, with Codex's reason, and Allow, Deny and Open), beside the task's own view in the panel showing the same request](docs/codex-approval.png)
+
+**Messages.** `channels send` (or a card's Answer) to a Codex task whose turn is over starts its next turn, also
+long after, when Codex has unloaded it. To one still working, the message is **queued** to run after its turn,
+rather than refused as for Claude Code, and channels doesn't report the task finished while a queued message waits.
+Renaming a Codex task renames it in Codex too.
+
+**What Codex tasks don't have.** Remote Control's claude.ai link, cloud tasks, and copies (Codex never starts one).
+Those menu items and buttons hide for a Codex task. channels adds no hooks to Codex, so Codex never asks you to
+trust one on channels' behalf, and channels never answers Codex's folder-trust question: a new Codex session opens
+in the projects folder, which you trust once by running `codex` there. A Codex chat, the account's Codex usage, and
+Codex tasks through a store on another machine are later work ([docs/harnesses.md](docs/harnesses.md)).
+
 ## Routines
 
 A routine is a prompt that a channel's chat receives on its own, on a schedule: "every weekday at 9,
@@ -709,7 +771,10 @@ channels describe <name> [--set <text> | --set -]
 channels chat <channel>
 channels start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief | ->
 channels start <channel> --cloud --repo <project> [--name <name>] [--wake-on <on>] <brief | ->
-channels file <channel> <session> [--name <name>] [--folder <path>]
+channels start <channel> --harness codex [--empty] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief | ->
+channels harness <channel> [--tasks claude|codex]
+channels approve <session> allow|deny
+channels file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>]
 channels read <session> [--limit <n>] [--json]
 channels send <session> [--wake-on <on>] <text | ->
 channels watch <session> --wake-on finish|question|any|none [--why <text>]
@@ -774,7 +839,7 @@ command says so.
 | `CHANNELS_DIR` | `~/.local/state/herdr-channels` | The channel store |
 | `CHANNELS_PROJECTS` | `~/projects` | Folder where chats and tasks start |
 | `CHANNELS_MACHINE` | host name | Machine name that tasks are recorded under |
-| `CHANNELS_PERMISSION_MODE` | `auto` | Permission mode for `start`; empty uses Claude Code's default |
+| `CHANNELS_PERMISSION_MODE` | `auto` | Permission mode for a Claude Code task `start` makes; empty uses Claude Code's default (a Codex task uses Codex's own) |
 | `CHANNELS_CLAUDE` | `claude` | The Claude Code executable |
 | `CHANNELS_HC` | `hc` | The herdr-core executable |
 | `CHANNELS_STOP_WAIT_MS` | `30000` | How long `send` waits for a stopped task's process to exit |
@@ -785,11 +850,16 @@ command says so.
 | `CHANNELS_REMOTE_CONTROL` | off | `1` turns on [Remote Control](#remote-control) for the chats and tasks `channels` starts; `install.mjs --remote-control` sets it |
 | `CHANNELS_OPEN` | `open` | What `channels link --open` opens a link with |
 | `CHANNELS_CLOUD` | off | `1` turns on [cloud tasks](#cloud-tasks); `install.mjs --cloud` sets it |
+| `CHANNELS_CODEX` | off | `1` turns on [Codex tasks](#codex-tasks); the installer sets it when it finds `codex` |
+| `CHANNELS_CODEX_BIN` | `codex` | The Codex executable |
+| `CODEX_HOME` | `~/.codex` | Codex's own folder: its daemon's socket and session files |
+| `CHANNELS_CODEX_SOCKET` | the daemon's | Another Codex app-server socket to use (tests, the dev sandbox) |
+| `CHANNELS_CODEX_MODE` | | `terminal` runs Codex tasks in terminals instead of the service |
 | `CHANNELS_UPDATE_CHECK` | on | `off` stops the routines timer from looking up new releases on GitHub |
 
 The installed `~/.local/bin/channels` sets `CHANNELS_DIR` and `CHANNELS_PROJECTS` to the values
 given to the installer, `CHANNELS_REMOTE_CONTROL=1` when it was installed with `--remote-control`, and `CHANNELS_CLOUD=1` when it
-was installed with `--cloud`.
+was installed with `--cloud`, and `CHANNELS_CODEX` (`1` or `0`) for Codex tasks.
 
 The mod's settings are in `~/.config/herdr-app/mods/channels/config.js`, which the installer writes.
 They are: the path to the command, extra `PATH` folders, the projects folder and the `--by` name.

@@ -9,7 +9,8 @@ These files in `mods/channels/` are icons from [Lucide](https://lucide.dev), cop
 
 - `icons/archive.svg`, `icons/check.svg`, `icons/chevron-left.svg`, `icons/circle-check.svg`,
   `icons/clock.svg`, `icons/file-text.svg`, `icons/layers.svg`, `icons/panel-right.svg`,
-  `icons/play.svg`, `icons/plus.svg`, `icons/rotate-cw.svg`, `icons/square-pen.svg`, `icons/trash-2.svg`,
+  `icons/play.svg`, `icons/plus.svg`, `icons/rotate-cw.svg`, `icons/square-pen.svg`, `icons/square-terminal.svg`,
+  `icons/trash-2.svg`,
   `icons/x.svg`
 
 This one is adapted from Lucide's `circle-alert` icon:

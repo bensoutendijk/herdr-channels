@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { connect } from '../dev/codex-rpc.mjs';
+import { connect } from '../bin/codex-rpc.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
 

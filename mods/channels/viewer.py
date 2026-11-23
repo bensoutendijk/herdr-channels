@@ -1,6 +1,7 @@
 # The viewer behind a task in the channels panel: `claude attach <session>` behind a pass-through
 # terminal, started by mods/channels/main.js as `python3 -I -c <this file> <session>` on the
-# machine the session runs on.
+# machine the session runs on. A task on another harness passes the program to run after the
+# session (`<session> codex resume <thread>`): it is attached to, and attached again, the same way.
 #
 # Why not run `claude attach` directly: when you leave a session (left arrow on an empty prompt,
 # /exit, ctrl+z), Claude Code restores the screen within a couple of milliseconds but then takes
@@ -24,6 +25,7 @@ import time
 import tty
 
 SESSION = sys.argv[1]
+PROGRAM = sys.argv[2:] or ["claude", "attach", SESSION, "--settings", '{"disableAgentView":true}']
 ENTER, LEAVE = b"\x1b[?1049h", b"\x1b[?1049l"  # the alternate screen being entered and restored
 QUICK = 3  # seconds: an attach that ends sooner than this, before its screen came up, failed
 child = None  # the pty of the running attach, for the resize handler
@@ -52,7 +54,7 @@ def attach(count):
     global child
     pid, child = pty.fork()
     if pid == 0:
-        os.execvp("claude", ["claude", "attach", SESSION, "--settings", '{"disableAgentView":true}'])
+        os.execvp(PROGRAM[0], PROGRAM)
     fit()
     shown, seen, done = False, b"", False
     while not done:

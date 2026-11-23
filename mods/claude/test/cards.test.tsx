@@ -129,6 +129,32 @@ test('a permission prompt offers Open only, which asks herdr to show the task', 
   await ui.unmount()
 })
 
+test('a Codex approval shows what it would run and why; Allow and Deny answer it with channels approve', async ($, on) => {
+  const approval = {
+    task: P, name: 'Check the release notes', kind: 'needs', at: AT, text: '…', label: 'Codex', harness: 'codex',
+    card: { state: 'approval', waiting: 'Run: curl -sI https://example.com', message: null, options: [], command: 'curl -sI https://example.com', reason: 'Check the link works' },
+  }
+  const w = world(on, [approval])
+  await start($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /Check the release notes/ }))?.text).toContain('Codex asks to run a command')
+  expect(await ui.find({ type: 'Text', text: /\$ curl -sI https:\/\/example\.com/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Check the link works/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Button' })).map(b => b.key)).toEqual([`allow:${P}`, `deny:${P}`, `open:${P}`])
+  await ui.press({ key: `allow:${P}` })
+  expect(w.ran).toEqual([{ argv: ['/bin/channels', 'approve', P, 'allow'], stdin: undefined }])
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a Codex question names its harness', async ($, on) => {
+  world(on, [{ ...question(), label: 'Codex', harness: 'codex' }])
+  await start($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /Draw the logo/ }))?.text).toContain('Codex asks')
+  await ui.unmount()
+})
+
 test('several stack, oldest first; past four the rest are counted; a finish draws no card; the store emptying clears the band', async ($, on) => {
   const later = (i: number) => new Date(Date.parse(AT) + i * 1000).toISOString()
   const more = [1, 2, 3, 4].map(i => ({ ...question(), task: `testmac/eeee000${i}-0000-4000-8000-000000000000`, name: `Task ${i}`, at: later(i) }))

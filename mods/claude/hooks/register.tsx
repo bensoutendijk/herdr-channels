@@ -6,7 +6,10 @@
 // with its tasks' events. Each event is a card:
 // - a question (the task ended its turn asking something): its question, an answer (a Select of the options it
 //   listed, or an Input), Send, which runs `channels send <task> -`, and Open;
-// - a prompt (a permission prompt or another dialog in the task's own session): Open only.
+// - a prompt (a permission prompt or another dialog in the task's own session): Open only;
+// - an approval (a Codex task asks to run a command, or change files, outside its sandbox): what it would run and why,
+//   Allow and Deny, which run `channels approve <task> allow|deny`, and Open. The task's own view clears its prompt.
+// A card of a task on another harness than Claude Code names it ("Codex asks").
 // A finish has no card: it reaches the chat as a one-line notice (`channels notices`), and the chat takes a turn on it.
 // A task with Remote Control on (its claude.ai/code link is in the inbox entry) also gets Open on claude.ai, which runs
 // `channels link <task> --open`: the session opens in the browser, with macOS `open`.
@@ -98,6 +101,12 @@ async function send($: EngineInterface, card: Card, text: string) {
   $.ui.toast(`Sent to ${card.name}. It carries on.`)
 }
 
+async function approve($: EngineInterface, card: Card, decision: 'allow' | 'deny') {
+  if ((await channels($, card.task, decision === 'allow' ? 'Allowing…' : 'Denying…', ['approve', card.task, decision])) === null) return
+  await hide($, card.task)
+  $.ui.toast(decision === 'allow' ? `Allowed. ${card.name} goes on.` : `Denied. ${card.name} goes on without it.`)
+}
+
 async function open($: EngineInterface, card: Card) {
   await channels($, card.task, 'Opening…', ['open', card.task])
 }
@@ -181,7 +190,7 @@ export const register: Register = on => {
               ?{' '}
             </Text>
             <Text bold>{card.name}</Text>
-            <Text dimColor> asks · {ago(card.at, now)}</Text>
+            <Text dimColor> {card.harness ? `${card.harness} asks` : 'asks'} · {ago(card.at, now)}</Text>
           </Text>
           <Text maxLines={4}>{questionOf(card)}</Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
@@ -234,11 +243,32 @@ export const register: Register = on => {
       </Box>
     )
 
+    // A Codex task asks to run something outside its sandbox: Allow or Deny answer it here.
+    const approval = (card: Card) => (
+      <Box key={`card:${card.task}`} flexDirection="column" borderStyle="round" borderColor="warning" paddingX={1} width={width}>
+        <Text>
+          <Text color="warning" bold>
+            !{' '}
+          </Text>
+          <Text bold>{card.name}</Text>
+          <Text dimColor> {card.harness ?? 'It'} asks to {card.command ? 'run a command' : 'change files'} · {ago(card.at, now)}</Text>
+        </Text>
+        {card.command ? <Text maxLines={3}>$ {card.command}</Text> : null}
+        {card.reason ? <Text dimColor maxLines={2}>{card.reason}</Text> : null}
+        <Box flexDirection="row" gap={1}>
+          <Button key={`allow:${card.task}`} label="Allow" variant="primary" onPress={() => approve($, card, 'allow')} />
+          <Button key={`deny:${card.task}`} label="Deny" onPress={() => approve($, card, 'deny')} />
+          <Button key={`open:${card.task}`} label="Open" onPress={() => open($, card)} />
+        </Box>
+        {status(card)}
+      </Box>
+    )
+
     const shown = all.slice(0, SHOWN)
     return (
       <Box flexDirection="column">
         {shown.map(card =>
-          card.cloud ? cloudQuestion(card) : card.state === 'prompt' ? prompt(card) : question(card),
+          card.cloud ? cloudQuestion(card) : card.state === 'approval' ? approval(card) : card.state === 'prompt' ? prompt(card) : question(card),
         )}
         {all.length > SHOWN ? (
           <Text dimColor>

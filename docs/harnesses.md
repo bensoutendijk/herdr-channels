@@ -10,6 +10,15 @@ sketch below: a harness's look is split into `scan` (once a tick) and `look` (pe
 `withLast` (its last message, read only when there is news), and cloud tasks stay in `bin/channels.mjs` and
 `bin/cloud.mjs` for now, as the Claude harness's placement in all but file.
 
+Phase 2, Codex tasks, is built too: `bin/harness/codex.mjs` and `bin/codex-rpc.mjs` (§3), the panel's harness mark,
+New session menu and "Tasks run on", Allow / Deny approval cards, `install.mjs --codex`, and the README's "Codex
+tasks". Differences from §3: a look uses `thread/read` per open task (not `thread/list`, which pages through every
+thread the user has); a Codex task's notices say "Task", like a Claude Code one's, and its card names the harness
+("Codex asks"); a live approval keeps the Claude Code rule for prompts (a card and ride-along, no notice); the panel
+marks only the non-Claude rows of a mixed channel; and the panel's New Codex session is an empty thread
+(`start --empty`) opened with `codex resume`. Checked live with a real model in `dev/sandbox`, and on a remote-control
+paired daemon (risk 8, below).
+
 It was checked on 2026-11-22 against Codex CLI 0.171.0 (the current release) and Claude Code 2.1.330, on macOS,
 in two rounds. The first ran Codex in a sandbox `HOME` against a small local stand-in for the OpenAI Responses API
 that answers with scripted turns. That covered everything around the model: sessions, the daemon, approvals,

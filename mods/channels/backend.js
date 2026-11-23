@@ -80,7 +80,13 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - routine-status: `status` ({ state, words, at }) and `paused` on each routine, `last.waiting` as { why, since },
 //   and `timer` ({ last_tick_at, stale, hint }) in the list
 // - routine-by: `routine run|on|off|edit … --by <who>`, so the store says who asked
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by"];
+// - harnesses: tasks on more than one coding agent (Claude Code, Codex): `harnesses` in the list and in capabilities,
+//   `harness`, `standing` and `caps` on a task not on Claude Code, `harness` on each channel, `start --harness`,
+//   `harness <channel> --tasks`, `approve <task> allow|deny`
+// - harnesses: tasks on more than one coding agent (Claude Code, Codex): `harnesses` in the list and in capabilities,
+//   `harness`, `standing` and `caps` on a task not on Claude Code, `harness` on each channel, `start --harness`,
+//   `harness <channel> --tasks`, `approve <task> allow|deny`
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "harnesses"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 

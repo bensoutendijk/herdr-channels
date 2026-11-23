@@ -30,7 +30,7 @@ import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, controlSocket } from './codex-rpc.mjs';
+import { connect, controlSocket } from '../bin/codex-rpc.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SB = resolve(process.env.HC_SANDBOX || '/private/tmp/hcdev');
