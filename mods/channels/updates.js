@@ -2,7 +2,8 @@
 // bin/channels.mjs). Plain functions, so the tests can run them without herdr (main.js draws the row).
 //
 // updates: { build: { id, label } | null, claude: installed version | null, asked: version a refresh waits on | null,
-//   chats: [{ channel, behind: ["channels"?, "claude"?], state: claude's status, claude: version it runs }] }
+//   chats: [{ channel, behind: ["channels"?, "claude"?, "restart"?], state: claude's status, claude: version it runs }] }
+//   ("restart": a restart of every chat was asked for, Refresh all chats, and this one hasn't restarted yet)
 //
 // Answers null when no chat is behind (no row), else { offer, title, detail }: `offer` puts the Refresh button on it,
 // for something a click would do now; without it the row only says what is still to happen on its own.
@@ -17,7 +18,8 @@ export function refreshRow(updates) {
   const chats = updates?.chats ?? [];
   const onClaude = chats.filter((x) => x.behind?.includes("claude"));
   const onBuild = chats.filter((x) => x.behind?.includes("channels"));
-  if (!onClaude.length && !onBuild.length) return null;
+  const onAll = chats.filter((x) => x.behind?.includes("restart"));
+  if (!onClaude.length && !onBuild.length && !onAll.length) return null;
   // What happens without a click: chats behind the build restart on their own, and so do chats behind Claude Code
   // once a refresh asked for it. One that is idle and still behind hasn't been reached yet (no timer, a draft in its
   // prompt): a click tries it now.
@@ -36,7 +38,7 @@ export function refreshRow(updates) {
     return { offer: true, title, detail };
   }
   const waiting = chats.filter((x) => x.behind?.length);
-  return { offer: false, title: "Updating", detail: restarts(waiting) };
+  return { offer: false, title: onClaude.length || onBuild.length ? "Updating" : "Refreshing", detail: restarts(waiting) };
 }
 
 // The release row, above the refresh row: a newer herdr-channels release than this Mac runs, from `updates.release`

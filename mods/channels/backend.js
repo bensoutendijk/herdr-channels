@@ -86,7 +86,7 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - harnesses: tasks on more than one coding agent (Claude Code, Codex): `harnesses` in the list and in capabilities,
 //   `harness`, `standing` and `caps` on a task not on Claude Code, `harness` on each channel, `start --harness`,
 //   `harness <channel> --tasks`, `approve <task> allow|deny`
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "harnesses"];
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "harnesses", "refresh-all"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
