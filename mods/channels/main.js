@@ -242,11 +242,16 @@ async function readStore() {
 // carries it out, since it lives as long as the layout.
 const REFRESHING = K("refreshing"); // when a refresh started, while it runs
 const REFRESHED = K("refreshed"); // what the last one did: { message, at, failed }
-async function refreshNow() {
+// `all`: every running chat, behind or not (Refresh all chats: the sidebar's menu, the channels.refresh-all key), for
+// what a chat only reads when it starts. Only when the store's command has it ("refresh-all").
+// The menu is a popup that closes at once, which would drop the work it started: it asks, and the sidebar carries it out.
+const REFRESH_ALL = K("refreshall"); // when Refresh all chats was asked for
+async function refreshNow(all = false) {
+  if (all && !has("refresh-all")) return;
   if (shared(REFRESHING) && Date.now() - shared(REFRESHING) < 600000) return;
   setShared(REFRESHING, Date.now());
   try {
-    const out = JSON.parse(await store("channels refresh --json", [], 600000));
+    const out = JSON.parse(await store(`channels refresh${all ? " --all" : ""} --json`, [], 600000));
     setShared(REFRESHED, { message: out.summary, at: Date.now() });
   } catch (err) {
     setShared(REFRESHED, { message: `Couldn't refresh: ${String(err?.message ?? err)}`, at: Date.now(), failed: true });
@@ -860,7 +865,7 @@ function lastRun(r, t) {
 export default class Channels extends View {
   init(_props, cx) {
     const p = props() ?? {};
-    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.taskmenu ? "taskmenu" : p.newmenu ? "newmenu" : p.harnessmenu ? "harnessmenu" : p.head ? "head" : p.foot ? "foot" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
+    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.sidemenu ? "sidemenu" : p.taskmenu ? "taskmenu" : p.newmenu ? "newmenu" : p.harnessmenu ? "harnessmenu" : p.head ? "head" : p.foot ? "foot" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
     this.hover = null;
     this.drag = null; // the channel row being held, see dragMove
     this.handle = cx.focus_handle();
@@ -924,6 +929,7 @@ export default class Channels extends View {
     this.settle = false;
     this.draining = false;
     this.retryAt = shared(RETRY)?.at ?? null; // a retry left from before the app started isn't carried out
+    this.refreshAllAt = shared(REFRESH_ALL) ?? null; // and so isn't a refresh
     setShared(BUSY, false);
     cx.timer.every(40, (cx) => {
       if (this.settle) { this.settle = false; cx.notify(); }
@@ -934,6 +940,11 @@ export default class Channels extends View {
         this.retryAt = retry.at;
         const c = channels().find((x) => x.name === retry.channel);
         if (c) openChannel(c);
+      }
+      const all = shared(REFRESH_ALL) ?? null;
+      if (all !== this.refreshAllAt) {
+        this.refreshAllAt = all;
+        if (all) refreshNow(true).finally(() => cx.notify());
       }
       this.drain(cx);
     });
@@ -971,6 +982,11 @@ export default class Channels extends View {
           const at = list.findIndex(isShown);
           if (list.length) openTask(list[(at + (c === "task-next" ? 1 : -1) + list.length) % list.length]).catch(() => {});
         } else if (c === "tasks") showTasks();
+        // channels.refresh-all: restart every chat (as the sidebar menu's Refresh all chats).
+        else if (c === "refresh-all") {
+          if (has("refresh-all")) refreshNow(true).finally(() => cx.notify());
+          else fail("This store's channels command can't refresh all chats.");
+        }
         // channels.rename-task: the Rename dialog for the task open in the panel.
         else if (c === "rename-task" && has("rename-task")) { const task = findTask(shared(TASK)); if (task) renameTask(task); }
         // channels.open-task: a task card's Open, in the chat's Claude Code (see openRequested).
@@ -1157,7 +1173,9 @@ export default class Channels extends View {
     return v_flex().size_full().bg(t.chrome).text_color(t.foreground)
       .child(h_flex().px(18).pt(8).pb(8).gap(10).items_center()
         .child(svg(ICON("layers")).size(16).text_color(t.accent))
-        .child(div().flex_1().text_size(14).font_medium().child("Channels")))
+        .child(div().flex_1().text_size(14).font_medium().child("Channels"))
+        // The sidebar's own menu: what acts on every channel at once.
+        .when(has("refresh-all"), (el) => el.child(this.tool("side-more", "···", () => openOverlay({ mod: MOD, kind: "popup", width: 200, height: 44, props: { sidemenu: true } }), t))))
       .when(Boolean(data?.error), (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.blocked).child(data.error)))
       .when(!data, (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.dim).child("Loading channels…")))
       .when(Boolean(failed) && Date.now() - failed.at < 12000, (el) => el.child(div().px(18).py(4).text_size(12).text_color(t.blocked).child(failed?.message ?? "")))
@@ -1517,6 +1535,18 @@ export default class Channels extends View {
       .child(item("icon", "layers", "Change icon", "icon"))
       .child(div().mx(8).my(4).h(1).bg(t.border))
       .child(item("archive", "archive", "Archive", "archive"));
+  }
+
+  // ---------- the sidebar's menu: what acts on every channel ----------
+
+  render_sidemenu() {
+    const t = theme();
+    const p = props();
+    return v_flex().size_full().py(4).bg(t.popover)
+      .child(h_flex().id("sm-refresh-all").mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
+        .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
+        .on_click(() => { closeOverlay(p.overlay); setShared(REFRESH_ALL, Date.now()); })
+        .child(svg(ICON("rotate-cw")).size(15)).child("Refresh all chats"));
   }
 
   // ---------- the tasks panel's New session menu: one item per harness ----------

@@ -60,7 +60,7 @@ fs.mkdirSync(sessions, { recursive: true });
 const record = path.join(sessions, process.pid + '.json');
 const write = () => fs.writeFileSync(record, JSON.stringify({ pid: process.pid, sessionId: id, version, status: read('status', 'idle') }));
 write();
-const until = Date.now() + 25000;
+const until = Date.now() + Number(read('lifetime', '25000'));
 const t = setInterval(() => { write(); if (Date.now() > until) process.exit(0); }, 50);
 process.on('SIGTERM', () => { fs.appendFileSync(at('stops.jsonl'), JSON.stringify({ id }) + '\\n'); fs.rmSync(record, { force: true }); process.exit(143); });
 `;
@@ -133,7 +133,7 @@ test('a new build restarts an idle chat at once, on the same session in the same
   await until(() => JSON.parse(ok(['list', '--json'])).updates.chats[0]?.state === 'idle');
 
   // Up to date: nothing to do, and the list says so.
-  assert.deepEqual(JSON.parse(ok(['list', '--json'])).updates.behind, { channels: 0, claude: 0 });
+  assert.deepEqual(JSON.parse(ok(['list', '--json'])).updates.behind, { channels: 0, claude: 0, restart: 0 });
   assert.match(ok(['refresh', '--auto']), /Every chat is up to date/);
 
   // A chat mid-turn is never interrupted.
@@ -141,7 +141,7 @@ test('a new build restarts an idle chat at once, on the same session in the same
   set('status', 'busy');
   await until(() => JSON.parse(ok(['list', '--json'])).updates.chats[0]?.state === 'busy');
   const listed = JSON.parse(ok(['list', '--json'])).updates;
-  assert.deepEqual([listed.behind, listed.chats[0].behind], [{ channels: 1, claude: 0 }, ['channels']]);
+  assert.deepEqual([listed.behind, listed.chats[0].behind], [{ channels: 1, claude: 0, restart: 0 }, ['channels']]);
   const waiting = JSON.parse(ok(['refresh', '--auto', '--json']));
   assert.deepEqual(waiting.chats.map((x) => [x.channel, x.did]), [['general', 'waits']]);
   assert.match(waiting.summary, /#general restarts when its turn ends/);
@@ -216,13 +216,13 @@ test('a newer Claude Code is offered, not forced: Refresh restarts the idle chat
   await until(() => JSON.parse(ok(['list', '--json'])).updates.chats[0]?.claude === '2.1.329');
   install('2.1.330');
   const listed = JSON.parse(ok(['list', '--json'])).updates;
-  assert.deepEqual([listed.claude, listed.behind, listed.chats[0].claude], ['2.1.330', { channels: 0, claude: 1 }, '2.1.329']);
+  assert.deepEqual([listed.claude, listed.behind, listed.chats[0].claude], ['2.1.330', { channels: 0, claude: 1, restart: 0 }, '2.1.329']);
   assert.match(ok(['refresh', '--auto']), /up to date/, 'an install does not restart chats for Claude Code');
   assert.equal(chatFile(id).pid, first.pid);
   const r = JSON.parse(ok(['refresh', '--json']));
   assert.equal(r.summary, 'Restarted #general on Claude Code 2.1.330.');
   await until(() => JSON.parse(ok(['list', '--json'])).updates.chats[0]?.claude === '2.1.330');
-  assert.deepEqual(JSON.parse(ok(['list', '--json'])).updates.behind, { channels: 0, claude: 0 });
+  assert.deepEqual(JSON.parse(ok(['list', '--json'])).updates.behind, { channels: 0, claude: 0, restart: 0 });
   assert.deepEqual(lines('chat-launches.jsonl').map((x) => x.version), ['2.1.329', '2.1.330']);
 });
 
@@ -278,6 +278,59 @@ test('a refresh asked for waits out another one (a listener\'s own) instead of a
   const started = Date.now();
   assert.equal((await refreshChats({ dir, deps, waitMs: 200 })).busy, true, 'past its wait it still answers busy');
   assert.ok(Date.now() - started >= 200);
+});
+
+test('refresh --all restarts every chat, behind or not: an idle one now, one mid-turn after its turn (by its own listener)', async (t) => {
+  const { ok, lines, set, build, chatFile, runTerminal, until, dir } = setup(t);
+  set('lifetime', '120000'); // the stand-in claudes outlive the test, however slow the machine
+  build('b1');
+  ok(['create', 'general']);
+  ok(['create', 'design']);
+  const ids = Object.fromEntries(JSON.parse(ok(['list', '--json'])).channels.map((c) => [c.name, c.id]));
+  for (const name of ['general', 'design']) {
+    const { address } = JSON.parse(ok(['chat', name, '--bg', '--json']));
+    runTerminal(lines('hc-runs.jsonl').at(-1).argv, address);
+  }
+  const first = { general: await until(() => chatFile(ids.general)), design: await until(() => chatFile(ids.design)) };
+  await until(() => JSON.parse(ok(['list', '--json'])).updates.chats.filter((x) => x.state === 'idle').length === 2);
+  assert.match(ok(['refresh']), /Every chat is up to date/, 'without --all nothing is behind');
+
+  // Both mid-turn (the stand-in claude takes its status from one file): nothing is behind, so only --all asks.
+  set('status', 'busy');
+  await until(() => JSON.parse(ok(['list', '--json'])).updates.chats.every((x) => x.state === 'busy'));
+  const r = JSON.parse(ok(['refresh', '--all', '--json']));
+  assert.deepEqual(r.chats.map((x) => [x.channel, x.did, x.behind]).sort(), [['design', 'waits', ['restart']], ['general', 'waits', ['restart']]]);
+  assert.match(r.summary, /^#\w+ and #\w+ restart when their turns end\.$/);
+  assert.equal(lines('stops.jsonl').length, 0, 'a busy chat is never stopped');
+  assert.deepEqual(JSON.parse(ok(['list', '--json'])).updates.behind, { channels: 0, claude: 0, restart: 2 });
+  assert.ok(existsSync(join(dir, 'refresh-all.json')));
+
+  // The turns end: each chat's listener restarts it (every LISTEN.refreshMs), on the same session in the same terminal.
+  set('status', 'idle');
+  const second = await until(() => {
+    const g = chatFile(ids.general); const d = chatFile(ids.design);
+    return g && d && g.pid !== first.general.pid && d.pid !== first.design.pid ? { general: g, design: d } : null;
+  }, 75000);
+  assert.ok(second, 'both restarted after their turns');
+  for (const name of ['general', 'design']) assert.deepEqual([second[name].session_id, second[name].terminal], [first[name].session_id, first[name].terminal]);
+  assert.equal(lines('stops.jsonl').length, 2);
+  assert.deepEqual(lines('hc-sends.jsonl'), [], 'nothing typed into a chat');
+  await until(() => JSON.parse(ok(['list', '--json'])).updates.behind.restart === 0);
+  assert.deepEqual(JSON.parse(ok(['list', '--json'])).updates.behind, { channels: 0, claude: 0, restart: 0 });
+
+  // Idle chats restart at once, and the request is done with.
+  await until(() => JSON.parse(ok(['list', '--json'])).updates.chats.filter((x) => x.state === 'idle').length === 2);
+  const now = JSON.parse(ok(['refresh', '--all', '--json']));
+  assert.deepEqual(now.chats.map((x) => x.did), ['restarted', 'restarted']);
+  assert.match(now.summary, /^Restarted #\w+ and #\w+\.$/);
+  assert.equal(existsSync(join(dir, 'refresh-all.json')), false);
+  assert.match(ok(['refresh']), /Every chat is up to date/);
+});
+
+test('refresh --all with no chat running says so', (t) => {
+  const { ok } = setup(t);
+  ok(['create', 'general']);
+  assert.equal(ok(['refresh', '--all']).trim(), 'No chat is running.');
 });
 
 test('the prompt on a chat\'s screen: empty, a draft, or not there', () => {

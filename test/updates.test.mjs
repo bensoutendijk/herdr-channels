@@ -41,3 +41,11 @@ test("a store on another machine's chats are behind on its own command, by the n
   const both = refreshRow({ build: { id: 'b', label: 'abc1234', name: 'hub' }, claude: '2.1.5', asked: null, chats: [{ channel: 'general', behind: ['channels', 'claude'], state: 'idle', claude: '2.1.4' }] });
   assert.deepEqual([both.title, both.detail], ['Updates installed', 'Claude Code 2.1.5 and hub abc1234']);
 });
+
+test('after Refresh all chats, the chats still to restart are reported until they have', () => {
+  assert.deepEqual(refreshRow({ ...base, chats: [chat('general', ['restart'], 'busy'), chat('ops', [])] }),
+    { offer: false, title: 'Refreshing', detail: '#general restarts when its turn ends.' });
+  // Behind on an update too: that row, as before.
+  assert.deepEqual(refreshRow({ ...base, asked: '2.1.330', chats: [chat('general', ['claude', 'restart'], 'busy')] }),
+    { offer: false, title: 'Updating', detail: '#general restarts when its turn ends.' });
+});
