@@ -14,7 +14,7 @@ Everything is local: the channel store is a folder on disk, tasks run under your
 the herdr mod runs every command on the same machine. No server is involved, unless you turn on
 [cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
 
-![The channels layout in Herdr: the channel list on the left with Herdr's spaces list below it (channels, acme-website); the #website channel's Claude Code chat in the middle, where a one-line notice from the Add a page title task is followed by the chat saying in a few lines that it finished, above a task card saying Pick a homepage headline waits on a permission prompt; and the tasks panel on the right with one task that needs input, one working and two ready for review](preview.png)
+![The channels layout in Herdr: the channel list on the left, where #website has a red dot on its icon for the task waiting on you, with Herdr's spaces list below it; the #website channel's Claude Code chat in the middle, where one-line notices from the Add a contributing guide and Add a page title tasks are followed by the chat saying in a few lines what they did, above a task card saying Pick a homepage headline waits on a permission prompt; and the tasks panel on the right with one task that needs input, one working and two ready for review](preview.png)
 
 ## Contents
 

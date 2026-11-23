@@ -163,7 +163,7 @@ test('waitingOf: what a channel row marks; an aged-out question, a dismissed tas
   assert.deepEqual(B.waitingOf(null), { needs: 0, unread: 0, held: 0 });
 });
 
-test('waitingOf: a store that doesn\'t give `asking` (an older one, or agent-os) has its waiting tasks counted', () => {
+test('waitingOf: a store that doesn\'t give `asking` (an older one, or one on another machine) has its waiting tasks counted', () => {
   const now = Date.parse('2026-11-23T12:00:00Z');
   const old = new Date(now - 72 * 3600000).toISOString();
   // No asking and no unread: nothing says how old, so it counts.
