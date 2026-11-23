@@ -22,6 +22,11 @@
 // No button starts a turn of the chat. Acting on a card takes
 // it out of the inbox, so it doesn't ride along with the user's next message as well. What the user doesn't act on
 // still rides along, unless the chat was told of it as a notice: the chat's UserPromptSubmit hook (`channels pending --hook`) takes it.
+// The top card's buttons have hotkeys, and the card says which (KEYS): ctrl+x tab focuses the band, then s sends,
+// o opens, d dismisses. A hotkey presses one Button of the mod (the later drawn wins), so only the top card has
+// them; tab and enter reach the rest. Letters only: a bare digit answers a survey. On Claude Code's main-screen
+// layout (not fullscreen) the band takes no clicks, so the keys are the way in there. Where neither reaches the band
+// (a key binding takes ctrl+x first), /cards acts on the cards from the prompt (cardsCommand).
 // Outside a channel's chat (no CHANNELS_CHANNEL) the mod draws nothing.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -37,6 +42,10 @@ const gone = atom({ plugin: 'channels-cards', key: 'gone' } as const, [] as stri
 
 const POLL_MS = 2000
 const SHOWN = 4 // cards drawn at once; the rest are counted on one line
+
+// The top card's hotkeys. Digits stay free for surveys.
+const KEYS = { send: 's', open: 'o', remote: 'c', dismiss: 'd', allow: 'y', deny: 'n' } as const
+type Key = keyof typeof KEYS
 
 // Where the store is and how to run `channels`: set at session.start (a reload runs it again).
 let storeFile: string | null = null
@@ -131,6 +140,73 @@ async function setDraft($: EngineInterface, task: string, value: string) {
   await update($, drafts, was => ({ ...was, [task]: value }))
 }
 
+// The cards drawn now, top first: the store's, less those acted on here and the stale questions.
+async function shownCards($: EngineInterface) {
+  const hidden = await read($, gone)
+  const now = await $.clock.now()
+  return (await read($, cards)).filter(c => !hidden.includes(c.task) && !stale(c, now))
+}
+
+// /cards: the cards without the band, for a terminal where it takes no click or focus. Typed in the prompt.
+//   /cards                       lists them, numbered from the top
+//   /cards send [n] <answer>     answers card n (1 when left out); an answer of a number picks that choice
+//   /cards open|claude|dismiss|allow|deny [n]
+const VERBS = ['send', 'open', 'claude', 'dismiss', 'allow', 'deny'] as const
+type Verb = (typeof VERBS)[number]
+const CARDS_HELP = '/cards lists the cards; /cards send [n] <answer>, /cards open [n], /cards dismiss [n] act on card n (the top one when left out); allow, deny and claude too.'
+
+const what = (card: Card) =>
+  card.cloud ? 'asks you (answer it on claude.ai)' : card.state === 'approval' ? `asks to ${card.command ? `run: ${card.command}` : 'change files'}` : card.state === 'prompt' ? `waits on a permission prompt: ${card.waiting ?? 'open it to answer'}` : `asks: ${asked(card)}`
+// The question a card asks, in one line: its text's line that ends in "?", else what it waits on.
+const asked = (card: Card) => {
+  const lines = questionOf(card).split('\n').map(l => l.trim()).filter(Boolean)
+  return lines.find(l => l.endsWith('?')) ?? card.waiting ?? lines[0] ?? 'open it to see'
+}
+const verbsOf = (card: Card): Verb[] =>
+  card.cloud ? ['open', 'dismiss'] : card.state === 'approval' ? ['allow', 'deny', 'open', 'dismiss'] : card.state === 'prompt' ? ['open', ...(card.remote ? ['claude' as const] : []), 'dismiss'] : ['send', 'open', ...(card.remote ? ['claude' as const] : []), 'dismiss']
+
+async function cardsCommand($: EngineInterface, args: string): Promise<string> {
+  const all = await shownCards($)
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  if (!words.length || words[0] === 'list') {
+    if (!all.length) return 'No task cards wait in this chat.'
+    return all
+      .map((c, i) => {
+        const choices = c.options.length && c.state === 'question' && !c.cloud ? `\n   choices: ${c.options.map((o, j) => `${j + 1}. ${o}`).join('  ')}` : ''
+        return `${i + 1}. ${c.name} ${what(c)}${choices}\n   /cards ${verbsOf(c).join('|')} ${i + 1}`
+      })
+      .join('\n')
+  }
+  const verb = words[0] as Verb
+  if (!VERBS.includes(verb)) return `Unknown: ${words[0]}. ${CARDS_HELP}`
+  // A number after the verb is the card's, except a lone one after send: that is the answer (a choice's number).
+  const numbered = /^\d+$/.test(words[1] ?? '') && (verb !== 'send' || words.length > 2)
+  const n = numbered ? Number(words[1]) : 1
+  const rest = words.slice(numbered ? 2 : 1).join(' ')
+  const card = all[n - 1]
+  if (!card) return all.length ? `No card ${n}: ${all.length === 1 ? 'there is one' : `there are ${all.length}`}. /cards lists them.` : 'No task cards wait in this chat.'
+  if (!verbsOf(card).includes(verb)) return `${card.name}'s card has no ${verb}: it takes /cards ${verbsOf(card).join('|')} ${n}.`
+  if (verb === 'send') {
+    if (!rest) return `Give the answer: /cards send ${n} <answer>${card.options.length ? ` (or the number of a choice: ${card.options.map((o, j) => `${j + 1}. ${o}`).join('  ')})` : ''}.`
+    const pick = /^\d+$/.test(rest) ? card.options[Number(rest) - 1] : undefined
+    await send($, card, pick ?? rest)
+  } else if (verb === 'open') await (card.cloud ? openRemote($, card) : open($, card))
+  else if (verb === 'claude') await openRemote($, card)
+  else if (verb === 'dismiss') await dismiss($, card)
+  else await approve($, card, verb)
+  const failed = (await read($, work)).find(w => w.task === card.task)?.error
+  if (failed) return `${card.name}: ${failed}`
+  const sent = verb === 'send' ? ((/^\d+$/.test(rest) && card.options[Number(rest) - 1]) || rest) : ''
+  return {
+    send: `Sent "${sent}" to ${card.name}. It carries on.`,
+    open: card.cloud ? `Opened ${card.name} on claude.ai.` : `${card.name} is in the tasks panel.`,
+    claude: `Opened ${card.name} on claude.ai.`,
+    dismiss: `Dismissed ${card.name}'s card. The task is left as it is.`,
+    allow: `Allowed. ${card.name} goes on.`,
+    deny: `Denied. ${card.name} goes on without it.`,
+  }[verb]
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -148,8 +224,11 @@ export const register: Register = on => {
     }
     await poll($)
     $.clock.every(POLL_MS, () => poll($))
+    await $.command.register({ name: 'cards', description: `The task cards, from the prompt: ${CARDS_HELP}`, argumentHint: '[send|open|dismiss|allow|deny|claude] [n] [answer]' })
     return started
   })
+
+  on('command.run', { command: 'cards' }, async ($, e) => ({ text: await cardsCommand($, e.args) }))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
@@ -171,10 +250,30 @@ export const register: Register = on => {
       return null
     }
 
-    const dismissButton = (card: Card) => <Button key={`dismiss:${card.task}`} label="Dismiss" onPress={() => dismiss($, card)} />
+    // Only the top card's buttons get hotkeys (a hotkey presses one Button).
+    const top = all[0]?.task
+    const hot = (card: Card, k: Key) => (card.task === top ? { hotkey: KEYS[k] } : {})
+
+    // The top card's line of keys, from the buttons it draws: "ctrl+x tab, then s send · o open · d dismiss".
+    const keysLine = (card: Card, keys: [Key, string][], typing = false) =>
+      card.task === top ? (
+        <Text dimColor>
+          {`Keys: ctrl+x tab, then ${typing ? 'type, enter sends; or tab, then ' : ''}`}
+          {keys.map(([k, what]) => `${KEYS[k]} ${what}`).join(' · ')}
+          {all.length > 1 ? ' · tab, enter for the cards below' : ''}
+          {' · or type /cards'}
+        </Text>
+      ) : null
+
+    const dismissButton = (card: Card) => (
+      <Button key={`dismiss:${card.task}`} label="Dismiss" {...hot(card, 'dismiss')} onPress={() => dismiss($, card)} />
+    )
 
     const remote = (card: Card) =>
-      card.remote ? <Button key={`remote:${card.task}`} label="Open on claude.ai" onPress={() => openRemote($, card)} /> : null
+      card.remote ? (
+        <Button key={`remote:${card.task}`} label="Open on claude.ai" {...hot(card, 'remote')} onPress={() => openRemote($, card)} />
+      ) : null
+    const remoteKey = (card: Card): [Key, string][] => (card.remote ? [['remote', 'claude.ai']] : [])
 
     // A cloud task asks: what it needs, and Open (on claude.ai), where it is answered.
     const cloudQuestion = (card: Card) => (
@@ -189,9 +288,10 @@ export const register: Register = on => {
         <Text maxLines={4}>{card.message ?? card.waiting ?? 'It asks you something: open it to see.'}</Text>
         <Box flexDirection="row" gap={1}>
           <Text dimColor>Answer it on claude.ai.</Text>
-          <Button key={`open:${card.task}`} label="Open" variant="primary" onPress={() => openRemote($, card)} />
+          <Button key={`open:${card.task}`} label="Open" variant="primary" {...hot(card, 'open')} onPress={() => openRemote($, card)} />
           {dismissButton(card)}
         </Box>
+        {keysLine(card, [['open', 'open'], ['dismiss', 'dismiss']])}
         {status(card)}
       </Box>
     )
@@ -231,11 +331,19 @@ export const register: Register = on => {
                 onSubmit={value => send($, card, value)}
               />
             ) : null}
-            <Button key={`send:${card.task}`} label="Send" variant="primary" onPress={() => send($, card, draft)} />
-            <Button key={`open:${card.task}`} label="Open" onPress={() => open($, card)} />
+            <Button
+              key={`send:${card.task}`}
+              label="Send"
+              variant="primary"
+              {...hot(card, 'send')}
+              {...(card.task === top && !typing ? { autoFocus: true as const } : {})}
+              onPress={() => send($, card, draft)}
+            />
+            <Button key={`open:${card.task}`} label="Open" {...hot(card, 'open')} onPress={() => open($, card)} />
             {remote(card)}
             {dismissButton(card)}
           </Box>
+          {keysLine(card, [['send', 'send'], ['open', 'open'], ...remoteKey(card), ['dismiss', 'dismiss']], !options.length)}
           {status(card)}
         </Box>
       )
@@ -254,10 +362,11 @@ export const register: Register = on => {
           <Text dimColor wrap="truncate-end">
             {card.waiting ?? 'A prompt'}: answer it in the task's view.
           </Text>
-          <Button key={`open:${card.task}`} label="Open" variant="primary" onPress={() => open($, card)} />
+          <Button key={`open:${card.task}`} label="Open" variant="primary" {...hot(card, 'open')} onPress={() => open($, card)} />
           {remote(card)}
           {dismissButton(card)}
         </Box>
+        {keysLine(card, [['open', 'open'], ...remoteKey(card), ['dismiss', 'dismiss']])}
         {status(card)}
       </Box>
     )
@@ -275,11 +384,12 @@ export const register: Register = on => {
         {card.command ? <Text maxLines={3}>$ {card.command}</Text> : null}
         {card.reason ? <Text dimColor maxLines={2}>{card.reason}</Text> : null}
         <Box flexDirection="row" gap={1}>
-          <Button key={`allow:${card.task}`} label="Allow" variant="primary" onPress={() => approve($, card, 'allow')} />
-          <Button key={`deny:${card.task}`} label="Deny" onPress={() => approve($, card, 'deny')} />
-          <Button key={`open:${card.task}`} label="Open" onPress={() => open($, card)} />
+          <Button key={`allow:${card.task}`} label="Allow" variant="primary" {...hot(card, 'allow')} onPress={() => approve($, card, 'allow')} />
+          <Button key={`deny:${card.task}`} label="Deny" {...hot(card, 'deny')} onPress={() => approve($, card, 'deny')} />
+          <Button key={`open:${card.task}`} label="Open" {...hot(card, 'open')} onPress={() => open($, card)} />
           {dismissButton(card)}
         </Box>
+        {keysLine(card, [['allow', 'allow'], ['deny', 'deny'], ['open', 'open'], ['dismiss', 'dismiss']])}
         {status(card)}
       </Box>
     )

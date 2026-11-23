@@ -1986,10 +1986,12 @@ const shq = (s) => `'${`${s}`.replace(/'/g, `'\\''`)}'`;
 // user sends. The hook runs this same script with this same node, so it needs nothing on PATH.
 // With Remote Control on, remoteControlAtStartup too: for this session only, like the rest. No prompt suggestions: a
 // suggestion is drawn in the prompt like typed text, and a refresh (see restartChat) must tell an empty prompt from a
-// draft by the screen alone.
+// draft by the screen alone. The fullscreen layout (`tui`), where a click reaches the task cards: Claude Code's own
+// default differs by account and machine, and on the main screen the cards take keys only. An environment variable
+// (CLAUDE_CODE_NO_FLICKER=0), managed settings or Claude Code's own crash guard still win over it.
 export function chatSettings(dir, channelId, { remote = remoteOn() } = {}) {
   const command = `CHANNELS_DIR=${shq(dir)} ${shq(process.execPath)} ${shq(fileURLToPath(import.meta.url))} pending ${shq(channelId)} --hook`;
-  return { disableAgentView: true, promptSuggestionEnabled: false, ...(remote ? { remoteControlAtStartup: true } : {}), hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
+  return { disableAgentView: true, promptSuggestionEnabled: false, tui: 'fullscreen', ...(remote ? { remoteControlAtStartup: true } : {}), hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
 }
 
 // The chat's claude arguments. With Remote Control on, its claude.ai name carries the machine (#general · studio);

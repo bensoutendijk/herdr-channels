@@ -279,3 +279,90 @@ test('a question nobody answered in two days is not drawn; a prompt that old sti
   expect(stale(q!, NOW)).toBe(false)
   expect(stale(q!, NOW + 2 * 86_400_000)).toBe(true)
 })
+
+// The keyboard: on Claude Code's main screen the band takes no clicks, so every button of the top card has a letter
+// (ctrl+x tab, then the letter), and the card says which. A hotkey presses one Button, so the cards below have none.
+type Found = { key: string | undefined; props: Record<string, unknown> }
+const hotkeys = async (ui: { findAll: (q: { type: string }) => Promise<Found[]> }) =>
+  Object.fromEntries((await ui.findAll({ type: 'Button' })).map(b => [b.key, b.props.hotkey]))
+
+test('the top card has a letter on every button and a line saying them; the cards below have none', async ($, on) => {
+  const url = 'https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv'
+  world(on, [{ ...question(), remote: url }, { ...permission, at: new Date(Date.parse(AT) + 1000).toISOString() }])
+  await start($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await hotkeys(ui)).toEqual({
+    [`send:${Q}`]: 's', [`open:${Q}`]: 'o', [`remote:${Q}`]: 'c', [`dismiss:${Q}`]: 'd',
+    [`open:${P}`]: undefined, [`dismiss:${P}`]: undefined,
+  })
+  const keys = await ui.findAll({ type: 'Text', text: /^Keys:/ })
+  expect(keys.map(k => k.text)).toEqual(['Keys: ctrl+x tab, then s send · o open · c claude.ai · d dismiss · tab, enter for the cards below · or type /cards'])
+  // ctrl+x tab lands on Send, not on the Select (an open Select takes every key, the letters too).
+  expect((await ui.find({ key: `send:${Q}` }))?.props.autoFocus).toBe(true)
+  expect((await ui.find({ key: `open:${P}` }))?.props.autoFocus).toBeUndefined()
+  // Digits stay free: a bare digit answers a survey.
+  expect(Object.values(await hotkeys(ui)).some(k => typeof k === 'string' && /\d/.test(k))).toBe(false)
+  await ui.unmount()
+})
+
+test('the letters follow the top card: a prompt, an approval, a question to type, a cloud question', async ($, on) => {
+  const approval = {
+    task: P, name: 'Check the release notes', kind: 'needs', at: AT, text: '…', harness: 'codex',
+    card: { state: 'approval', waiting: 'Run: ls', message: null, options: [], command: 'ls', reason: null },
+  }
+  const C = 'cloud/session_01AbCdEfGhIjKlMnOpQrStUv'
+  const url = 'https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv'
+  const cloud = { task: C, name: 'Fix the footer', kind: 'needs', at: AT, text: '…', cloud: true, remote: url, card: { state: 'question', waiting: 'Which page?', message: 'Which page?', options: [] } }
+  const w = world(on, [permission])
+  await start($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const line = async () => (await ui.find({ type: 'Text', text: /^Keys:/ }))?.text
+  expect(await hotkeys(ui)).toEqual({ [`open:${P}`]: 'o', [`dismiss:${P}`]: 'd' })
+  expect(await line()).toBe('Keys: ctrl+x tab, then o open · d dismiss · or type /cards')
+  await w.setInbox([approval])
+  expect(await hotkeys(ui)).toEqual({ [`allow:${P}`]: 'y', [`deny:${P}`]: 'n', [`open:${P}`]: 'o', [`dismiss:${P}`]: 'd' })
+  expect(await line()).toBe('Keys: ctrl+x tab, then y allow · n deny · o open · d dismiss · or type /cards')
+  await w.setInbox([question([])])
+  expect(await line()).toBe('Keys: ctrl+x tab, then type, enter sends; or tab, then s send · o open · d dismiss · or type /cards')
+  await w.setInbox([cloud])
+  expect(await hotkeys(ui)).toEqual({ [`open:${C}`]: 'o', [`dismiss:${C}`]: 'd' })
+  expect(await line()).toBe('Keys: ctrl+x tab, then o open · d dismiss · or type /cards')
+  await ui.unmount()
+})
+
+// /cards: the cards from the prompt, for a terminal where the band takes no click and no focus.
+test('/cards lists the cards by number and acts on one from the prompt, with no turn of the chat', async ($, on) => {
+  const w = world(on, [question(), { ...permission, at: new Date(Date.parse(AT) + 1000).toISOString() }])
+  await start($, on)
+  const run = async (args: string) => ((await $.command.run({ command: 'cards', args })) as { text?: string })?.text
+  expect(await run('')).toBe(
+    [
+      '1. Draw the logo asks: Which colour should the logo be?',
+      '   choices: 1. Teal  2. Coral  3. Ink',
+      '   /cards send|open|dismiss 1',
+      '2. Migrate the database waits on a permission prompt: permission for Bash(psql -f migrate.sql)',
+      '   /cards open|dismiss 2',
+    ].join('\n'),
+  )
+  // A lone number after send is a choice of the top card.
+  expect(await run('send 2')).toBe('Sent "Coral" to Draw the logo. It carries on.')
+  expect(w.ran.at(-1)).toEqual({ argv: ['/bin/channels', 'send', Q, '-'], stdin: 'Coral' })
+  // Sent, so it's gone from the list: the prompt card is now 1.
+  expect(await run('send 1 Forest green')).toBe("Migrate the database's card has no send: it takes /cards open|dismiss 1.")
+  expect(await run('open')).toBe('Migrate the database is in the tasks panel.')
+  expect(w.ran.at(-1)).toEqual({ argv: ['/bin/channels', 'open', P], stdin: undefined })
+  expect(await run('dismiss 1')).toBe("Dismissed Migrate the database's card. The task is left as it is.")
+  expect(await run('')).toBe('No task cards wait in this chat.')
+  expect(await run('dismiss 3')).toBe('No task cards wait in this chat.')
+  expect(await run('wave')).toMatch(/^Unknown: wave\. \/cards lists the cards/)
+  expect(w.submitted).toEqual([])
+})
+
+test('/cards says why an action failed, and asks for an answer it was not given', async ($, on) => {
+  world(on, [question([]), permission], () => ({ exitCode: 1, stderr: 'testmac/dddd0001 is working. Send it after it finishes.\n' }))
+  await start($, on)
+  const run = async (args: string) => ((await $.command.run({ command: 'cards', args })) as { text?: string })?.text
+  expect(await run('send')).toBe('Give the answer: /cards send 1 <answer>.')
+  expect(await run('send 1 Bigger')).toBe('Draw the logo: testmac/dddd0001 is working. Send it after it finishes.')
+  expect(await run('dismiss 5')).toBe('No card 5: there are 2. /cards lists them.')
+})
