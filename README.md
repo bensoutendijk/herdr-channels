@@ -828,6 +828,16 @@ the copy's session id, and files the copy into the original task's channel in it
 task is marked as superseded by the copy and resolved. Sending to a task that is still working, or
 is showing a permission prompt, fails; answer prompts in the task's view instead.
 
+A task whose turn is over while a background task it started (a subagent, a background command)
+still runs isn't stopped, since that would stop the background work. Claude Code still calls such a
+session busy; `channels read` shows it as `waiting_on_job`, and `send` types the message into the
+task's view, as you would in the panel: its `claude attach` runs for a moment in a herdr-core
+terminal, the message is pasted into its prompt and sent, and the terminal is closed. The task takes
+it as its next turn and the background work goes on. If a draft is typed in the task's prompt,
+`send` leaves it alone and fails. Where herdr-core can't open the view, `send` fails and says that
+the turn is over but a background task is still running: run `channels watch <session> --wake-on any`
+and send once that wakes the chat.
+
 `channels rename-task` renames a task the way Claude Code's own agents view (`claude agents`) does:
 the background session's job record gets the new name, marked as given by the user. A running
 session takes the name on at once without starting a turn, and Claude Code's automatic naming
