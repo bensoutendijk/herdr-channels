@@ -1687,7 +1687,9 @@ export default class Channels extends View {
     if (kind === "send-task") {
       const text = `${this.input.value() ?? ""}`.trim();
       if (!text) return;
-      submit(() => {}, 'channels send "$1" "$2"', [props().task, text], `send to ${this.task?.name || "the task"}`);
+      // Sent from the panel, it is the user's own turn: the chat doesn't hear how it ends (send-by).
+      if (has("send-by")) submit(() => {}, 'channels send "$1" --by user "$2"', [props().task, text], `send to ${this.task?.name || "the task"}`);
+      else submit(() => {}, 'channels send "$1" "$2"', [props().task, text], `send to ${this.task?.name || "the task"}`);
       note(this.task?.cloud?.state === "needs" ? `Sent to ${this.task?.name || "the task"}. It waits behind its open question until that is answered on claude.ai.` : `Sent to ${this.task?.name || "the task"}.`);
       return this.close();
     }
