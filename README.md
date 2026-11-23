@@ -413,7 +413,7 @@ Every question and permission prompt also shows as a card in the chat, in the ba
 prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
 the chat:
 
-<img src="docs/task-cards.png" width="480" alt="The #website chat: a notice, ← tasks: Task Pick a homepage headline, which Claude Code shows cut to two lines, and the chat's answer that the task waits on the user's pick among three headlines, with its own view; below it a card above the prompt: Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open">
+<img src="docs/task-cards.png" width="480" alt="The #website chat: a notice, ← tasks: Task Pick a homepage headline, which Claude Code shows cut to two lines, and the chat's answer listing the three headlines the task waits on; below it a card above the prompt: Pick a homepage headline ended its turn asking you, 4m, asking which headline the homepage hero should use, with an Answer select and Send, Open and Dismiss">
 
 | Card | Shows | Buttons |
 |---|---|---|
@@ -428,7 +428,7 @@ controls, and `enter` to press one; `esc` goes back to the prompt. Clicking work
 question with choices, `enter` on the Select opens it, the arrows pick, and `enter` again keeps the
 pick for **Send**:
 
-<img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…">
+<img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…, above Send, Open and Dismiss">
 
 Acting on a card marks its event handled in the store: it leaves the chat's inbox and the task's dot
 in the panel clears, so it doesn't also ride along with your next message. A prompt's card you don't
