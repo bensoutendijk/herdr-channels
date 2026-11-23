@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_HARNESS, HARNESSES, harnessId, harnessOf } from '../bin/harness/index.mjs';
-import claude from '../bin/harness/claude.mjs';
+import claude, { promptDraft, sessionState, stateOf, turnEnded } from '../bin/harness/claude.mjs';
 
 const SHAPE = ['installed', 'start', 'scan', 'look', 'withLast', 'row', 'find', 'read', 'send', 'rename'];
 
@@ -75,4 +75,48 @@ test('Claude\'s row names a task as `channels list` does', async () => {
     assert.deepEqual(claude.row(sc, { machine: 'studio', session_id: 'aaaaaaaa-1111-4111-8111-111111111111', job: 'j1', name: 'filed' }, { local: 'studio' }), { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', name: 'Logo', remote_url: null });
     assert.equal(claude.row(sc, { machine: 'studio', session_id: 'cccccccc-3333-4333-8333-333333333333', job: null, name: 'kept' }, { local: 'studio' }).name, 'kept');
   } finally { rmSync(h, { recursive: true, force: true }); }
+});
+
+// Claude Code calls a session busy while a background subagent it started runs, its own turn over or not (issue #51):
+// the transcript's turn_duration line, after the turn's last message, says the turn is over.
+test('Claude\'s state tells a turn that is over, while background work runs, from one under way', () => {
+  const h = mkdtempSync(join(tmpdir(), 'harness-'));
+  try {
+    const file = (name, entries) => { const f = join(h, `${name}.jsonl`); writeFileSync(f, entries.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n')); return f; };
+    const ask = { type: 'user', message: { content: 'Start the sleeper' }, origin: { kind: 'human' } };
+    const call = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent' }] } };
+    const result = { type: 'user', message: { content: [{ type: 'tool_result' }] } };
+    const said = { type: 'assistant', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'started the sleeper' }] } };
+    const ended = { type: 'system', subtype: 'turn_duration', durationMs: 8007 };
+    const sub = { type: 'assistant', isSidechain: true, message: { content: [{ type: 'tool_use', name: 'Bash' }] } };
+    const over = file('over', [ask, call, result, said, ended, { type: 'system', subtype: 'stop_hook_summary' }, sub, '{"type":"assis']);
+    const under = file('under', [ask, call, result]);
+    const nextTurn = file('next', [ask, call, result, said, ended, { type: 'user', message: { content: 'And then?' }, origin: { kind: 'human' } }]);
+    assert.equal(turnEnded(over), true);
+    assert.equal(turnEnded(under), false);
+    assert.equal(turnEnded(nextTurn), false);
+    assert.equal(turnEnded(join(h, 'none.jsonl')), null);
+    assert.equal(turnEnded(file('empty', [])), null);
+
+    const live = { status: 'busy' };
+    const job = { state: 'working', detail: 'Sleeper running', inFlight: 1 };
+    assert.deepEqual(stateOf({ live, job, turnOver: true }), { state: 'waiting_on_job', doing: 'Its turn is over, but a background task it started is still running' });
+    assert.equal(stateOf({ live, job: { ...job, inFlight: 2 }, turnOver: true }).doing, 'Its turn is over, but 2 background tasks it started are still running');
+    assert.deepEqual(stateOf({ live, job, turnOver: false }), { state: 'working', doing: 'Sleeper running' });
+    assert.deepEqual(stateOf({ live, job, turnOver: null }), { state: 'working', doing: 'Sleeper running' });
+    assert.equal(stateOf({ live, job: { ...job, inFlight: 0 }, turnOver: true }).state, 'working');
+    assert.equal(stateOf({ live: { status: 'shell' }, job }).state, 'waiting_on_job');
+    assert.equal(stateOf({ live: { status: 'idle' }, job }).state, 'waiting_on_job');
+
+    // sessionState reads the transcript only for a busy session with background work in flight.
+    assert.equal(sessionState(h, 's1', { live, job: { ...job, transcript: over } }).state, 'waiting_on_job');
+    assert.equal(sessionState(h, 's1', { live, job: { ...job, transcript: under } }).state, 'working');
+    assert.equal(sessionState(h, 's1', { live, job: { ...job, inFlight: 0, transcript: over } }).state, 'working');
+  } finally { rmSync(h, { recursive: true, force: true }); }
+});
+
+test('promptDraft reads Claude Code\'s prompt off a screen', () => {
+  assert.equal(promptDraft('x\n❯ From the user: hi\n⏺ 4\n----\n❯ \n----\n  ⏺ main'), '');
+  assert.equal(promptDraft('----\n❯ half\n----'), 'half');
+  assert.equal(promptDraft('no prompt here'), null);
 });

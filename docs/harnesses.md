@@ -364,6 +364,7 @@ A notice started as a turn runs any hooks the user has, like a typed message.
 | Start, read, send, dismiss, file | Same commands | Same commands | `--harness codex` on start; `file` finds Codex threads too |
 | Events (finish, question, prompt) | Same events | n/a | Question by heuristic (§3) |
 | Sending while it works | **Better**: queued | n/a | `caps.sendWhileWorking` |
+| Sending after its turn, while background work it started runs | Same: a new turn (the thread is idle, its subagents are threads of their own) | n/a | Claude Code calls such a session busy; `send` types into its view (`claude attach`) |
 | Rename (`rename-task`) | **Better**: `thread/name/set`, no read-back race | n/a | `caps.rename` |
 | Copies on send | None | n/a | `caps.copies` |
 | Unread dots, seen | Same | n/a | |

@@ -70,8 +70,18 @@ if (args[0] === 'read') { const f = path.join(home, 'hc-screen'); process.stdout
 if (args[0] === 'keys') { fs.appendFileSync(path.join(home, 'hc-keys.jsonl'), JSON.stringify({ terminal: args[1], keys: args.slice(2) }) + '\\n'); process.exit(0); }
 if (args[0] === 'send') {
   if (fs.existsSync(path.join(home, 'hc-fail'))) { process.stderr.write('the program is blocked\\n'); process.exit(3); }
-  fs.appendFileSync(path.join(home, 'hc-sends.jsonl'), JSON.stringify({ terminal: args[1], text: args[2] }) + '\\n'); process.exit(0);
+  fs.appendFileSync(path.join(home, 'hc-sends.jsonl'), JSON.stringify({ terminal: args[1], text: args[2] }) + '\\n');
+  // Typed into a task's view (\`claude attach\`), the text is the session's next prompt, as its transcript shows.
+  const into = path.join(home, 'hc-send-transcript');
+  if (fs.existsSync(into)) fs.appendFileSync(fs.readFileSync(into, 'utf8'), '\\n' + JSON.stringify({ type: 'user', message: { role: 'user', content: args[2] }, origin: { kind: 'human' }, promptSource: 'typed', timestamp: new Date().toISOString() }));
+  process.exit(0);
 }
+if (args[0] === 'run') {
+  fs.appendFileSync(path.join(home, 'hc-runs.jsonl'), JSON.stringify({ args: args.slice(1) }) + '\\n');
+  if (fs.existsSync(path.join(home, 'hc-run-fail'))) { process.stderr.write('herdr-core is not running\\n'); process.exit(4); }
+  process.stdout.write(JSON.stringify({ address: 't9', name: args[args.indexOf('--name') + 1], state: 'live' })); process.exit(0);
+}
+if (args[0] === 'kill') { fs.appendFileSync(path.join(home, 'hc-kills.jsonl'), JSON.stringify({ terminal: args[1] }) + '\\n'); process.exit(0); }
 process.exit(2);
 `;
 
@@ -273,6 +283,64 @@ test('send wakes a background session whose turn is over, and refuses one that i
   live(OLD, { status: 'waiting', waitingFor: 'permission for Bash' });
   assert.match(run(['send', OLD, 'x']).stderr, /showing a prompt \(permission for Bash\)/);
   assert.match(run(['send', GONE, 'x']).stderr, /isn't a background session/);
+});
+
+// Issue #51: Claude Code keeps calling a session busy after its turn ends while a background subagent it started still
+// runs. Its transcript says the turn is over; the message is typed into its view (`claude attach` in a terminal of
+// herdr-core's), as the user would, and the session is neither stopped nor resumed.
+test('send types into a task whose turn is over while a background task it started runs, and refuses one mid-turn', (t) => {
+  const { home, ok, run, lines, live, running, job, transcript } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa']);
+  const file = join(home, '.claude', 'projects', '-x', `${OLD}.jsonl`);
+  const ask = { type: 'user', message: { content: 'Start the sleeper' }, origin: { kind: 'human' }, timestamp: '2026-11-23T20:04:00Z' };
+  const call = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent' }] } };
+  const said = { type: 'assistant', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'started the sleeper' }] } };
+  const ended = { type: 'system', subtype: 'turn_duration', durationMs: 8000 };
+  job('aaaaaaaa', { sessionId: OLD, state: 'working', detail: 'Sleeper running', name: 'Fix the total', inFlight: { tasks: 1, kinds: ['local_agent'] }, cwd: join(home, 'projects', 'app') });
+  transcript(OLD, [ask, call, said, ended]);
+  const pid = live(OLD, { status: 'busy', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'hc-screen'), '⏺ started the sleeper\n----\n❯ \n----\n  ◯ general-purpose  Sleeper\n');
+  writeFileSync(join(home, 'hc-send-transcript'), file);
+
+  // read says what is true: the turn is over, a background task still runs.
+  assert.match(ok(['read', OLD]), /waiting_on_job: Its turn is over, but a background task it started is still running/);
+
+  assert.match(ok(['send', OLD, 'Look', 'at', 'the', 'tax', 'too']), /Sent to testmac\/aaaaaaaa-1111.*typed into its view, and it takes it as its next turn while that task goes on/);
+  assert.ok(running(pid), 'the session (and its subagent) still runs');
+  assert.deepEqual(lines('claude-calls.jsonl').filter((c) => c.args[0] === 'stop' || c.args[0] === '--bg'), [], 'neither stopped nor resumed');
+  const [attach] = lines('hc-runs.jsonl');
+  const name = attach.args[attach.args.indexOf('--name') + 1];
+  assert.deepEqual(attach.args.slice(attach.args.indexOf('--') + 2), ['attach', 'aaaaaaaa', '--settings', '{"disableAgentView":true}']);
+  assert.ok(attach.args.includes('--rm') && attach.args.includes('--no-notify'));
+  assert.deepEqual(lines('hc-sends.jsonl'), [{ terminal: name, text: "From the user via #general's chat: Look at the tax too" }]);
+  assert.deepEqual(lines('hc-kills.jsonl'), [{ terminal: name }], 'its view is ended after');
+
+  // A draft the user is typing in its view shows in every view: nothing is added to it.
+  transcript(OLD, [ask, call, said, ended]);
+  writeFileSync(join(home, 'hc-screen'), '----\n❯ half a thought\n----\n');
+  let r = run(['send', OLD, 'x']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /turn is over \(a background task it started still runs\), but a draft is typed in its prompt.*Nothing was sent/);
+  assert.equal(lines('hc-sends.jsonl').length, 1);
+  assert.deepEqual(lines('hc-keys.jsonl').map((k) => k.keys), [['x'], ['backspace']], 'the key typed to tell a draft from a suggestion is taken back');
+  assert.equal(lines('hc-kills.jsonl').length, 2);
+
+  // No way to type it in (no herdr-core here): the refusal says what is true, and how to send it later.
+  writeFileSync(join(home, 'hc-run-fail'), '');
+  r = run(['send', OLD, 'x']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /turn is over, but a background task it started is still running, and herdr-core couldn't open its view.*herdr-core is not running.*channels watch testmac\/aaaaaaaa-1111-4111-8111-111111111111 --wake-on any.*type into it in its view/);
+  assert.doesNotMatch(r.stderr, /is working/);
+  rmSync(join(home, 'hc-run-fail'));
+
+  // Mid-turn (the tool call is the last thing it did): working, and refused as before, with nothing typed.
+  transcript(OLD, [ask, call]);
+  assert.match(ok(['read', OLD]), /working: Sleeper running/);
+  r = run(['send', OLD, 'x']);
+  assert.match(r.stderr, /is working\. Send it after it finishes/);
+  assert.equal(lines('hc-runs.jsonl').length, 3, 'no view opened for a session mid-turn');
+  assert.ok(running(pid));
 });
 
 test('send to a task whose process doesn\'t exit after stop fails plainly and starts nothing', (t) => {

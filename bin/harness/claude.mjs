@@ -6,7 +6,7 @@
 // Plain functions with no state of their own: `deps` (bin/channels.mjs, defaultDeps) carries the home folder, the
 // `claude` to run and how to run programs, so the tests run them against fixtures.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // A refusal the user can act on: bin/channels.mjs prints its message and exits 1, as for its own.
@@ -77,18 +77,55 @@ export function readLive(home) {
   return out;
 }
 
-// A session's state from what Claude Code says about it: working, waiting_on_job, waiting_on_user (a dialog in the
-// session needs the user), blocked (it ended its turn asking for something), failed or done.
-export function stateOf({ live = null, job = null } = {}) {
+// Whether a session's last turn has ended, from the end of its transcript: Claude Code writes a "turn_duration" line
+// when a turn ends, after the turn's last message. true when that line comes after the last message, false when a
+// message does (a prompt, a tool call or its result: a turn is under way), null when the transcript can't say.
+// Subagents' messages (isSidechain) are not the session's own turn.
+export const TURN_TAIL = 256 * 1024;
+export function turnEnded(file) {
+  if (!file) return null;
+  let text;
+  try {
+    const fd = openSync(file, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const len = Math.min(size, TURN_TAIL);
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally { closeSync(fd); }
+  } catch { return null; }
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let r;
+    try { r = JSON.parse(lines[i]); } catch { continue; } // a line being written, or cut by the tail
+    if (!r || r.isSidechain) continue;
+    if (r.type === 'system' && r.subtype === 'turn_duration') return true;
+    if (r.type === 'user' || r.type === 'assistant') return false;
+  }
+  return null;
+}
+
+// What a session that ended its turn while background work it started still runs is doing, in a word for the user.
+const backgroundDoing = (n) => (n > 1 ? `Its turn is over, but ${n} background tasks it started are still running` : 'Its turn is over, but a background task it started is still running');
+
+// A session's state from what Claude Code says about it: working, waiting_on_job (its turn is over, but a background
+// task it started still runs), waiting_on_user (a dialog in the session needs the user), blocked (it ended its turn
+// asking for something), failed or done. Claude Code calls a session busy while a background subagent it started runs,
+// its own turn over or not: `turnOver` (turnEnded, from its transcript) tells the two apart.
+export function stateOf({ live = null, job = null, turnOver = null } = {}) {
   const status = live?.status ?? null;
   if (status === 'waiting') return { state: 'waiting_on_user', doing: `Waiting on you: ${live.waitingFor || 'a prompt'}` };
-  if (status === 'busy') return { state: 'working', doing: job?.detail || 'Working' };
-  if (status === 'shell') return { state: 'waiting_on_job', doing: 'A background command is running' };
+  if (status === 'busy') {
+    if (turnOver === true && job?.inFlight > 0) return { state: 'waiting_on_job', doing: backgroundDoing(job.inFlight) };
+    return { state: 'working', doing: job?.detail || 'Working' };
+  }
+  if (status === 'shell') return { state: 'waiting_on_job', doing: 'Its turn is over, but a background command it started is still running' };
   if (live && status && status !== 'idle') return { state: 'working', doing: job?.detail || `Claude Code says "${status}"` };
   if (job) {
     if (job.state === 'working') {
       if (!live) return { state: 'paused', doing: 'Its process stopped while it was working' };
-      return job.inFlight > 0 ? { state: 'waiting_on_job', doing: job.detail || 'Waiting on a background task' } : { state: 'working', doing: job.detail || 'Working' };
+      return job.inFlight > 0 ? { state: 'waiting_on_job', doing: backgroundDoing(job.inFlight) } : { state: 'working', doing: job.detail || 'Working' };
     }
     if (job.state === 'blocked') return { state: 'blocked', doing: job.needs || job.detail || 'Blocked' };
     if (job.state === 'failed') return { state: 'failed', doing: job.detail || 'Failed' };
@@ -97,6 +134,14 @@ export function stateOf({ live = null, job = null } = {}) {
     return { state: live ? 'working' : 'done', doing: job.detail || job.state || '' };
   }
   return { state: 'done', doing: live ? 'Its turn ended' : 'Ended' };
+}
+
+// stateOf for a session, reading its transcript's end only when it has to: when Claude Code calls it busy while
+// background work it started runs.
+export function sessionState(home, sid, { live = null, job = null } = {}) {
+  const turnOver = live?.status === 'busy' && job?.inFlight > 0 && sid
+    ? turnEnded(job.transcript && existsSync(job.transcript) ? job.transcript : findTranscript(home, sid)) : null;
+  return stateOf({ live, job, turnOver });
 }
 
 export function findTranscript(home, id) {
@@ -345,7 +390,7 @@ export function look(sc, t) {
   const sid = sessionIdOf(home, t);
   const job = sid ? jobs.get(sid) ?? null : null;
   const l = sid ? live.get(sid) ?? null : null;
-  const st = stateOf({ live: l, job });
+  const st = sessionState(home, sid, { live: l, job });
   const kind = st.state === 'done' || st.state === 'failed' ? 'done' : st.state === 'waiting_on_user' || st.state === 'blocked' ? 'needs' : null;
   let work = job?.work ?? 0;
   if (!job && sid) { const f = findTranscript(home, sid); try { work = f ? statSync(f).size : 0; } catch { work = 0; } }
@@ -417,7 +462,7 @@ export async function facts({ deps, id, machine }) {
   const s = await find({ deps, id, machine });
   const job = readJobs(deps.home).get(s.session_id) ?? null;
   const l = readLive(deps.home).get(s.session_id) ?? null;
-  return { s, job, live: l, st: stateOf({ live: l, job }) };
+  return { s, job, live: l, st: sessionState(deps.home, s.session_id, { live: l, job }) };
 }
 
 // A session's state and its latest messages, as `channels read` shows them: { summary, messages, more }. The
@@ -448,17 +493,103 @@ export async function exited(deps, pid, ms) {
   return true;
 }
 
+// What Claude Code's prompt holds on a terminal's screen (`hc read`): the text after its ❯ ('' when empty), or null when
+// no prompt is on screen.
+export function promptDraft(screen) {
+  const lines = `${screen ?? ''}`.split('\n').slice(-40);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\s*❯(.*)$/.exec(lines[i].replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''));
+    if (m) return m[1].replace(/ /g, ' ').trim();
+  }
+  return null;
+}
+
+// Typing into a session's view: how long its view may take to come up, and the message to show in its transcript.
+export const VIEW = { upMs: 20_000, seenMs: 30_000, pollMs: 300 };
+
+// Whether the transcript shows the message as a prompt of the session's own (not a subagent's), at or after `since`.
+function promptSeen(file, body, since) {
+  if (!file) return false;
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch { return false; }
+  const want = oneLine(body).slice(0, 120);
+  for (const line of text.slice(-TURN_TAIL).split('\n').reverse()) {
+    if (!line.includes('"type":"user"')) continue;
+    let r;
+    try { r = JSON.parse(line); } catch { continue; }
+    if (r.type !== 'user' || r.isSidechain) continue;
+    if (r.timestamp && Date.parse(r.timestamp) < since) return false;
+    if (oneLine(textOf(r.message?.content)).startsWith(want)) return true;
+  }
+  return false;
+}
+
+// A message to a session whose turn is over while background work it started still runs: typed into its view, the
+// way the user types into it in the panel. Its own `claude attach` runs for a moment in a terminal of herdr-core's
+// (`hc run`); once its prompt is on screen, and empty (a draft the user is typing there shows in every view, and is
+// never added to), the message is pasted and sent there (`hc send`), and the terminal is ended. Claude Code takes it
+// as the session's next turn, a prompt the user typed, and the background work goes on. It is sent once its
+// transcript shows it. Answers { delivered_as: 'typed', job }.
+async function typeIntoView({ deps, ref, jobId, sid, job, body }) {
+  const busy = (why) => fail(`${ref}'s turn is over, but a background task it started is still running, and ${why}. Run \`channels watch ${ref} --wake-on any\` and send it once that wakes you, or type into it in its view in the panel.`);
+  if (!deps.hc) busy('herdr-core (hc) isn\'t here to type the message into its view');
+  const transcript = () => (job?.transcript && existsSync(job.transcript) ? job.transcript : findTranscript(deps.home, sid));
+  const name = `send-${jobId}-${randomUUID().slice(0, 4)}`.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+  const started = await deps.run(deps.hc, ['run', '--bg', '--json', '--no-parent', '--no-notify', '--rm', '--name', name, '--label', `channels.send=${jobId}`,
+    '--cwd', deps.home, '--', onPath(deps.claude) ?? deps.claude, 'attach', jobId, '--settings', JSON.stringify({ disableAgentView: true })], { timeout: 30_000 });
+  if (started.code !== 0) busy(`herdr-core couldn't open its view to type the message in (hc run: ${cut(oneLine(started.err || started.out || `exit ${started.code}`), 160)})`);
+  try {
+    const screen = async () => { const r = await deps.run(deps.hc, ['read', name], { timeout: 15_000 }); return r.code === 0 ? promptDraft(r.out) : null; };
+    let draft = null;
+    for (const until = Date.now() + VIEW.upMs; draft === null && Date.now() < until;) {
+      draft = await screen();
+      if (draft === null) await deps.sleep(VIEW.pollMs);
+    }
+    if (draft === null) busy('its view didn\'t show its prompt, so the message wasn\'t typed in');
+    // Claude Code may show a suggestion for the next prompt, which reads like a draft. A key typed replaces a
+    // suggestion but adds to a draft, so a prompt that then holds just that key was empty; the key is taken back.
+    if (draft) {
+      await deps.run(deps.hc, ['keys', name, 'x'], { timeout: 15_000 });
+      const typed = await screen();
+      await deps.run(deps.hc, ['keys', name, 'backspace'], { timeout: 15_000 });
+      if (typed === 'x') draft = '';
+    }
+    if (draft) fail(`${ref}'s turn is over (a background task it started still runs), but a draft is typed in its prompt, and the message would be added to it. Nothing was sent: send or clear the draft in its view in the panel, then send again.`);
+    // Claude Code's word again, the moment before: still the same process, its turn still over.
+    const now = sessionState(deps.home, sid, { live: readLive(deps.home).get(sid) ?? null, job: readJobs(deps.home).get(sid) ?? null });
+    if (now.state === 'working') fail(`${ref} is working. Send it after it finishes; or type into it in its view in the panel.`);
+    if (now.state !== 'waiting_on_job') fail(`${ref} changed while the message was being typed in (${now.state}: ${now.doing}). Nothing was sent; send it again.`);
+    const since = Date.now() - 2000;
+    const sent = await deps.run(deps.hc, ['send', name, body], { timeout: 60_000 });
+    if (sent.code !== 0) fail(`Couldn't type the message into ${ref}'s view: ${cut(oneLine(sent.err || sent.out || `hc exited ${sent.code}`), 200)}`);
+    for (const until = Date.now() + VIEW.seenMs; ;) {
+      if (promptSeen(transcript(), body, since)) return { delivered_as: 'typed', job: jobId };
+      if (Date.now() >= until) break;
+      await deps.sleep(VIEW.pollMs);
+    }
+    fail(`The message was typed into ${ref}'s view, but its transcript doesn't show it after ${VIEW.seenMs / 1000}s. Check with \`channels read ${ref}\` before sending it again.`);
+  } finally {
+    await deps.run(deps.hc, ['kill', name], { timeout: 15_000 });
+  }
+}
+
 // The message itself, to a session `facts` found. One whose turn is over (done, or ended asking something) is woken
 // with it: its process is stopped, and once that process has exited the same session resumes in the background with
 // the message as its next turn (`claude --bg --resume` on a session whose process still runs starts a copy instead).
-// A session still working, or showing a dialog, isn't interrupted; one that isn't a background job can't be reached.
-// Answers { delivered_as: 'resumed', job } or { delivered_as: 'copy_started', job, copy_session_id }: a copy is
-// Claude Code's own doing, and the caller files it.
+// One whose turn is over while background work it started still runs (a subagent, a background command) isn't
+// stopped, as that would stop the work: the message is typed into its view instead (typeIntoView). A session still
+// working, or showing a dialog, isn't interrupted; one that isn't a background job can't be reached.
+// Answers { delivered_as: 'resumed', job }, { delivered_as: 'typed', job } or { delivered_as: 'copy_started', job,
+// copy_session_id }: a copy is Claude Code's own doing, and the caller files it.
 export async function send({ deps, facts: { s, job, live, st }, body, machine, stopWaitMs }) {
-  if (!job && !s.job) fail(`${machine}/${s.session_id} isn't a background session, so a message can't reach it: continue it where it runs.`);
-  if (live && (st.state === 'working' || st.state === 'waiting_on_job')) fail(`${machine}/${s.session_id} is working. Send it after it finishes; or type into it in its view in the panel.`);
-  if (st.state === 'waiting_on_user') fail(`${machine}/${s.session_id} is showing a prompt (${live?.waitingFor || 'a dialog'}): answer it in its view in the panel.`);
+  const ref = `${machine}/${s.session_id}`;
+  if (!job && !s.job) fail(`${ref} isn't a background session, so a message can't reach it: continue it where it runs.`);
+  if (live && st.state === 'working') fail(`${ref} is working. Send it after it finishes; or type into it in its view in the panel.`);
+  if (st.state === 'waiting_on_user') fail(`${ref} is showing a prompt (${live?.waitingFor || 'a dialog'}): answer it in its view in the panel.`);
   const jobId = job?.job ?? s.job;
+  // Its turn is over but background work it started still runs: stopping it would stop that work, and resuming a
+  // session whose process runs starts a copy. So the message is typed into its view, as the user would.
+  if (live && st.state === 'waiting_on_job') return typeIntoView({ deps, ref, jobId, sid: s.session_id, job, body });
   if (live) {
     const stop = await deps.run(deps.claude, ['stop', jobId], { cwd: deps.home, env: cleanEnv(), timeout: 60_000 });
     if (stop.code !== 0) fail(`Couldn't stop ${jobId} to wake it: ${cut(oneLine(stop.err || stop.out || 'no output'), 240)}`);
