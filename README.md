@@ -375,7 +375,9 @@ Ride-along uses a Claude Code `UserPromptSubmit` hook. `channels chat` passes it
 hook runs `channels pending <channel> --hook`, which prints the waiting events as additional
 context and marks them delivered. A task's newer event replaces its older one while it waits.
 A delivered question stays as a card until it is answered, dismissed or the task moves on, but
-isn't attached again.
+isn't attached again. A question nobody answers in two days goes too: a task that ended its turn
+asking stays that way in Claude Code's records, so it would never move on by itself. The task
+still waits in the tasks panel, and `channels send` still answers it.
 
 A registration asks for the chat to be woken by a task's next matching event:
 
@@ -411,19 +413,22 @@ Every question and permission prompt also shows as a card in the chat, in the ba
 prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
 the chat:
 
-<img src="docs/task-cards.png" width="480" alt="The #website chat: a notice, ← tasks: Task Pick a homepage headline, which Claude Code shows cut to two lines, and the chat's answer that the task waits on the user's pick among three headlines, with its own view; below it a card above the prompt: Pick a homepage headline asks which headline the homepage hero should use, with an Answer select, Send and Open">
+<img src="docs/task-cards.png" width="480" alt="The #website chat: a notice, ← tasks: Task Pick a homepage headline, which Claude Code shows cut to two lines, and the chat's answer listing the three headlines the task waits on; below it a card above the prompt: Pick a homepage headline ended its turn asking you, 4m, asking which headline the homepage hero should use, with an Answer select and Send, Open and Dismiss">
 
 | Card | Shows | Buttons |
 |---|---|---|
-| **A task asks something** (it ended its turn with a question) | The task's name and its question. If the question ends with a short list of choices (`1. Teal`, `- Coral`), they are in a Select, with *Something else…* for your own words; otherwise there is a text field. | **Send** gives the task your answer (`channels send <session> -`), and it carries on. **Open** shows the task in the tasks panel, as clicking it there does. |
-| **A task waits on a permission prompt** (or another dialog in its own session) | The task's name and what the prompt asks | **Open**, to answer it in the task's view |
+| **A task asks something** (it ended its turn with a question) | The task's name, *ended its turn asking you*, and its question. If the question ends with a short list of choices (`1. Teal`, `- Coral`), they are in a Select, with *Something else…* for your own words; otherwise there is a text field. | **Send** gives the task your answer (`channels send <session> -`), and it carries on. **Open** shows the task in the tasks panel, as clicking it there does. **Dismiss** takes the card away and leaves the task as it is. |
+| **A task waits on a permission prompt** (or another dialog in its own session) | The task's name and what the prompt asks | **Open**, to answer it in the task's view. **Dismiss** |
+
+Every card has **Dismiss** (`channels card dismiss <session>`). A button whose command fails says why
+on the card, in red; **Open** that works says so in a toast.
 
 To reach a card from the keyboard, press `ctrl+x tab` to focus the band, `tab` to move between its
 controls, and `enter` to press one; `esc` goes back to the prompt. Clicking works too. On a
 question with choices, `enter` on the Select opens it, the arrows pick, and `enter` again keeps the
 pick for **Send**:
 
-<img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…">
+<img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…, above Send, Open and Dismiss">
 
 Acting on a card marks its event handled in the store: it leaves the chat's inbox and the task's dot
 in the panel clears, so it doesn't also ride along with your next message. A prompt's card you don't
@@ -579,7 +584,7 @@ call works again.
 | | Local task | Cloud task |
 |---|---|---|
 | Open (click the row) | Its live session in the panel | On claude.ai in the browser. In the panel with `claude --cloud <id>` only once Claude Code can attach a terminal for the account, which `channels` asks Claude Code now and then |
-| Its question, on a card | Answer (Select or field), Send, Open | What it asks, and **Open**: answer it on claude.ai |
+| Its question, on a card | Answer (Select or field), Send, Open, Dismiss | What it asks, **Open**: answer it on claude.ai, and Dismiss |
 | Send | `channels send`, or type in its view | `channels send`, or **Send message…** in its `···` menu. Behind an open question the text waits until the question is answered on claude.ai, and both say so |
 | Rename | In Claude Code too | Here only: Claude Code has no supported way to rename a cloud session from outside, so claude.ai keeps its title (and a title changed on claude.ai shows here, until you rename it here) |
 | Resolve / dismiss | Hides the task | Hides the task. The session keeps running and stays on claude.ai: archive it there (`···` → Archive). There is no command for that |

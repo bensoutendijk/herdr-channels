@@ -5,10 +5,14 @@
 // the store's channels.json (only when it changed): the channel's inbox, which the listener beside the chat fills
 // with its tasks' events. Each event is a card:
 // - a question (the task ended its turn asking something): its question, an answer (a Select of the options it
-//   listed, or an Input), Send, which runs `channels send <task> -`, and Open;
-// - a prompt (a permission prompt or another dialog in the task's own session): Open only;
+//   listed, or an Input), Send, which runs `channels send <task> -`, and Open. One nobody answered in two days isn't
+//   drawn (the listener drops it as well): a task that ended asking stays "blocked" in Claude Code's records;
+// - a prompt (a permission prompt or another dialog in the task's own session): Open;
 // - an approval (a Codex task asks to run a command, or change files, outside its sandbox): what it would run and why,
 //   Allow and Deny, which run `channels approve <task> allow|deny`, and Open. The task's own view clears its prompt.
+// Every card has Dismiss, which runs `channels card dismiss <task>`: the card goes, the task is left as it is.
+// A command that fails says why on the card; Open that works says so in a toast (it acts in the Herdr window, where
+// the task may already be showing, so without one a press that worked looked like nothing happened).
 // A card of a task on another harness than Claude Code names it ("Codex asks").
 // A finish has no card: it reaches the chat as a one-line notice (`channels notices`), and the chat takes a turn on it.
 // A task with Remote Control on (its claude.ai/code link is in the inbox entry) also gets Open on claude.ai, which runs
@@ -23,7 +27,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Card, CardWork } from '../types'
-import { OTHER, ago, cardsOf, lastLine, questionOf } from './cards'
+import { OTHER, ago, cardsOf, lastLine, questionOf, stale } from './cards'
 
 const cards = atom({ plugin: 'channels-cards', key: 'cards' } as const, [] as Card[])
 const drafts = atom({ plugin: 'channels-cards', key: 'drafts' } as const, {} as Record<string, string>)
@@ -108,11 +112,19 @@ async function approve($: EngineInterface, card: Card, decision: 'allow' | 'deny
 }
 
 async function open($: EngineInterface, card: Card) {
-  await channels($, card.task, 'Opening…', ['open', card.task])
+  if ((await channels($, card.task, 'Opening…', ['open', card.task])) === null) return
+  $.ui.toast(`${card.name} is in the tasks panel.`)
 }
 
 async function openRemote($: EngineInterface, card: Card) {
-  await channels($, card.task, 'Opening claude.ai…', ['link', card.task, '--open'])
+  if ((await channels($, card.task, 'Opening claude.ai…', ['link', card.task, '--open'])) === null) return
+  $.ui.toast(`Opened ${card.name} on claude.ai.`)
+}
+
+// The card goes and the task is left as it is: `channels card dismiss` takes its inbox entry and its unread dot.
+async function dismiss($: EngineInterface, card: Card) {
+  if ((await channels($, card.task, 'Dismissing…', ['card', 'dismiss', card.task])) === null) return
+  await hide($, card.task)
 }
 
 async function setDraft($: EngineInterface, task: string, value: string) {
@@ -142,11 +154,13 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const hidden = await read($, gone)
-    const all = (await read($, cards)).filter(c => !hidden.includes(c.task))
+    const held = (await read($, cards)).filter(c => !hidden.includes(c.task))
+    if (!held.length) return next(e)
+    const now = await $.clock.now()
+    const all = held.filter(c => !stale(c, now))
     if (!all.length) return next(e)
     const answers = await read($, drafts)
     const doing = await read($, work)
-    const now = await $.clock.now()
     const { Box, Button, Input, Select, Text } = $.ui.resolve(e)
     const width = Math.max(20, e.props.bodyColumns)
 
@@ -156,6 +170,8 @@ export const register: Register = on => {
       if (w?.error) return <Text color="error">{w.error}</Text>
       return null
     }
+
+    const dismissButton = (card: Card) => <Button key={`dismiss:${card.task}`} label="Dismiss" onPress={() => dismiss($, card)} />
 
     const remote = (card: Card) =>
       card.remote ? <Button key={`remote:${card.task}`} label="Open on claude.ai" onPress={() => openRemote($, card)} /> : null
@@ -174,6 +190,7 @@ export const register: Register = on => {
         <Box flexDirection="row" gap={1}>
           <Text dimColor>Answer it on claude.ai.</Text>
           <Button key={`open:${card.task}`} label="Open" variant="primary" onPress={() => openRemote($, card)} />
+          {dismissButton(card)}
         </Box>
         {status(card)}
       </Box>
@@ -190,7 +207,7 @@ export const register: Register = on => {
               ?{' '}
             </Text>
             <Text bold>{card.name}</Text>
-            <Text dimColor> {card.harness ? `${card.harness} asks` : 'asks'} · {ago(card.at, now)}</Text>
+            <Text dimColor> {card.harness ? `(${card.harness}) ` : ''}ended its turn asking you · {ago(card.at, now)}</Text>
           </Text>
           <Text maxLines={4}>{questionOf(card)}</Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
@@ -217,6 +234,7 @@ export const register: Register = on => {
             <Button key={`send:${card.task}`} label="Send" variant="primary" onPress={() => send($, card, draft)} />
             <Button key={`open:${card.task}`} label="Open" onPress={() => open($, card)} />
             {remote(card)}
+            {dismissButton(card)}
           </Box>
           {status(card)}
         </Box>
@@ -238,6 +256,7 @@ export const register: Register = on => {
           </Text>
           <Button key={`open:${card.task}`} label="Open" variant="primary" onPress={() => open($, card)} />
           {remote(card)}
+          {dismissButton(card)}
         </Box>
         {status(card)}
       </Box>
@@ -259,6 +278,7 @@ export const register: Register = on => {
           <Button key={`allow:${card.task}`} label="Allow" variant="primary" onPress={() => approve($, card, 'allow')} />
           <Button key={`deny:${card.task}`} label="Deny" onPress={() => approve($, card, 'deny')} />
           <Button key={`open:${card.task}`} label="Open" onPress={() => open($, card)} />
+          {dismissButton(card)}
         </Box>
         {status(card)}
       </Box>
