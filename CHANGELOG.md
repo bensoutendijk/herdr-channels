@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.8.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.8.0...v1.8.1) (2026-11-23)
+
+### Bug Fixes
+
+* A question card can always be dismissed, and goes by itself after two days ([#49](https://github.com/bensoutendijk/herdr-channels/issues/49)) ([ce27011](https://github.com/bensoutendijk/herdr-channels/commit/ce27011f5c3efe095fc98f610781a9a4b4ddffdc))
+
 ## [1.8.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.7.1...v1.8.0) (2026-11-23)
 
 ### Features
