@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.11.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.10.0...v1.11.0) (2026-11-23)
+
+### Features
+
+* A task's finish wakes the chat only when the chat needs it ([#55](https://github.com/bensoutendijk/herdr-channels/issues/55)) ([d0d2680](https://github.com/bensoutendijk/herdr-channels/commit/d0d26803a3a19e16dba745ccebbfb8f0293084f3))
+
 ## [1.10.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.9.2...v1.10.0) (2026-11-23)
 
 ### Features
