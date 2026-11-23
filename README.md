@@ -269,6 +269,8 @@ next to **Channels** at the top of the sidebar and pick **Refresh all chats** (o
 refresh --all`). The same rules hold: idle chats restart now, a chat mid-turn when its turn ends, a
 chat with a draft once its prompt is empty. The sidebar shows Refreshing… and then what it did.
 
+<img src="docs/refresh-all-menu.png" width="400" alt="The ··· next to Channels at the top of the sidebar, open on its one item: a circular arrow and Refresh all chats">
+
 Herdr's command palette (⌘⇧P) lists only Herdr's own commands; a mod can't add to it. For a key
 instead, bind the mod's `refresh-all` command in `~/.config/herdr-app/keys.json` (the mod's name is
 `channels` unless you installed it with `--name`):
