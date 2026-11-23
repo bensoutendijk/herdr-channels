@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.9.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.8.1...v1.9.0) (2026-11-23)
+
+### Features
+
+* Refresh all chats: restart every chat from the sidebar's menu, a key, or channels refresh --all ([#50](https://github.com/bensoutendijk/herdr-channels/issues/50)) ([3a9b8b5](https://github.com/bensoutendijk/herdr-channels/commit/3a9b8b5cbd29ee80d2ca62f28d0e559bdff788fd))
+
 ## [1.8.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.8.0...v1.8.1) (2026-11-23)
 
 ### Bug Fixes
