@@ -174,7 +174,8 @@ With a store on another machine:
   and refused. A command that lists no features gets the basics only (channels, chats, tasks,
   resolve, rename, icon, instructions, archive). The features are `chat-bg` (the chat in a background
   terminal), `seen` (unread dots), `refresh` (the Refresh row, from `updates` in `list --json`),
-  `routines` and `rename-task`.
+  `routines`, `rename-task` and `refresh-all` (Refresh all chats: `<command> refresh --all --json`,
+  which prints `{ "summary": "..." }`).
 - With the `routines` feature, the server keeps the routines and its own timer fires them, so they run
   while this Mac sleeps. The Routines dialog says schedules are the server's local time. The server's
   command takes the same `routine …` commands and gives the same `routines` and `queued` in
@@ -261,6 +262,23 @@ typed in its prompt waits until the draft is sent or cleared.
 Refresh applies what is installed; it doesn't pull this repository or run `claude update`. Tasks are
 never restarted: `channels send` restarts a task's process for each message, so a task runs the
 newest Claude Code from its next message on.
+
+Some things a chat reads only when it starts, with nothing newer installed: an organization turning
+on Claude Code channels, say, or other account settings. To restart every chat anyway, open the `···`
+next to **Channels** at the top of the sidebar and pick **Refresh all chats** (or run `channels
+refresh --all`). The same rules hold: idle chats restart now, a chat mid-turn when its turn ends, a
+chat with a draft once its prompt is empty. The sidebar shows Refreshing… and then what it did.
+
+Herdr's command palette (⌘⇧P) lists only Herdr's own commands; a mod can't add to it. For a key
+instead, bind the mod's `refresh-all` command in `~/.config/herdr-app/keys.json` (the mod's name is
+`channels` unless you installed it with `--name`):
+
+```json
+{ "global": { "cmd-shift-r": "channels.refresh-all" } }
+```
+
+With a store on another machine, the menu item and the key work only when that machine's command
+lists the `refresh-all` feature.
 
 ## Usage
 
@@ -799,7 +817,7 @@ channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <windo
 channels routine rm <channel> <name>
 channels routine run|on|off <channel> <name> [--by <who>]
 channels routine preview <schedule> [--json]
-channels refresh [--auto] [--json]
+channels refresh [--auto] [--all] [--json]
 channels update [--check] [--bg] [--json]
 channels tick
 ```
@@ -812,8 +830,9 @@ with it.
 `channels refresh` restarts the idle chats that run an older herdr-channels build or an older Claude
 Code than is installed, on the same session, and says what it did; a chat in the middle of a turn is
 restarted when the turn ends. With `--auto`, as the installer runs it, only chats behind
-the herdr-channels build are restarted. `channels list --json` reports what each running chat is
-behind on, under `updates`.
+the herdr-channels build are restarted. With `--all`, every running chat restarts the same way,
+whether or not it is behind: a chat that started before the request is behind on `restart` until it
+has. `channels list --json` reports what each running chat is behind on, under `updates`.
 
 `channels update` installs the latest herdr-channels release (see [Updating](#updating)); `--check`
 only asks GitHub for it, and `--bg` runs the update in a process of its own, as the sidebar's Update
