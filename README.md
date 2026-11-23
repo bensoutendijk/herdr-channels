@@ -433,7 +433,7 @@ Every question and permission prompt also shows as a card in the chat, in the ba
 prompt. A finish has no card: it is a [notice](#task-events). Acting on a card never starts a turn of
 the chat:
 
-<img src="docs/task-cards.png" width="480" alt="The #website chat: a notice, ← tasks: Task Pick a homepage headline, which Claude Code shows cut to two lines, and the chat's answer listing the three headlines the task waits on; below it a card above the prompt: Pick a homepage headline ended its turn asking you, 4m, asking which headline the homepage hero should use, with an Answer select and Send, Open and Dismiss">
+<img src="docs/task-cards.png" width="480" alt="A card above the #website chat's prompt: Pick a homepage headline ended its turn asking you, now, asking which headline the homepage hero should use, with an Answer select showing Projects, minus the chaos, and Send, Open and Dismiss; under them a dim line: Keys: ctrl+x tab, then s send · o open · d dismiss · or type /cards">
 
 | Card | Shows | Buttons |
 |---|---|---|
@@ -478,6 +478,8 @@ one's question and choices, then act on one by its number (the top card when it 
 
 A lone number after `send` is the answer, so `/cards send 2` sends the top card its second choice.
 `/cards` starts no turn of the chat.
+
+<img src="docs/cards-command.png" width="480" alt="/cards typed in the chat and its answer: 1. Pick a homepage headline asks: The hero section is laid out. Which headline should the homepage hero use? Its choices, 1. Projects, minus the chaos 2. From to-do to done, faster 3. Built for small teams, and the commands that act on it: /cards send|open|dismiss 1">
 
 If `ctrl+x tab` does nothing (the band never shows a focused control), something before Claude Code
 takes the keys: a `ctrl+x tab` or `abovePrompt:focus` entry in `~/.claude/keybindings.json`, or a
