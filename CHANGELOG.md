@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.8.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.7.1...v1.8.0) (2026-11-23)
+
+### Features
+
+* Codex tasks: start a task on Codex, answer its approvals from a card, and follow it like any other ([#48](https://github.com/bensoutendijk/herdr-channels/issues/48)) ([39e7f6f](https://github.com/bensoutendijk/herdr-channels/commit/39e7f6fc96ae144410adcef561358932ff566878))
+
 ## [1.7.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.7.0...v1.7.1) (2026-11-22)
 
 ### Bug Fixes
