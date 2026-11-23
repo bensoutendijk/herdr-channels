@@ -536,7 +536,7 @@ async function typeIntoView({ deps, ref, jobId, sid, job, body }) {
   const transcript = () => (job?.transcript && existsSync(job.transcript) ? job.transcript : findTranscript(deps.home, sid));
   const name = `send-${jobId}-${randomUUID().slice(0, 4)}`.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
   const started = await deps.run(deps.hc, ['run', '--bg', '--json', '--no-parent', '--no-notify', '--rm', '--name', name, '--label', `channels.send=${jobId}`,
-    '--cwd', deps.home, '--', deps.claude, 'attach', jobId, '--settings', JSON.stringify({ disableAgentView: true })], { timeout: 30_000 });
+    '--cwd', deps.home, '--', onPath(deps.claude) ?? deps.claude, 'attach', jobId, '--settings', JSON.stringify({ disableAgentView: true })], { timeout: 30_000 });
   if (started.code !== 0) busy(`herdr-core couldn't open its view to type the message in (hc run: ${cut(oneLine(started.err || started.out || `exit ${started.code}`), 160)})`);
   try {
     const screen = async () => { const r = await deps.run(deps.hc, ['read', name], { timeout: 15_000 }); return r.code === 0 ? promptDraft(r.out) : null; };
