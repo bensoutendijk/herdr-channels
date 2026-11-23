@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.9.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.9.0...v1.9.1) (2026-11-23)
+
+### Bug Fixes
+
+* A message reaches a task whose turn is over while a background subagent it started still runs ([#52](https://github.com/bensoutendijk/herdr-channels/issues/52)) ([3a894aa](https://github.com/bensoutendijk/herdr-channels/commit/3a894aaaf3d24db368cc59c9c46d5eef410fbf80)), closes [#51](https://github.com/bensoutendijk/herdr-channels/issues/51)
+
 ## [1.9.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.8.1...v1.9.0) (2026-11-23)
 
 ### Features
