@@ -84,7 +84,7 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 //   `harness`, `standing` and `caps` on a task not on Claude Code, `harness` on each channel, `start --harness`,
 //   `harness <channel> --tasks`, `approve <task> allow|deny`
 // - send-by: `send <task> --by user`, a message the user sent from the panel: the chat doesn't hear how that turn ends
-// - gate: the notice gate: `viewing <task>|--none`, `notify <channel>`, `tell <task>`, and each task's `held` in list
+// - gate: the notice gate: `viewing <task>|--none` and `notify <channel>`
 export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "harnesses", "refresh-all", "send-by", "gate"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];

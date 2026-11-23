@@ -762,10 +762,7 @@ const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog])
 // like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
 // The menu's items above its line (Rename, Send, Open on claude.ai) and below it (Resolve), as render_taskmenu draws them.
-const menuTop = (task) => (canRename(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0) + (canTell(task) ? 1 : 0);
-// A task whose event the gate held for the brief: Tell chat sends it to the chat now (`channels tell`).
-const canTell = (task) => Boolean(task?.held) && !task.dismissed && has("gate");
-const tellChat = (task) => submit((all) => eachTask(all, task.id, (x) => { x.held = null; }), 'channels tell "$1"', [task.id], `tell the chat about ${task.name || "the task"}`);
+const menuTop = (task) => (canRename(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
 const menuItems = (task) => menuTop(task) + (task.dismissed ? 0 : 1);
 const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: 10 + 34 * menuItems(task) + (menuTop(task) && !task.dismissed ? 9 : 0), props: { taskmenu: task.id } });
 const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
@@ -1471,9 +1468,6 @@ export default class Channels extends View {
         .when(mixed && isOther(task), (el) => el.child(div().flex_none().tooltip(`${harnessLabel(task.harness)} task`).child(svg(ICON("square-terminal")).size(13).text_color(t.dim))))
         // A task with an event not seen yet (it finished, or asked something, since it was last opened) has a dot.
         .when(unread, (el) => el.child(div().id(`tk-new-${task.id}`).w(8).h(8).flex_none().rounded(4).bg(t.accent)))
-        // Held for the channel's brief (the gate kept it from the chat): its menu's Tell chat sends it now.
-        .when(kind !== "resolved" && Boolean(task.held), (el) => el.child(div().id(`tk-held-${task.id}`).flex_none().px(6).h(18).flex().items_center().rounded(5)
-          .bg(t.raised).text_size(11).text_color(t.muted).tooltip(`Held for the brief: ${task.held?.why ?? ""}`).child("held")))
         .child(div().flex_none().text_size(12).text_color(t.dim).child(right))
         // The menu and resolve buttons keep their place whether or not they show, so hovering moves nothing.
         .child(div().w(24).flex_none().opacity(canMenu && this.hover === key ? 1 : 0).transition("opacity", 120)
@@ -1626,7 +1620,6 @@ export default class Channels extends View {
       .when(canRename(task), (el) => el.child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); })))
       .when(isCloud(task) && !task?.dismissed, (el) => el.child(item("send", "send", "Send message…", () => sendTask(task))))
       .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
-      .when(canTell(task), (el) => el.child(item("tell", "send", "Tell chat", () => tellChat(task))))
       .when(Boolean(task) && !task.dismissed, (el) => el
         .when(menuTop(task) > 0, (e2) => e2.child(div().mx(8).my(4).h(1).bg(t.border)))
         .child(item("resolve", "check", "Resolve", () => { resolveTask(task.id); if (isShown(task)) showTasks(); })));
@@ -1670,7 +1663,7 @@ export default class Channels extends View {
       cx.timer.every(30, (cx) => { if (this.settleR) { this.settleR = false; cx.notify(); } });
       this.handle.focus();
     } else if (this.kind === "notify") {
-      this.text = TextareaState.new({ placeholder: "only when blocked or failed\nbrief at 9:00 and 17:00\ndon't bother me with rephrasings or small edits", value: "" });
+      this.text = TextareaState.new({ placeholder: "only when blocked or failed\nquiet 19:00-8:00\ndon't bother me with rephrasings or small edits", value: "" });
       cx.spawn(async (cx) => {
         try {
           this.original = JSON.parse(await store('channels notify "$1" --json', [p.channel])).notify ?? "";
@@ -1822,7 +1815,7 @@ export default class Channels extends View {
           .child("When the chat hears about this channel's tasks, in your words, one rule per line. A question or a failure in a task the chat started always reaches it; a turn you started yourself never does."))
         .child(field(Textarea.new(this.text).flex_1().min_h(0).py(10)))
         .child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
-          .child("Understood as is: all · only when blocked or failed · brief at 9:00 and 17:00 · quiet 18:00-8:00. Anything else is for the judge. Command-Return saves.")))
+          .child("Understood as is: all · only when blocked or failed · quiet 18:00-8:00. Anything else, the judge weighs. Command-Return saves.")))
       .when(kind === "icon", (el) => {
         const found = this.found();
         const chip = (g, i) => div().id(`ic-g-${i}`).px(10).h(28).flex().items_center().rounded(8).text_size(12.5).cursor_pointer()

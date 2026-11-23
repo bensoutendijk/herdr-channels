@@ -354,9 +354,8 @@ tasks (`~/.claude/jobs` and `~/.claude/sessions`). A task finishing, or stopping
 or show a permission prompt, is an *event*.
 
 **Which events reach the chat: the notice gate.** Each notice costs the chat a turn, so a gate decides
-first, the way a notification inbox does: it interrupts for what needs the chat now, holds the rest for
-a brief, and keeps out what you already saw. It goes in this order, and the first rule that matches
-wins:
+first, on its own: it tells the chat what needs it, and keeps out the rest, including what you already
+saw. Nothing is saved up for later. It goes in this order, and the first rule that matches wins:
 
 | # | If | Then |
 |---|---|---|
@@ -364,10 +363,10 @@ wins:
 | 2 | It's a permission prompt or a Codex approval | It gets its [card](#task-cards). It rides along with your next message only if the chat started that turn. |
 | 3 | You started the turn yourself, by typing in the task's view | The panel only: you were there. |
 | 4 | You had the task open in the panel when it ended | The panel only: you saw it. |
-| 5 | You sent the turn from the panel (**Send message…**) | It's held for the brief. |
+| 5 | You sent the turn from the panel (**Send message…**) | The panel only. |
 | 6 | The chat's turn failed | It wakes the chat. |
 | 7 | The chat's turn ended asking something | It wakes the chat ("needs you"), beside its card. |
-| 8 | Your rules say otherwise (below) | It's held, or it wakes the chat. |
+| 8 | Your rules say otherwise (below) | The panel only, or it wakes the chat. |
 | 9 | The chat's turn finished | A judge decides. |
 
 Who started a turn: the chat asked for the task's first turn (`channels start`), and for each turn it
@@ -380,43 +379,35 @@ chat sends it something. The panel says which task is open with `channels viewin
 it stays open).
 
 **The judge.** An ordinary finish of a turn the chat asked for goes to a small `claude -p` call on
-your own Claude sign-in (Sonnet by default; it takes about 2 seconds and costs about half a cent). It
+your own Claude sign-in (Sonnet by default; it takes a few seconds and costs about half a cent). It
 gets the chat's ask, the task's report, the chat's last few messages and your rules for the channel,
 and it answers *wake* (the goal is reached, a next step the chat planned can start, or a problem turned
-up), *hold* (polish, rephrasing, small follow-ups, "done, nothing notable") or *drop* (only when it
-can cite one of your rules). It runs with no tools, no MCP servers, no settings and no saved session,
-in an empty folder. Every text it reads goes in a marked data block, and its answer is checked
-against a schema, so a task's report can't steer it into anything but those three answers. When it
-can't answer, the finish is held. After three failures in a row it rests for an hour, and so it does
-past 30 calls an hour in one channel. `CHANNELS_JUDGE=off` turns it off (finishes are held);
-`CHANNELS_JUDGE_MODEL` picks another model.
+up) or *skip* (polish, rephrasing, small follow-ups, "done, nothing notable", or what your rules say
+to leave out). A skipped finish shows in the panel as ready for review, like any other; the chat never
+hears of it, and `channels read <session>` has it if you ask the chat. The judge runs with no tools, no
+MCP servers, no settings and no saved session, in an empty folder. Every text it reads goes in a marked
+data block, and its answer is checked against a schema, so a task's report can't steer it into anything
+but those two answers. When it can't answer, the finish is skipped. After three failures in a row it
+rests for an hour, and so it does past 30 calls an hour in one channel. `CHANNELS_JUDGE=off` turns it
+off (those finishes are skipped); `CHANNELS_JUDGE_MODEL` picks another model.
 
-**Held events** never ride along with your next message. They wait in the store for the channel's
-brief, for up to two days. A held task shows *held* in the tasks panel, and its menu's **Tell
-chat** (or `channels tell <session>`) sends it to the chat now. `channels held <channel>` lists them,
-each with why. The chat looks there when you ask what happened.
+**Your rules** are optional. The channel menu's **Notifications** (or `channels notify <channel> --set -`)
+holds plain-words rules, one per line, and you can also just tell the chat ("stop telling me about small
+edits"): it updates them.
 
-<img src="docs/task-held.png" width="420" alt="The tasks panel of #website with one task under Ready for review, Add a page title, marked held, 2m">
-
-**Your rules.** The channel menu's **Notifications** (or `channels notify <channel> --set -`) holds
-plain-words rules, one per line. You can also just tell the chat ("stop telling me about small edits"),
-and it updates them.
-
-<img src="docs/notify-dialog.png" width="480" alt="The Notifications dialog for #website: a line saying when the chat hears about the channel's tasks, then the rules brief at 9:00 and 17:00; quiet 19:00-8:00; don't bother me with rephrasings or small copy edits; wake me when a PR is opened; and a hint listing the rules understood as is, above Cancel and Save">
+<img src="docs/notify-dialog.png" width="480" alt="The Notifications dialog for #website: a line saying when the chat hears about the channel's tasks, then the rules quiet 19:00-8:00; don't bother me with rephrasings or small copy edits; wake me when a PR is opened; and a hint listing the rules understood as is, above Cancel and Save">
 
 | Rule | Read by | What it does |
 |---|---|---|
 | `all` | the gate | Every finish of a turn the chat asked for wakes it, with no judge. |
-| `only when blocked or failed` | the gate | Finishes are held; questions and failures still wake the chat. |
-| `brief at 9:00 and 17:00` | the gate | At those times, the held events reach the chat as one "Brief for #channel" notice, with how many your rules dropped. A brief with nothing in it is skipped. |
+| `only when blocked or failed` | the gate | Only failures and questions wake the chat. |
 | `quiet 18:00-8:00` | the gate | In those hours, only failures and questions wake the chat. |
-| `don't bother me with rephrasings or small edits` | the judge | Such finishes may be dropped (counted in the next brief). |
+| `don't bother me with rephrasings or small edits` | the judge | Such finishes are skipped. |
 | `wake me when a PR is opened` | the judge | A finish that opens a PR wakes the chat. |
 
-With no rules, the gate and the judge decide, and held events wait for Tell chat. **Why a task's event
-did or didn't reach the chat:** `channels why <session>` shows the gate's last decisions on it. Every
-decision is also a line in `gate.jsonl` beside the store. `docs/notice-gate-design.md` has the design
-and the research behind it.
+**Why a task's event did or didn't reach the chat:** `channels why <session>` shows the gate's last
+decisions on it. Every decision is also a line in `gate.jsonl` beside the store.
+`docs/notice-gate-design.md` has the design and the research behind it.
 
 **A task's finish that the gate lets through** reaches the chat as a one-line notice, the way a subagent's result reaches
 the session that started it:
@@ -921,8 +912,6 @@ channels watch <session> --wake-on finish|question|any|none [--why <text>]
 channels seen <session>
 channels viewing <session> | --none
 channels notify <channel> [--set <text> | --set -] [--json]
-channels held <channel> [--json]
-channels tell <session>
 channels why <session>
 channels link <session> [--open] [--json]
 channels rename-task <session> <new-name>
@@ -1011,7 +1000,7 @@ command says so.
 | `CODEX_HOME` | `~/.codex` | Codex's own folder: its daemon's socket and session files |
 | `CHANNELS_CODEX_SOCKET` | the daemon's | Another Codex app-server socket to use (tests, the dev sandbox) |
 | `CHANNELS_CODEX_MODE` | | `terminal` runs Codex tasks in terminals instead of the service |
-| `CHANNELS_JUDGE` | on | `off` stops the [notice gate](#task-events)'s judge: finishes it would judge are held |
+| `CHANNELS_JUDGE` | on | `off` stops the [notice gate](#task-events)'s judge: finishes it would judge are skipped |
 | `CHANNELS_JUDGE_MODEL` | `sonnet` | The model the judge runs on |
 | `CHANNELS_UPDATE_CHECK` | on | `off` stops the routines timer from looking up new releases on GitHub |
 
