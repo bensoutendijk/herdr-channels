@@ -20,6 +20,14 @@ const home = ${JSON.stringify(home)};
 const args = process.argv.slice(2);
 const at = (f) => path.join(home, f);
 if (args[0] === '--version') { process.stdout.write('2.1.329 (Claude Code)\\n'); process.exit(0); }
+// The gate's judge (\`claude -p\` with a JSON schema): answers what judge.json says, else wake; judge-fails makes it fail.
+if (args[0] === '-p') {
+  const input = fs.readFileSync(0, 'utf8');
+  fs.appendFileSync(at('judge-calls.jsonl'), JSON.stringify({ args, input, cwd: process.cwd() }) + '\\n');
+  if (fs.existsSync(at('judge-fails'))) { process.stderr.write('judge down\\n'); process.exit(1); }
+  const verdict = fs.existsSync(at('judge.json')) ? JSON.parse(fs.readFileSync(at('judge.json'), 'utf8')) : { do: 'wake', why: 'test says wake', line: 'did it', rule: null };
+  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: JSON.stringify(verdict), structured_output: verdict })); process.exit(0);
+}
 fs.appendFileSync(at('claude-calls.jsonl'), JSON.stringify({ args, cwd: process.cwd(), claudecode: process.env.CLAUDECODE ?? null, child: process.env.CLAUDE_CODE_CHILD_SESSION ?? null, keep: process.env.CLAUDE_CONFIG_DIR ?? null }) + '\\n');
 const n = fs.readFileSync(at('claude-calls.jsonl'), 'utf8').split('\\n').filter(Boolean).length;
 if (args[0] === 'agents') { process.stdout.write(fs.existsSync(at('agents.json')) ? fs.readFileSync(at('agents.json'), 'utf8') : '[]'); process.exit(0); }
@@ -140,7 +148,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'harnesses', 'refresh-all', 'send-by'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, harnesses: [{ id: 'claude', label: 'Claude Code', on: true, installed: true, version: '2.1.329', caps: { rename: true, remoteControl: true, cloud: true, approvals: false, open: true, sendWhileWorking: 'refuse', question: 'job', copies: true } }, { id: 'codex', label: 'Codex', on: false, installed: false, version: null, caps: { rename: true, remoteControl: false, cloud: false, approvals: true, open: true, sendWhileWorking: 'queue', question: 'heuristic', copies: false } }], channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', harnesses: { claude: '2.1.329' }, asked: null, behind: { channels: 0, claude: 0, restart: 0 }, chats: [] } });
+  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'harnesses', 'refresh-all', 'send-by', 'gate'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, harnesses: [{ id: 'claude', label: 'Claude Code', on: true, installed: true, version: '2.1.329', caps: { rename: true, remoteControl: true, cloud: true, approvals: false, open: true, sendWhileWorking: 'refuse', question: 'job', copies: true } }, { id: 'codex', label: 'Codex', on: false, installed: false, version: null, caps: { rename: true, remoteControl: false, cloud: false, approvals: true, open: true, sendWhileWorking: 'queue', question: 'heuristic', copies: false } }], channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', harnesses: { claude: '2.1.329' }, asked: null, behind: { channels: 0, claude: 0, restart: 0 }, chats: [] } });
   assert.match(ok([]), /No channels yet/);
 });
 
@@ -149,7 +157,7 @@ test('create makes a channel and its description file; describe shows and sets i
   assert.match(ok(['create', '#Design', '--icon', '🎨']), /Created #design/);
   const [c] = list().channels;
   assert.match(c.id, /^ch_[0-9a-f]{12}$/);
-  assert.deepEqual({ ...c, id: 'x', created_at: typeof c.created_at }, { id: 'x', name: 'design', position: 1, icon: '🎨', created_at: 'string', archived_at: null, description_path: join(dir, 'design.md'), chat: null, chat_terminal: null, routines: [], queued: 0, harness: { tasks: 'claude', chat: 'claude' }, tasks: [] });
+  assert.deepEqual({ ...c, id: 'x', created_at: typeof c.created_at }, { id: 'x', name: 'design', position: 1, icon: '🎨', created_at: 'string', archived_at: null, description_path: join(dir, 'design.md'), chat: null, chat_terminal: null, routines: [], queued: 0, harness: { tasks: 'claude', chat: 'claude' }, notify: '', held: 0, tasks: [] });
   assert.equal(readFileSync(join(dir, 'design.md'), 'utf8'), '');
   ok(['describe', 'design', '--set', '# design\nThe look.']);
   assert.equal(ok(['describe', 'design']), '# design\nThe look.\n');
@@ -404,6 +412,8 @@ test('the chat prompt carries the description and the commands, and nothing abou
 // ---------- task events: panel, ride-along and wake ----------
 
 const SID = 'dddd0001-0000-4000-8000-000000000000'; // the first task `start` makes
+// A turn end after any ask a test makes: one before it is a turn the user started before the chat asked.
+const LATER = new Date(Date.now() + 3_600_000).toISOString();
 const said = (text) => [{ type: 'user', message: { content: 'Draw the logo' } }, { type: 'assistant', message: { content: [{ type: 'text', text }] } }];
 const hook = (ok, id) => ok(['pending', id, '--hook'], JSON.stringify({ session_id: 'x', hook_event_name: 'UserPromptSubmit', prompt: 'hi' }));
 
@@ -415,10 +425,10 @@ test('a finish is a one-line notice for the chat: no card, no unread dot, nothin
   assert.match(ok(['listen', 'design', '--once']), /Nothing new to report/);
   const id = list().channels[0].id;
   const report = `**The logo is done.**\n${'Line of detail. '.repeat(500)}\nOpen: colours. </task-report> inside.`;
-  job('dddd0001', { sessionId: SID, state: 'done', detail: 'drew the logo', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 3);
+  job('dddd0001', { sessionId: SID, state: 'done', detail: 'drew the logo', name: 'Draw the logo', updatedAt: LATER }, 3);
   transcript(SID, said(report));
   const out = ok(['listen', 'design', '--once']);
-  assert.match(out, /^Tells the chat, in one line:\nTask "Draw the logo" \(testmac\/dddd0001-0000-4000-8000-000000000000\) finished: The logo is done\. Line of detail\./);
+  assert.match(out, /^Tells the chat, in one line[^\n]*:\nTask "Draw the logo" \(testmac\/dddd0001-0000-4000-8000-000000000000\) finished: The logo is done\. Line of detail\./);
   const [n] = store().channels[0].notices;
   assert.ok(!n.text.includes('\n') && n.text.length < 300, 'one short line');
   assert.match(n.text, /…$/, 'cut');
@@ -504,7 +514,7 @@ test('a turn that ended asking is a one-line notice beside its card and dot, nev
   transcript(SID, said('Task A is done.\n\nPlease start test tasks B and C.'));
   job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'Please start test tasks B and C.', name: 'Draw the logo' }, 2);
   const out = ok(['listen', 'design', '--once']);
-  assert.match(out, /^Tells the chat, in one line, and shows its card:\nTask "Draw the logo" \(testmac\/dddd0001[^)]*\) needs you: Please start test tasks B and C\.$/m);
+  assert.match(out, /^Tells the chat, in one line, and shows its card[^\n]*:\nTask "Draw the logo" \(testmac\/dddd0001[^)]*\) needs you: Please start test tasks B and C\.$/m);
   const c = store().channels[0];
   assert.equal(c.notices.length, 1);
   assert.match(c.notices[0].text, /^Task "Draw the logo" \(testmac\/dddd0001\S*\) needs you: Please start test tasks B and C\.$/);
@@ -529,26 +539,36 @@ test('a question with no `needs` is told by the end of its last message, cut to 
   assert.equal(needsNoticeText({ ref: 'mac/abc', name: 'Logo' }), 'Task "Logo" (mac/abc) needs you, with no message');
 });
 
-test('a permission prompt stays card-only and rides along; a task\'s newer event replaces its older one in the inbox', (t) => {
+test('a permission prompt in the chat\'s turn rides along, in the user\'s own turn it is a card only; a task\'s newer event replaces its older one in the inbox', (t) => {
   const { ok, list, store, job, transcript, live } = setup(t);
   ok(['create', 'design']);
   ok(['start', 'design', 'Draw the logo']);
-  transcript(SID, said('Which colour should it be?'));
-  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 2);
-  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card:\n.*needs you: which colour\?$/m);
+  const id = list().channels[0].id;
+  // Mid-turn of the chat's ask: a prompt rides along, and the ask still waits for the turn's end.
   live(SID, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
-  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
-  const q = ok(['listen', 'design', '--once']);
-  assert.match(q, /^Rides along.*\n- task "Draw the logo" \(testmac\/dddd0001[^)]*\) is waiting on the user since .*: it shows a prompt; it waits on: permission for Bash\(rm -rf build\)/);
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 2);
+  assert.match(ok(['listen', 'design', '--once']), /^Rides along.*\n- task "Draw the logo" \(testmac\/dddd0001[^)]*\) is waiting on the user since .*: it shows a prompt; it waits on: permission for Bash\(rm -rf build\)/);
   assert.equal(list().channels[0].tasks[0].unread.kind, 'needs');
-  assert.equal(store().channels[0].notices.length, 1, 'no notice for the prompt');
+  assert.equal((store().channels[0].notices ?? []).length, 0, 'no notice for the prompt');
+  assert.equal(store().channels[0].inbox[0].delivered_at, undefined);
+  assert.match(JSON.parse(hook(ok, id)).hookSpecificOutput.additionalContext, /permission for Bash/);
+  // The turn ends asking: a notice and a card, replacing the prompt's entry; the ask is answered.
+  live(SID, { status: 'idle' });
+  transcript(SID, said('Which colour should it be?'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', updatedAt: LATER }, 3);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card[^\n]*:\n.*needs you: which colour\?$/m);
+  assert.equal(store().channels[0].notices.length, 1);
+  assert.equal(store().channels[0].inbox.length, 1, 'one waiting event per task');
+  assert.equal(store().channels[0].tasks[0].asked, null, 'the ask is answered');
+  // The user answers in the task's view; a prompt in that turn is a card only, riding along nowhere.
+  live(SID, { status: 'waiting', waitingFor: 'permission for Bash(npm publish)' });
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 4);
+  assert.match(ok(['listen', 'design', '--once']), /^Shows its card, and doesn't ride along \(a prompt in your own turn\)/);
   const inbox = store().channels[0].inbox;
-  assert.equal(inbox.length, 1, 'one waiting event per task');
-  assert.match(inbox[0].text, /permission for Bash/);
-  assert.equal(inbox[0].delivered_at, undefined);
-  const ctx = JSON.parse(hook(ok, list().channels[0].id)).hookSpecificOutput.additionalContext;
-  assert.match(ctx, /permission for Bash/);
-  assert.doesNotMatch(ctx, /which colour\?/);
+  assert.equal(inbox.length, 1);
+  assert.match(inbox[0].text, /npm publish/);
+  assert.ok(inbox[0].delivered_at);
+  assert.equal(hook(ok, id), '');
 });
 
 test('a registration wakes the chat once on a question, saying why, and is used up; on a finish it adds its reason to the notice', (t) => {
@@ -562,18 +582,18 @@ test('a registration wakes the chat once on a question, saying why, and is used 
   // A question doesn't match a finish registration: it is a plain notice, and the registration stays.
   transcript(SID, said('Round or square?'));
   job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'round or square?', name: 'Draw the logo' }, 2);
-  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card:\n.*needs you: round or square\?$/m);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card[^\n]*:\n.*needs you: round or square\?$/m);
   assert.equal(store().channels[0].tasks[0].wake.on, 'finish');
   // The finish is a notice that says why, uses the registration up, and takes the task's waiting question with it.
   transcript(SID, said('Logo drawn.'));
-  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 4);
-  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\nTask "Draw the logo" \(testmac\/dddd0001[^)]*\) finished: Logo drawn\. \(you asked to hear: the user asked to be told when the logo is done\)/);
+  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo', updatedAt: LATER }, 4);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line[^\n]*:\nTask "Draw the logo" \(testmac\/dddd0001[^)]*\) finished: Logo drawn\. \(you asked to hear: the user asked to be told when the logo is done\)/);
   assert.equal(store().channels[0].tasks[0].wake, null, 'used up');
   assert.deepEqual(store().channels[0].inbox, []);
-  // The next finish is a plain notice.
+  // The next finish answers no ask (the user's own turn): the panel only.
   transcript(SID, said('Redrawn.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 6);
-  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\n.*finished: Redrawn\.$/m);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat nothing \(you started that turn in the task\)/);
   // question and any; none cancels.
   ok(['watch', SID, '--wake-on', 'question']);
   transcript(SID, said('Bigger?'));
@@ -593,7 +613,7 @@ test('start --wake-on and send --wake-on register on the task, and on a copy Cla
   assert.deepEqual([store().channels[0].tasks[0].wake.on, store().channels[0].tasks[0].wake.why], ['any', 'you started it with --wake-on any']);
   transcript(SID, said('Done.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 2);
-  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\n.*finished: Done\. \(you asked to hear: you started it with --wake-on any\)/);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line[^\n]*:\n.*finished: Done\. \(you asked to hear: you started it with --wake-on any\)/);
   ok(['file', 'design', 'aaaaaaaa']);
   live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
   assert.match(ok(['send', 'aaaaaaaa', '--wake-on', 'finish', 'Also', 'the', 'tax']), /It continues with this as its next message\. The chat is woken when it finishes\./);
@@ -641,7 +661,7 @@ test('dedup: an event identical to the last one recorded for its task is dropped
   // New words are news again.
   transcript(SID, said('Blue, then.'));
   job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo' }, 10);
-  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line:\n.*finished: Blue, then\. \(you asked to hear/);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line[^\n]*:\n.*finished: Blue, then\. \(you asked to hear/);
   // Dismissed: no events.
   ok(['dismiss', SID]);
   transcript(SID, said('More.'));
@@ -802,7 +822,7 @@ test('card dismiss takes a card quietly; card tell takes it and prints the whole
   ok(['start', 'design', 'Draw the logo']);
   const ask = `Which colour?\n${'Line of detail. '.repeat(400)}`;
   transcript(SID, said(ask));
-  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 2);
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo', updatedAt: LATER }, 2);
   ok(['listen', 'design', '--once']);
   assert.equal(list().channels[0].tasks[0].unread.kind, 'needs');
   const told = ok(['card', 'tell', SID]);
@@ -831,7 +851,7 @@ test('a question nobody answered in two days leaves the inbox; the task still wa
   ok(['start', 'design', 'Draw the logo']);
   transcript(SID, said('Done: the logo is drawn. Shall I also make a dark version?'));
   // Its turn ended long ago, but the listener only now sees it: a fresh card, not dropped at once.
-  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'a dark version?', name: 'Draw the logo', updatedAt: '2026-01-02T03:04:05Z' }, 2);
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'a dark version?', name: 'Draw the logo', updatedAt: LATER }, 2);
   ok(['listen', 'design', '--once']);
   const [q] = store().channels[0].inbox;
   assert.equal(q.card.state, 'question');
@@ -1078,4 +1098,159 @@ test('remoteLink and transcriptBridge take only Remote Control session ids', asy
   assert.equal(transcriptBridge(text), `cse_${BRIDGE}`, 'the last one');
   assert.equal(transcriptBridge('{"type":"user"}'), null);
   assert.deepEqual(['1', 'on', 'YES', 'true', '', '0', 'off', undefined].map((v) => remoteOn({ CHANNELS_REMOTE_CONTROL: v })), [true, true, true, true, false, false, false, false]);
+});
+
+// ---------- the notice gate (bin/gate.mjs, docs/notice-gate-design.md) ----------
+
+const finish = (job, transcript, text, n, extra = {}) => { transcript(SID, said(text)); job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo', updatedAt: LATER, ...extra }, n); };
+
+test('the gate: the judge decides an ordinary finish of the chat\'s turn, from its brief, the report, the chat and the rules', (t) => {
+  const { ok, home, store, job, transcript, lines } = setup(t);
+  ok(['create', 'design']);
+  ok(['notify', 'design', '--set', 'brief at 9:00\ndon\'t bother me with rephrasings']);
+  ok(['start', 'design', 'Draw the logo, two variants']);
+  finish(job, transcript, 'Two logo variants drawn: round and square.', 2);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line \(the judge: test says wake\):\nTask "Draw the logo"/);
+  const [call] = lines('judge-calls.jsonl');
+  assert.deepEqual(call.args.slice(0, 3), ['-p', '--model', 'sonnet']);
+  for (const flag of ['--tools', '--strict-mcp-config', '--setting-sources', '--no-session-persistence', '--json-schema', '--system-prompt']) assert.ok(call.args.includes(flag), flag);
+  assert.equal(call.args[call.args.indexOf('--tools') + 1], '');
+  assert.equal(call.cwd, join(home, '.local', 'state', 'herdr-channels-judge'), 'an empty folder: no CLAUDE.md');
+  assert.match(call.input, /<data-[a-z]{10} kind="ask">\nDraw the logo, two variants\n/);
+  assert.match(call.input, /kind="report">\nTwo logo variants drawn: round and square\./);
+  assert.match(call.input, /1\. brief at 9:00\n2\. don't bother me with rephrasings/);
+  assert.equal(store().channels[0].notices.length, 1);
+  assert.deepEqual([store().channels[0].tasks[0].gate.do, store().channels[0].tasks[0].gate.by], ['wake', 'judge']);
+  assert.match(ok(['why', SID]), /finished: asked the judge \(rule: the judge decides\)\n.*finished: told the chat \(judge: test says wake\)/);
+});
+
+test('the gate: the judge holds or drops; a held finish waits for the brief, Tell chat sends it, and a drop needs a rule', (t) => {
+  const { ok, home, store, list, job, transcript, live } = setup(t);
+  ok(['create', 'design']);
+  ok(['notify', 'design', '--set', 'don\'t bother me with rephrasings']);
+  ok(['start', 'design', 'Draw the logo']);
+  writeFileSync(join(home, 'judge.json'), JSON.stringify({ do: 'hold', why: 'polish only', line: 'Logo drawn, nothing notable', rule: null }));
+  finish(job, transcript, 'Logo drawn.', 2);
+  assert.match(ok(['listen', 'design', '--once']), /^Holds it for the brief \(the judge: polish only\):\nTask "Draw the logo"/);
+  let c = store().channels[0];
+  assert.deepEqual([(c.notices ?? []).length, c.held.length, c.held[0].line, c.held[0].why], [0, 1, 'Logo drawn, nothing notable', 'polish only']);
+  const row = list().channels[0];
+  assert.equal(row.held, 1);
+  assert.equal(row.tasks[0].held.why, 'polish only', 'the panel shows it held');
+  assert.match(ok(['held', 'design']), /Held for #design's brief \(1\), oldest first:\n- "Draw the logo" \(testmac\/dddd0001\S*\) finished: Logo drawn, nothing notable {2}\[polish only\]/);
+  assert.equal(hook(ok, row.id), '', 'a held finish never rides along');
+  // Tell chat: it leaves the held list as a notice, now.
+  assert.match(ok(['tell', SID]), /Told #design's chat about testmac\/dddd0001/);
+  c = store().channels[0];
+  assert.deepEqual([c.held.length, c.notices.length, c.tasks[0].gate.why], [0, 1, 'you pressed Tell chat']);
+  assert.match(ok(['tell', SID]), /has nothing held/);
+  // A drop citing the channel's rule: counted for the brief, nothing else.
+  live(SID, { status: 'idle', jobId: 'dddd0001' });
+  ok(['send', SID, 'Say it more concisely']);
+  writeFileSync(join(home, 'judge.json'), JSON.stringify({ do: 'drop', why: 'a rephrasing', line: '', rule: 1 }));
+  finish(job, transcript, 'Logo: done.', 4);
+  assert.match(ok(['listen', 'design', '--once']), /^Drops it \(the judge: your rule 1: don't bother me with rephrasings\)/);
+  assert.equal(store().channels[0].dropped, 1);
+  // A drop that cites no rule is a hold.
+  ok(['send', SID, 'And shorter']);
+  writeFileSync(join(home, 'judge.json'), JSON.stringify({ do: 'drop', why: 'boring', line: '', rule: null }));
+  finish(job, transcript, 'Logo.', 6);
+  assert.match(ok(['listen', 'design', '--once']), /^Holds it for the brief \(the judge: boring \(a drop needs one of your rules\)\)/);
+});
+
+test('the gate: a turn the user typed in the task, one sent from the panel, and one the user watched never wake the chat, and ask no judge', (t) => {
+  const { ok, dir, store, job, transcript, live, lines } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  finish(job, transcript, 'Logo drawn.', 2);
+  ok(['listen', 'design', '--once']);
+  assert.equal(lines('judge-calls.jsonl').length, 1);
+  // Typed in the task's view: no ask before its end.
+  finish(job, transcript, 'Rephrased: logo done.', 3);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat nothing \(you started that turn in the task\): the panel shows it\./);
+  // Sent from the panel: held for the brief.
+  live(SID, { status: 'idle', jobId: 'dddd0001' });
+  assert.match(ok(['send', SID, '--by', 'user', 'Bigger']), /It continues/);
+  assert.equal(store().channels[0].tasks[0].asked.via, 'panel');
+  finish(job, transcript, 'Bigger now.', 5);
+  assert.match(ok(['listen', 'design', '--once']), /^Holds it for the brief \(you sent it from the panel\)/);
+  // The chat's turn, ended while the panel had the task open: the user saw it.
+  ok(['send', SID, 'Make it blue']);
+  ok(['viewing', SID]);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'viewing.json'), 'utf8')).task, `${HERE}/${SID}`);
+  finish(job, transcript, 'Blue now.', 7);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat nothing \(you were looking at the task\)/);
+  ok(['viewing', '--none']);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'viewing.json'), 'utf8')), null);
+  assert.equal(lines('judge-calls.jsonl').length, 1, 'no judge for any of them');
+  assert.equal((store().channels[0].notices ?? []).length, 1, 'only the first finish');
+});
+
+test('the gate: a failure or a question in the chat\'s turn wakes the chat without the judge; rules can hold the rest or tell all', (t) => {
+  const { ok, store, job, transcript, live, lines } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  finish(job, transcript, 'The build broke.', 2, { state: 'failed' });
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line \(it failed\):\nTask "Draw the logo" \(testmac\/dddd0001\S*\) failed: The build broke\./);
+  ok(['notify', 'design', '--set', 'only when blocked or failed']);
+  live(SID, { status: 'idle', jobId: 'dddd0001' });
+  ok(['send', SID, 'Try again']);
+  finish(job, transcript, 'Built.', 4);
+  assert.match(ok(['listen', 'design', '--once']), /^Holds it for the brief \(your rule: only when blocked or failed\)/);
+  ok(['send', SID, 'Which colour?']);
+  transcript(SID, said('Blue or green?'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'blue or green?', name: 'Draw the logo', updatedAt: LATER }, 6);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line, and shows its card \(it needs the chat\)/);
+  ok(['notify', 'design', '--set', 'all']);
+  ok(['send', SID, 'Blue']);
+  finish(job, transcript, 'Blue it is.', 8);
+  assert.match(ok(['listen', 'design', '--once']), /^Tells the chat, in one line \(your rule: all\)/);
+  assert.equal(lines('judge-calls.jsonl').length, 0);
+  // A task's newer notice replaces one not pushed yet.
+  assert.deepEqual(store().channels[0].notices.map((n) => n.text.replace(/^.*\) /, '')), ['finished: Blue it is.']);
+});
+
+test('the gate: a judge that can\'t answer holds the finish; three in a row and it rests, holding without a call', (t) => {
+  const { ok, home, store, job, transcript, live, lines } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  live(SID, { status: 'idle', jobId: 'dddd0001' });
+  writeFileSync(join(home, 'judge-fails'), '');
+  for (let i = 0; i < 3; i++) {
+    if (i) ok(['send', SID, `Again ${i}`]);
+    finish(job, transcript, `Try ${i}.`, 2 + i * 2);
+    assert.match(ok(['listen', 'design', '--once']), /^Holds it for the brief \(the judge couldn't answer \(claude -p exited 1: judge down\)\)/);
+  }
+  const c = store().channels[0];
+  assert.ok(Date.parse(c.judge.rest_until) > Date.now(), 'resting');
+  assert.match(c.judge.last_error, /judge down/);
+  ok(['send', SID, 'Once more']);
+  finish(job, transcript, 'Try 3.', 8);
+  assert.match(ok(['listen', 'design', '--once']), /^Holds it for the brief \(the judge is resting\)/);
+  assert.equal(lines('judge-calls.jsonl').length, 3);
+  assert.equal(store().channels[0].held.length, 1, 'one held event per task');
+});
+
+test('the gate: a brief comes at a time the rules name, with what was held and how many were dropped; then the list starts again', async (t) => {
+  const { ok, dir, home, store, job, transcript } = setup(t);
+  ok(['create', 'design']);
+  ok(['notify', 'design', '--set', 'brief at 9:00']);
+  ok(['start', 'design', 'Draw the logo']);
+  writeFileSync(join(home, 'judge.json'), JSON.stringify({ do: 'hold', why: 'polish only', line: 'Logo drawn', rule: null }));
+  finish(job, transcript, 'Logo drawn.', 2);
+  ok(['listen', 'design', '--once']);
+  process.env.CHANNELS_MACHINE = HERE;
+  const { briefs, readStore, updateStore } = await import('../bin/channels.mjs');
+  const at9 = new Date(); at9.setHours(9, 0, 0, 0);
+  assert.deepEqual(updateStore(dir, (s) => briefs(s, at9.getTime() - 60_000)), [], 'not yet');
+  assert.deepEqual(updateStore(dir, (s) => briefs(s, at9.getTime() + 60_000)), [{ channel: 'design', held: 1, dropped: 0 }]);
+  const c = readStore(dir).channels[0];
+  const n = c.notices.at(-1);
+  assert.equal(n.brief, true);
+  assert.match(n.text, /^Brief for #design: 1 task event held since the last brief\./);
+  assert.match(n.text, /- "Draw the logo" \(testmac\/dddd0001\S*\) finished: Logo drawn/);
+  assert.deepEqual([c.held, c.dropped, c.briefed_at], [[], 0, at9.toISOString()]);
+  assert.deepEqual(updateStore(dir, (s) => briefs(s, at9.getTime() + 120_000)), [], 'once');
+  assert.match(ok(['notify', 'design']), /Brief: held events are told to the chat at 09:00\./);
+  assert.equal(store().channels[0].notify, 'brief at 9:00');
 });

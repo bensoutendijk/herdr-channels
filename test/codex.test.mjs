@@ -26,11 +26,15 @@ async function setup(t, { codex = 'on' } = {}) {
   const bin = join(root, 'codex');
   writeFileSync(bin, '#!/bin/sh\necho "codex-cli 0.171.0"\n');
   chmodSync(bin, 0o755);
+  // No Claude Code here, but the gate's judge (\`claude -p\`): it says wake.
+  const judge = join(root, 'judge-only-claude');
+  writeFileSync(judge, `#!/bin/sh\nif [ "$1" = "-p" ]; then cat >/dev/null; echo '{"type":"result","is_error":false,"structured_output":{"do":"wake","why":"test says wake","line":"","rule":null}}'; exit 0; fi\nexit 127\n`);
+  chmodSync(judge, 0o755);
   const socket = join(root, 's.sock');
   const fake = await fakeCodex({ socket, codexHome });
   t.after(async () => { await fake.close(); rmSync(root, { recursive: true, force: true }); });
   const env = {
-    ...process.env, HOME: home, CHANNELS_DIR: dir, CHANNELS_PROJECTS: projects, CHANNELS_MACHINE: HERE, CHANNELS_CLAUDE: join(root, 'no-claude'),
+    ...process.env, HOME: home, CHANNELS_DIR: dir, CHANNELS_PROJECTS: projects, CHANNELS_MACHINE: HERE, CHANNELS_CLAUDE: judge,
     CHANNELS_HC: join(root, 'no-hc'), CHANNELS_UPDATE_CHECK: 'off', CODEX_HOME: codexHome, CHANNELS_CODEX_SOCKET: socket, CHANNELS_CODEX_BIN: bin,
     CHANNELS_CODEX: codex, CHANNELS_PERMISSION_MODE: '',
   };
@@ -90,13 +94,13 @@ test('a question is a "needs you" notice and a card; the answer is its next turn
   const { ok, store } = await setup(t);
   const ref = refOf(await ok(['start', 'site', '--harness', 'codex', 'ASK about the logo']));
   const asked = await ok(['listen', 'site', '--once']);
-  assert.match(asked, new RegExp(`Tells the chat, in one line, and shows its card:\\nTask "ASK about the logo" \\(${ref}\\) needs you: Which colour should the logo use\\?`));
+  assert.match(asked, new RegExp(`Tells the chat, in one line, and shows its card[^\\n]*:\\nTask "ASK about the logo" \\(${ref}\\) needs you: Which colour should the logo use\\?`));
   const entry = store().channels[0].inbox[0];
   assert.deepEqual({ state: entry.card.state, options: entry.card.options, label: entry.label, delivered: Boolean(entry.delivered_at) }, { state: 'question', options: ['Teal', 'Coral', 'Ink'], label: 'Codex', delivered: true });
   assert.match(await ok(['listen', 'site', '--once']), /Nothing new to report/, 'told once');
   assert.match(await ok(['send', ref, 'Teal']), /It continues with this as its next message/);
   assert.deepEqual(store().channels[0].inbox, [], 'the answer takes its card');
-  assert.match(await ok(['listen', 'site', '--once']), new RegExp(`Tells the chat, in one line:\\nTask "ASK about the logo" \\(${ref}\\) finished: ok: From the user via #site's chat: Teal`));
+  assert.match(await ok(['listen', 'site', '--once']), new RegExp(`Tells the chat, in one line[^\\n]*:\\nTask "ASK about the logo" \\(${ref}\\) finished: ok: From the user via #site's chat: Teal`));
   const read = await ok(['read', ref]);
   assert.match(read, /Runs on Codex\./);
   assert.match(read, /Session: I need a decision/);

@@ -756,13 +756,16 @@ function current() {
 }
 
 const ask = (dialog, channel, width, height) => openOverlay({ mod: MOD, kind: "dialog", width, height, props: { dialog, channel } });
-const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], icon: [560, 560], routines: [640, 680], archive: [440, 190] };
+const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], notify: [620, 520], icon: [560, 560], routines: [640, 680], archive: [440, 190] };
 const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog]);
 // A task's menu (Rename, Open on claude.ai when it has a link, Resolve) opens at the pointer; its Rename dialog looks
 // like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
 // The menu's items above its line (Rename, Send, Open on claude.ai) and below it (Resolve), as render_taskmenu draws them.
-const menuTop = (task) => (canRename(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
+const menuTop = (task) => (canRename(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0) + (canTell(task) ? 1 : 0);
+// A task whose event the gate held for the brief: Tell chat sends it to the chat now (`channels tell`).
+const canTell = (task) => Boolean(task?.held) && !task.dismissed && has("gate");
+const tellChat = (task) => submit((all) => eachTask(all, task.id, (x) => { x.held = null; }), 'channels tell "$1"', [task.id], `tell the chat about ${task.name || "the task"}`);
 const menuItems = (task) => menuTop(task) + (task.dismissed ? 0 : 1);
 const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: 10 + 34 * menuItems(task) + (menuTop(task) && !task.dismissed ? 9 : 0), props: { taskmenu: task.id } });
 const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
@@ -957,6 +960,16 @@ export default class Channels extends View {
     cx.timer.every(1000, (cx) => {
       const now = shared(TICK) ?? 0;
       if (now !== this.tick) { this.tick = now; this.refresh(cx); }
+      // The task open in the panel, said to the store so the gate keeps its events from the chat (you were there):
+      // on opening, every minute while it stays open, and once when none is.
+      if (has("gate")) {
+        const open = shared(TASK) ?? null;
+        const at = Date.now();
+        if (open !== (this.viewing?.task ?? null) || (open && at - this.viewing.at > 60000)) {
+          this.viewing = { task: open, at };
+          sh(open ? 'channels viewing "$1"' : "channels viewing --none", open ? [open] : []).catch(() => {});
+        }
+      }
       // Put the selected channel's chat back if the main area is showing anything else, or if the
       // chat ended (/exit): it starts again. Not while a Herdr space is selected in the sidebar
       // (Herdr showing another space selects it there: see followSpaces). Not more than once every
@@ -1118,7 +1131,7 @@ export default class Channels extends View {
     const t = theme();
     const data = shared(DATA);
     const here = current();
-    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: harnessesOn().length > 1 ? 230 : 200, height: (has("routines") ? 190 : 156) + (harnessesOn().length > 1 ? 34 : 0), props: { menu: c.name } });
+    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: harnessesOn().length > 1 ? 230 : 200, height: (has("routines") ? 190 : 156) + (harnessesOn().length > 1 ? 34 : 0) + (has("gate") ? 34 : 0), props: { menu: c.name } });
     const list = channels();
     const drag = this.drag?.moved ? this.drag : null;
     const fresh = new Set(this.knownChannels ? list.filter((c) => !this.knownChannels.has(c.name)).map((c) => c.name) : []);
@@ -1458,6 +1471,9 @@ export default class Channels extends View {
         .when(mixed && isOther(task), (el) => el.child(div().flex_none().tooltip(`${harnessLabel(task.harness)} task`).child(svg(ICON("square-terminal")).size(13).text_color(t.dim))))
         // A task with an event not seen yet (it finished, or asked something, since it was last opened) has a dot.
         .when(unread, (el) => el.child(div().id(`tk-new-${task.id}`).w(8).h(8).flex_none().rounded(4).bg(t.accent)))
+        // Held for the channel's brief (the gate kept it from the chat): its menu's Tell chat sends it now.
+        .when(kind !== "resolved" && Boolean(task.held), (el) => el.child(div().id(`tk-held-${task.id}`).flex_none().px(6).h(18).flex().items_center().rounded(5)
+          .bg(t.raised).text_size(11).text_color(t.muted).tooltip(`Held for the brief: ${task.held?.why ?? ""}`).child("held")))
         .child(div().flex_none().text_size(12).text_color(t.dim).child(right))
         // The menu and resolve buttons keep their place whether or not they show, so hovering moves nothing.
         .child(div().w(24).flex_none().opacity(canMenu && this.hover === key ? 1 : 0).transition("opacity", 120)
@@ -1537,6 +1553,7 @@ export default class Channels extends View {
     return v_flex().size_full().py(4).bg(t.popover)
       .child(item("rename", "square-pen", "Rename", "rename"))
       .child(item("instructions", "file-text", "Instructions", "instructions"))
+      .when(has("gate"), (el) => el.child(item("notify", "bell", "Notifications", "notify")))
       .when(has("routines"), (el) => el.child(item("routines", "clock", "Routines", "routines")))
       // The harness the channel's tasks start on, when more than one is on here.
       .when(harnessesOn().length > 1, (el) => el.child(h_flex().id("mn-harness").mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
@@ -1609,6 +1626,7 @@ export default class Channels extends View {
       .when(canRename(task), (el) => el.child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); })))
       .when(isCloud(task) && !task?.dismissed, (el) => el.child(item("send", "send", "Send message…", () => sendTask(task))))
       .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
+      .when(canTell(task), (el) => el.child(item("tell", "send", "Tell chat", () => tellChat(task))))
       .when(Boolean(task) && !task.dismissed, (el) => el
         .when(menuTop(task) > 0, (e2) => e2.child(div().mx(8).my(4).h(1).bg(t.border)))
         .child(item("resolve", "check", "Resolve", () => { resolveTask(task.id); if (isShown(task)) showTasks(); })));
@@ -1651,6 +1669,16 @@ export default class Channels extends View {
       this.knownR = null; // routines already drawn: a new one grows in
       cx.timer.every(30, (cx) => { if (this.settleR) { this.settleR = false; cx.notify(); } });
       this.handle.focus();
+    } else if (this.kind === "notify") {
+      this.text = TextareaState.new({ placeholder: "only when blocked or failed\nbrief at 9:00 and 17:00\ndon't bother me with rephrasings or small edits", value: "" });
+      cx.spawn(async (cx) => {
+        try {
+          this.original = JSON.parse(await store('channels notify "$1" --json', [p.channel])).notify ?? "";
+          this.text.set_value(this.original);
+        } catch (err) { this.failed = String(err?.message ?? err); }
+        this.text.focus();
+        cx.notify();
+      });
     } else if (this.kind === "instructions") {
       this.text = TextareaState.new({ placeholder: "What this channel is for and how you want work done here.", value: "" });
       cx.spawn(async (cx) => {
@@ -1734,6 +1762,9 @@ export default class Channels extends View {
     } else if (kind === "instructions") {
       const text = `${this.text.value() ?? ""}`.replace(/\s+$/, "");
       if (text !== this.original) submit(() => {}, 'channels describe "$1" --set "$2"', [was, text], `save ${was}'s instructions`);
+    } else if (kind === "notify") {
+      const text = `${this.text.value() ?? ""}`.trim();
+      if (text !== this.original.trim()) submit((all) => { for (const c of all) if (c.name === was) c.notify = text; }, 'channels notify "$1" --set "$2"', [was, text], `save ${was}'s notifications`);
     }
     this.close();
   }
@@ -1743,7 +1774,7 @@ export default class Channels extends View {
     const t = theme();
     const p = props() ?? {};
     const kind = this.kind;
-    const title = { new: "New channel", rename: "Rename channel", "rename-task": "Rename task", "send-task": `Send to ${this.task?.name || "the task"}`, instructions: "Instructions", icon: "Change icon", archive: `Archive ${p.channel}?` }[kind];
+    const title = { new: "New channel", rename: "Rename channel", "rename-task": "Rename task", "send-task": `Send to ${this.task?.name || "the task"}`, instructions: "Instructions", notify: "Notifications", icon: "Change icon", archive: `Archive ${p.channel}?` }[kind];
     const go = { new: "Create", archive: "Archive", "send-task": "Send" }[kind] ?? "Save";
     // The button that carries the dialog's action is solid; on Archive it is the warning colour.
     const button = (id, text, primary, action) => h_flex().id(id).h(34).px(14).items_center().rounded(9)
@@ -1757,7 +1788,7 @@ export default class Channels extends View {
       .on_key_down((e, cx) => {
         if (e.key === "escape") this.close();
         else if (e.key === "enter" && kind === "archive") this.save(cx);
-        else if (e.key === "enter" && kind === "instructions" && (e.modifiers?.platform || e.modifiers?.control)) this.save(cx);
+        else if (e.key === "enter" && (kind === "instructions" || kind === "notify") && (e.modifiers?.platform || e.modifiers?.control)) this.save(cx);
         else return;
         cx.stop_propagation();
       })
@@ -1784,6 +1815,14 @@ export default class Channels extends View {
           .child(div().text_size(15).child(iconOf(this.channel))).child(p.channel))
         .child(field(Textarea.new(this.text).flex_1().min_h(0).py(10)))
         .child(div().pt(10).pb(14).text_size(13).text_color(t.muted).child("Claude follows these instructions in this channel's chat. Command-Return saves.")))
+      .when(kind === "notify", (el) => el
+        .child(h_flex().pb(10).gap(8).items_center().text_size(14).text_color(t.muted)
+          .child(div().text_size(15).child(iconOf(this.channel))).child(p.channel))
+        .child(div().pb(10).text_size(13).text_color(t.muted)
+          .child("When the chat hears about this channel's tasks, in your words, one rule per line. A question or a failure in a task the chat started always reaches it; a turn you started yourself never does."))
+        .child(field(Textarea.new(this.text).flex_1().min_h(0).py(10)))
+        .child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
+          .child("Understood as is: all · only when blocked or failed · brief at 9:00 and 17:00 · quiet 18:00-8:00. Anything else is for the judge. Command-Return saves.")))
       .when(kind === "icon", (el) => {
         const found = this.found();
         const chip = (g, i) => div().id(`ic-g-${i}`).px(10).h(28).flex().items_center().rounded(8).text_size(12.5).cursor_pointer()
@@ -1805,7 +1844,7 @@ export default class Channels extends View {
       })
       .when(kind === "archive", (el) => el.child(div().text_size(13.5).text_color(t.muted)
         .child("It leaves the sidebar. Its sessions keep running and nothing is deleted.")))
-      .when(kind !== "icon" && kind !== "instructions", (el) => el.child(div().flex_1()))
+      .when(kind !== "icon" && kind !== "instructions" && kind !== "notify", (el) => el.child(div().flex_1()))
       .when(Boolean(this.failed), (el) => el.child(div().pb(10).text_size(12.5).text_color(t.blocked).child(this.failed)))
       .child(h_flex().gap(8).justify_end()
         .child(button("dg-cancel", "Cancel", false, () => this.close()))
