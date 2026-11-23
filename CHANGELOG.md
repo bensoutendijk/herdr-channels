@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.9.2](https://github.com/bensoutendijk/herdr-channels/compare/v1.9.1...v1.9.2) (2026-11-23)
+
+### Bug Fixes
+
+* Task cards answer to keys and to /cards, and a chat asks for the fullscreen layout so clicks reach them ([#53](https://github.com/bensoutendijk/herdr-channels/issues/53)) ([72dde75](https://github.com/bensoutendijk/herdr-channels/commit/72dde7592de03d34d703d99da36b2f4382de942d))
+
 ## [1.9.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.9.0...v1.9.1) (2026-11-23)
 
 ### Bug Fixes
