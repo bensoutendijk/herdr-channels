@@ -443,12 +443,45 @@ the chat:
 Every card has **Dismiss** (`channels card dismiss <session>`). A button whose command fails says why
 on the card, in red; **Open** that works says so in a toast.
 
-To reach a card from the keyboard, press `ctrl+x tab` to focus the band, `tab` to move between its
-controls, and `enter` to press one; `esc` goes back to the prompt. Clicking works too. On a
-question with choices, `enter` on the Select opens it, the arrows pick, and `enter` again keeps the
-pick for **Send**:
+To reach a card from the keyboard, press `ctrl+x tab` to focus the band, then a letter: on the top
+card, `s` is **Send**, `o` **Open**, `d` **Dismiss**, `c` **Open on claude.ai**, and on a Codex
+approval `y` **Allow** and `n` **Deny**. The top card's last line says which apply. On a question
+with choices the focus starts on **Send**, so `enter` sends the answer shown. `tab` and
+`shift+tab` move between the controls, the cards below the top one included, and `enter` presses
+one; `esc` goes back to the prompt. On a question with a text field, the focus starts in the field:
+type and press `enter` to send, or `tab` out of it to use the letters. On the Select, `enter` opens
+it, the arrows pick, and `enter` again keeps the pick for **Send**:
 
 <img src="docs/task-card-answer.png" width="480" alt="The Pick a homepage headline card with its Answer select open, listing Projects, minus the chaos; From to-do to done, faster (highlighted); Built for small teams; and Something else…, above Send, Open and Dismiss">
+
+Clicking a card works only in Claude Code's fullscreen layout, the one that takes the whole terminal
+and keeps the prompt at the bottom. On the main-screen ("classic") layout the band takes no clicks,
+so use the keys there. `channels chat` asks for fullscreen in the chat's own settings (`tui`), but
+Claude Code keeps the main screen when `CLAUDE_CODE_NO_FLICKER=0` or
+`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` is set, when `tui` is set in managed settings, for a screen
+reader, or after a fullscreen start crashed on that Mac. `CLAUDE_CODE_DISABLE_MOUSE` and
+`CLAUDE_CODE_DISABLE_MOUSE_CLICKS` turn clicks off even in fullscreen. To see which layout a chat
+has, type `/tui` in it: it answers `Current renderer: fullscreen` or `classic`.
+
+The cards can also be used from the prompt, with no click and no focus on the band, which works in
+any layout and with any key bindings. Type `/cards` to list them, numbered from the top, with each
+one's question and choices, then act on one by its number (the top card when it is left out):
+
+```
+/cards                      lists the cards
+/cards send 2 Calm          answers card 2; a choice's number works too: /cards send 2 2
+/cards open 1               shows the task in the tasks panel
+/cards dismiss 1            takes the card away
+/cards allow 1, deny 1      answers a Codex approval
+/cards claude 1             opens the task on claude.ai
+```
+
+A lone number after `send` is the answer, so `/cards send 2` sends the top card its second choice.
+`/cards` starts no turn of the chat.
+
+If `ctrl+x tab` does nothing (the band never shows a focused control), something before Claude Code
+takes the keys: a `ctrl+x tab` or `abovePrompt:focus` entry in `~/.claude/keybindings.json`, or a
+`ctrl-x` binding in Herdr's `~/.config/herdr-app/keys.json`. `/cards` works either way.
 
 Acting on a card marks its event handled in the store: it leaves the chat's inbox and the task's dot
 in the panel clears, so it doesn't also ride along with your next message. A prompt's card you don't

@@ -677,6 +677,7 @@ test('chat launches claude with the prompt, its own hook and its notices server;
   const settings = JSON.parse(launch.args[7]);
   assert.equal(settings.disableAgentView, true);
   assert.equal(settings.promptSuggestionEnabled, false, 'a suggestion would look like a draft to a refresh');
+  assert.equal(settings.tui, 'fullscreen', 'the fullscreen layout, where a click reaches the task cards');
   const [{ hooks: [h] }] = settings.hooks.UserPromptSubmit;
   assert.equal(h.type, 'command');
   assert.ok(h.command.includes(`pending '${c.id}' --hook`), h.command);
