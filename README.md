@@ -292,7 +292,7 @@ lists the `refresh-all` feature.
   to a channel's name means it has a routine switched on: hover it for the next run, click it to
   open the channel's Routines.
 
-  <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Routines, Change icon and Archive">
+  <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Notifications, Routines, Tasks run on Claude Code, Change icon and Archive">
 
 - **What waits for you.** A red dot on a channel's icon means one of its tasks needs you: a question,
   a permission prompt or a Codex approval (hover the icon for how many). A channel's name turns bold
@@ -396,9 +396,13 @@ brief, for up to two days. A held task shows *held* in the tasks panel, and its 
 chat** (or `channels tell <session>`) sends it to the chat now. `channels held <channel>` lists them,
 each with why. The chat looks there when you ask what happened.
 
+<img src="docs/task-held.png" width="420" alt="The tasks panel of #website with one task under Ready for review, Add a page title, marked held, 2m">
+
 **Your rules.** The channel menu's **Notifications** (or `channels notify <channel> --set -`) holds
 plain-words rules, one per line. You can also just tell the chat ("stop telling me about small edits"),
 and it updates them.
+
+<img src="docs/notify-dialog.png" width="480" alt="The Notifications dialog for #website: a line saying when the chat hears about the channel's tasks, then the rules brief at 9:00 and 17:00; quiet 19:00-8:00; don't bother me with rephrasings or small copy edits; wake me when a PR is opened; and a hint listing the rules understood as is, above Cancel and Save">
 
 | Rule | Read by | What it does |
 |---|---|---|
