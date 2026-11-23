@@ -314,6 +314,9 @@ function channels() {
   const at = (c) => { const i = order.indexOf(c.id ?? c.name); return i === -1 ? 1e9 : i; };
   return [...all].sort((a, b) => at(a) - at(b) || `${a.created_at}`.localeCompare(`${b.created_at}`));
 }
+// What a channel has waiting for you, for its row in the sidebar (backend.js waitingOf). Without `seen` the store
+// never clears a task's unread mark, so only what needs you counts there.
+const waiting = (c) => B.waitingOf(c, { seen: has("seen") });
 const active = (channel) => (channel?.routines ?? []).some((r) => r.enabled);
 // The sidebar clock's hover: the channel's next routine run, "Next: morning-plan, Tomorrow 09:00".
 // A routine that needs a look (routineTint) is named instead, with its status in words.
@@ -1136,6 +1139,7 @@ export default class Channels extends View {
       const key = `c:${c.name}`;
       const selected = here?.name === c.name && !inSpace();
       const lifted = drag?.name === c.name;
+      const w = waiting(c);
       return h_flex().id(`ch-${c.name}`).absolute().left(0).right(0).h(ROW).pl(8).pr(8).items_center()
         .top(lifted ? drag.top : slot(i) * ROW)
         .opacity(fresh.has(c.name) ? 0 : 1).transition("opacity", 220)
@@ -1153,8 +1157,16 @@ export default class Channels extends View {
           .on_hover(this.hovering(key))
           .on_mouse_down("left", (e) => { this.drag = { name: c.name, from: i, grab: e.local_position?.y ?? 18, top: i * ROW, start: null, moved: false }; })
           .on_mouse_down("right", () => menu(c))
-          .child(div().w(20).flex_none().text_size(15).child(iconOf(c)))
-          .child(div().flex_1().min_w(0).truncate().text_size(14).text_color(selected || lifted ? t.foreground : t.muted).child(c.name))
+          // A task waits on you here (a question, a permission prompt, an approval): a dot on the channel's icon,
+          // ringed in the row's own colour so it reads as cut out of the icon.
+          .child(div().id(`ch-icon-${c.name}`).w(20).flex_none().relative().text_size(15).child(iconOf(c))
+            .when(w.needs > 0, (el) => el.tooltip(w.needs === 1 ? "A task needs you" : `${w.needs} tasks need you`)
+              .child(div().id(`ch-needs-${c.name}`).absolute().top(-3).right(-4).w(10).h(10).rounded(5).bg(t.blocked).border_2()
+                .border_color(lifted ? t.raised : selected ? t.selected : this.hover === key ? t.hover : t.chrome))))
+          // Bold while something in it waits on you or hasn't been seen (a task finished since you last opened it).
+          .child(div().flex_1().min_w(0).truncate().text_size(14)
+            .text_color(selected || lifted || w.needs + w.unread > 0 ? t.foreground : t.muted)
+            .when(w.needs + w.unread > 0, (el) => el.font_semibold()).child(c.name))
           // A small clock while the channel has a routine switched on: hover names the next run, a click opens Routines.
           .child(div().id(`ch-clock-${c.name}`).flex_none().w(active(c) ? 20 : 0).h(20).overflow_hidden().opacity(active(c) ? 1 : 0)
             .transition("opacity", 180).transition("width", 180).rounded(5).flex().items_center().justify_center()
@@ -1172,7 +1184,7 @@ export default class Channels extends View {
 
     return v_flex().size_full().bg(t.chrome).text_color(t.foreground)
       .child(h_flex().px(18).pt(8).pb(8).gap(10).items_center()
-        .child(svg(ICON("layers")).size(16).text_color(t.accent))
+        .child(svg(ICON("layers")).size(16).flex_none().text_color(t.accent))
         .child(div().flex_1().text_size(14).font_medium().child("Channels"))
         // The sidebar's own menu: what acts on every channel at once.
         .when(has("refresh-all"), (el) => el.child(this.tool("side-more", "···", () => openOverlay({ mod: MOD, kind: "popup", width: 200, height: 44, props: { sidemenu: true } }), t))))

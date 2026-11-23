@@ -773,6 +773,29 @@ test('a prompt stays a card after it rides along, marked delivered, and goes onc
   assert.deepEqual(store().channels[0].inbox, []);
 });
 
+test('list --json says what a task asks and since when, for the sidebar: a question, then a prompt; a finish clears it', (t) => {
+  const { ok, list, job, transcript, live } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  assert.equal(list().channels[0].tasks[0].asking, null, 'nothing asked yet');
+  transcript(SID, said('Which colour should it be?'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Draw the logo' }, 2);
+  const before = Date.now();
+  ok(['listen', 'design', '--once']);
+  const q = list().channels[0].tasks[0].asking;
+  assert.equal(q.state, 'question');
+  assert.ok(Date.parse(q.at) >= before - 1000 && Date.parse(q.at) <= Date.now(), 'from when it was filed');
+  live(SID, { status: 'waiting', waitingFor: 'permission for Bash(rm -rf build)' });
+  job('dddd0001', { sessionId: SID, state: 'working', name: 'Draw the logo' }, 3);
+  ok(['listen', 'design', '--once']);
+  assert.equal(list().channels[0].tasks[0].asking.state, 'prompt', 'a prompt doesn\'t age out');
+  live(SID, { status: 'idle' });
+  transcript(SID, said('The logo is done.'));
+  job('dddd0001', { sessionId: SID, state: 'done', detail: 'drew the logo', name: 'Draw the logo' }, 4);
+  ok(['listen', 'design', '--once']);
+  assert.equal(list().channels[0].tasks[0].asking, null);
+});
+
 test('card dismiss takes a card quietly; card tell takes it and prints the whole question for the chat', (t) => {
   const { ok, run, list, store, job, transcript } = setup(t);
   ok(['create', 'design']);

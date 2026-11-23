@@ -173,9 +173,11 @@ With a store on another machine:
   `list --json` (`features`, if it gives them). What the command lacks is hidden rather than offered
   and refused. A command that lists no features gets the basics only (channels, chats, tasks,
   resolve, rename, icon, instructions, archive). The features are `chat-bg` (the chat in a background
-  terminal), `seen` (unread dots), `refresh` (the Refresh row, from `updates` in `list --json`),
+  terminal), `seen` (unread dots, and bold names in the sidebar), `refresh` (the Refresh row, from `updates` in `list --json`),
   `routines`, `rename-task` and `refresh-all` (Refresh all chats: `<command> refresh --all --json`,
-  which prints `{ "summary": "..." }`).
+  which prints `{ "summary": "..." }`). A task's `asking` in `list --json` (`{ state, at }`: a
+  `question`, `prompt` or `approval`, and when it was filed) lets the sidebar stop marking a question
+  nobody answered in two days; without it, every waiting task is marked.
 - With the `routines` feature, the server keeps the routines and its own timer fires them, so they run
   while this Mac sleeps. The Routines dialog says schedules are the server's local time. The server's
   command takes the same `routine …` commands and gives the same `routines` and `queued` in
@@ -291,6 +293,16 @@ lists the `refresh-all` feature.
   open the channel's Routines.
 
   <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Routines, Change icon and Archive">
+
+- **What waits for you.** A red dot on a channel's icon means one of its tasks needs you: a question,
+  a permission prompt or a Codex approval (hover the icon for how many). A channel's name turns bold
+  while something in it waits on you or hasn't been seen, such as a task that finished since you last
+  opened it in the tasks panel. A question nobody answered in two days stops counting, as its card
+  goes then; the task still waits under *Needs input*. Archived channels aren't listed. With a store
+  whose command has no `seen`, only what needs you is marked; one that doesn't say when a task asked
+  (no `asking` in `list --json`) has every waiting task marked.
+
+  <img src="docs/sidebar-waiting.png" width="280" alt="The channels sidebar with six channels: website (selected) and design-system have a red dot on their icons and bold names; api-server and docs have bold names, each with a finished task not seen yet; mobile-app and infra are plain, infra's only question being three days old">
 
 - **Chat.** Selecting a channel opens its chat in the main area. Ask the chat to start work and it
   creates a task with `channels start`, writing a brief that the task can follow on its own.

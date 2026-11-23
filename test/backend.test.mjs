@@ -142,6 +142,37 @@ test('the sidebar clock is tinted by the routines\' status: missed or broken fir
   assert.equal(B.routineTint([{ name: 'old', enabled: true, last: { status: 'missed' } }], now), null, 'an older backend gives no status');
 });
 
+test('waitingOf: what a channel row marks; an aged-out question, a dismissed task or an archived channel count for nothing', () => {
+  const now = Date.parse('2026-11-23T12:00:00Z');
+  const ago = (h) => new Date(now - h * 3600000).toISOString();
+  const task = (o) => ({ dismissed: false, standing: 'ready', unread: null, asking: null, ...o });
+  const c = {
+    tasks: [
+      task({ standing: 'needs', asking: { state: 'question', at: ago(1) }, unread: { kind: 'needs', at: ago(1) } }),
+      task({ standing: 'needs', asking: { state: 'prompt', at: ago(72) } }), // a live prompt waits as long as it does
+      task({ standing: 'needs', asking: { state: 'question', at: ago(72) } }), // its card aged out
+      task({ standing: 'ready', unread: { kind: 'done', at: ago(1) } }),
+      task({ standing: 'working' }),
+      task({ standing: 'needs', dismissed: true }),
+    ],
+  };
+  assert.deepEqual(B.waitingOf(c, { now, seen: true }), { needs: 2, unread: 1, held: 0 });
+  // A store without `seen` never clears the unread mark: only what needs you counts.
+  assert.deepEqual(B.waitingOf(c, { now, seen: false }), { needs: 2, unread: 0, held: 0 });
+  assert.deepEqual(B.waitingOf({ ...c, archived_at: ago(1) }, { now, seen: true }), { needs: 0, unread: 0, held: 0 });
+  assert.deepEqual(B.waitingOf(null), { needs: 0, unread: 0, held: 0 });
+});
+
+test('waitingOf: a store that doesn\'t give `asking` (an older one, or agent-os) has its waiting tasks counted', () => {
+  const now = Date.parse('2026-11-23T12:00:00Z');
+  const old = new Date(now - 72 * 3600000).toISOString();
+  // No asking and no unread: nothing says how old, so it counts.
+  assert.equal(B.waitingOf({ tasks: [{ standing: 'needs' }] }, { now }).needs, 1);
+  // No asking, but an unread mark from when it asked: that says how old.
+  assert.equal(B.waitingOf({ tasks: [{ standing: 'needs', unread: { kind: 'needs', at: old } }] }, { now }).needs, 0);
+  assert.equal(B.QUESTION_TTL_MS, 2 * 86_400_000);
+});
+
 test('the Routines dialog says when the timer stopped, with the backend\'s command to start it again', () => {
   const now = Date.parse('2026-11-23T10:46:00Z');
   assert.equal(B.staleTimer({ last_tick_at: '2026-11-23T10:43:00Z' }, now), null);
