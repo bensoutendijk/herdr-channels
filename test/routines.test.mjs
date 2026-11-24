@@ -619,7 +619,7 @@ test('a queue entry is data, and its message is made when it is typed in: late b
   R.addRoutine(c, { name: 'a', prompt: 'Plan.', spec: 'daily 09:00', now: at(2026, 11, 23, 8) });
   R.claimDue({ channels: [c] }, at(2026, 11, 23, 9) + 20_000);
   const e = c.queue[0];
-  assert.deepEqual(Object.keys(e).sort(), ['by', 'first', 'id', 'kind', 'label', 'name', 'prev', 'prompt', 'queued_at', 'routine', 'scheduled_for', 'text'].sort());
+  assert.deepEqual(Object.keys(e).sort(), ['by', 'first', 'id', 'kind', 'label', 'name', 'prev', 'prompt', 'queued_at', 'report', 'routine', 'scheduled_for', 'text'].sort());
   assert.deepEqual([e.kind, e.prompt, e.label, e.first], ['scheduled', 'Plan.', 'Every day at 09:00', true]);
   assert.doesNotMatch(e.text, /late/, 'queued on time');
   // The chat was busy until 09:40: the message typed then says so.
@@ -724,4 +724,195 @@ test('each tick writes its heartbeat, which list --json shows as the timer\'s la
   assert.equal(JSON.parse(ok(['routine', 'list', '--json'])).timer.last_tick_at, beat.at);
   const R = await import('../bin/routines.mjs');
   assert.equal(R.timerStatus(beat, Date.parse(beat.at) + 6 * MIN).stale, true);
+});
+
+// ---------- the run ledger ----------
+
+const ledger = async (now = at(2026, 11, 23, 8)) => {
+  const R = await import('../bin/routines.mjs');
+  const c = { name: 'general', routines: [], queue: [], runs: [], tasks: [] };
+  R.addRoutine(c, { name: 'a', prompt: 'A.', spec: 'daily 09:00', now });
+  return { R, c, r: c.routines[0], store: { channels: [c] } };
+};
+const nine = (d) => at(2026, 11, d, 9);
+
+test('a run goes queued, delivered, then ok on the chat\'s report, with its duration and note; r.last still says delivered', async () => {
+  const { R, c, r } = await ledger();
+  const e = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) + 20_000, label: 'Every day at 09:00' });
+  assert.ok(e.text.includes(`report how it went: \`channels routine report general ${e.id} ok --note`));
+  assert.ok(e.text.includes(`Pass \`--run ${e.id}\` to \`channels start\``));
+  const run = c.runs[0];
+  assert.deepEqual([run.id, run.state, run.trigger, run.due_at, run.grace_min], [e.id, 'queued', { kind: 'scheduled', label: 'Every day at 09:00', by: null }, new Date(nine(23)).toISOString(), 30]);
+  R.markDelivered(c, e.id, nine(23) + MIN);
+  assert.deepEqual([run.state, run.deadline], ['delivered', new Date(nine(23) + 31 * MIN).toISOString()]);
+  assert.equal(R.routineStatus(r, nine(23) + 2 * MIN, { runs: c.runs }).state, 'running');
+  R.reportRun(c, e.id, 'ok', { note: '  Nothing   needs you. ', now: nine(23) + 3 * MIN });
+  assert.deepEqual([run.state, run.note, run.reported_late], ['ok', 'Nothing needs you.', false]);
+  assert.equal(R.showRun(c, run).duration_min, 2);
+  assert.deepEqual([r.last.status, r.last.id], ['delivered', e.id], 'r.last is written for older mods');
+  const st = R.routineStatus(r, nine(23) + 5 * MIN, { runs: c.runs });
+  assert.equal(st.state, 'ok');
+  assert.match(st.words, /^Done (\S+ )?09:00 · 2 min: Nothing needs you\.$/);
+  assert.throws(() => R.reportRun(c, e.id, 'failed'), /already reported ok \("Nothing needs you\."\): a run is reported once/);
+  assert.throws(() => R.reportRun(c, 'rt_x@nope', 'ok'), /#general has no run rt_x@nope\. Its runs waiting for a report: none/);
+  assert.throws(() => R.reportRun(c, e.id, 'maybe'), /ok or failed/);
+});
+
+test('a delivered run with no report turns unreported at its deadline; a late report is still taken; two bad runs make it failing', async () => {
+  const { R, c, r, store } = await ledger();
+  const one = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) });
+  R.markDelivered(c, one.id, nine(23));
+  assert.deepEqual(R.sweepRuns(store, nine(23) + 29 * MIN), [], 'inside its grace time');
+  const swept = R.sweepRuns(store, nine(23) + 31 * MIN);
+  assert.deepEqual(swept.map((x) => [x.state, x.why]), [['unreported', 'the chat didn\'t report back within 30 min']]);
+  assert.match(R.sweepLine(swept[0]), /^run rt_\w+@\S+ of #general a unreported: the chat didn't report/);
+  assert.equal(R.routineStatus(r, nine(23) + 40 * MIN, { runs: c.runs }).state, 'unreported', 'one bad run is not failing yet');
+  const two = R.queueRun(c, r, { kind: 'scheduled', slot: nine(24), now: nine(24) });
+  R.markDelivered(c, two.id, nine(24));
+  R.reportRun(c, two.id, 'failed', { note: 'Staging is down.', now: nine(24) + 5 * MIN });
+  const st = R.routineStatus(r, nine(24) + 10 * MIN, { runs: c.runs });
+  assert.deepEqual([st.state, st.streak, st.failing_since], ['failing', 2, new Date(nine(23)).toISOString()]);
+  assert.match(st.words, /^Failing · 2 in a row since \S+ 09:00: Staging is down\.$/);
+  // A late report on the unreported one is taken and marked late; the newest run still failed.
+  R.reportRun(c, one.id, 'ok', { note: 'Fine after all.', now: nine(24) + 11 * MIN });
+  assert.deepEqual([c.runs[0].state, c.runs[0].reported_late], ['ok', true]);
+  assert.equal(R.routineStatus(r, nine(24) + 12 * MIN, { runs: c.runs }).state, 'failed');
+  r.fail_after = 1;
+  assert.equal(R.routineStatus(r, nine(24) + 12 * MIN, { runs: c.runs }).state, 'failing', '--fail-after 1: one bad run is failing');
+});
+
+test('a run that can\'t reach the chat records why and turns undelivered after its grace time; missed runs are rows too', async () => {
+  const { R, c, r, store } = await ledger();
+  const e = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) });
+  R.markWaiting(c, e.id, 'the chat couldn\'t start: no claude', nine(23) + MIN);
+  assert.deepEqual(c.runs[0].waiting, { why: 'the chat couldn\'t start: no claude', since: new Date(nine(23) + MIN).toISOString() });
+  assert.equal(R.routineStatus(r, nine(23) + 5 * MIN, { runs: c.runs }).words, 'Waiting 5 min: the chat couldn\'t start: no claude');
+  R.sweepRuns(store, nine(23) + 31 * MIN);
+  assert.deepEqual([c.runs[0].state, c.runs[0].error], ['undelivered', 'it couldn\'t reach the chat: the chat couldn\'t start: no claude']);
+  assert.equal(c.queue.length, 1, 'it stays queued and is still typed in when the chat starts');
+  R.markDelivered(c, e.id, nine(23) + 40 * MIN);
+  assert.deepEqual([c.runs[0].state, c.runs[0].error], ['delivered', null]);
+  R.queueRun(c, r, { kind: 'scheduled', slot: nine(24), now: nine(24) + 3 * 3_600_000, status: 'missed', missed: { reason: 'asleep' } });
+  assert.deepEqual([c.runs[1].state, c.runs[1].error, c.runs[1].ended_at != null], ['missed', 'this Mac was asleep at the time (catch-up 1 hour)', true]);
+  assert.throws(() => R.reportRun(c, c.runs[1].id, 'ok'), /never reached the chat \(missed/);
+});
+
+test('a run with tasks takes its outcome from them when the chat doesn\'t report, and waits while one still runs', async () => {
+  const { R, c, r, store } = await ledger();
+  const e = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) });
+  R.markDelivered(c, e.id, nine(23));
+  R.linkTask(c, e.id, { session_id: 's1', name: 'fix-tests' });
+  R.linkTask(c, e.id, { session_id: 's1', name: 'fix-tests' });
+  R.linkTask(c, e.id, { session_id: 's2', name: 'bump-deps' });
+  assert.equal(c.runs[0].tasks.length, 2, 'a task is tied once');
+  const late = nine(23) + 40 * MIN;
+  assert.deepEqual(R.tasksToCheck(store, late).map((x) => x.task.session_id), ['s1', 's2']);
+  assert.deepEqual(R.sweepRuns(store, late, { tasks: new Map([['s1', 'ok'], ['s2', 'running']]) }), [], 'a task still runs');
+  R.sweepRuns(store, late + MIN, { tasks: new Map([['s1', 'ok'], ['s2', 'failed']]) });
+  assert.deepEqual([c.runs[0].state, c.runs[0].note], ['failed', 'Tasks: fix-tests, bump-deps (failed)']);
+  const f = R.queueRun(c, r, { kind: 'scheduled', slot: nine(24), now: nine(24) });
+  R.markDelivered(c, f.id, nine(24));
+  R.linkTask(c, f.id, { session_id: 's3', name: 'long' });
+  R.sweepRuns(store, nine(24) + 13 * 3_600_000, { tasks: new Map([['s3', 'running']]) });
+  assert.match(c.runs[1].error, /still running after 12 h/);
+  assert.throws(() => R.linkTask(c, f.id, { session_id: 's4' }), /is over \(unreported\)/);
+  assert.throws(() => R.openRun(c, 'rt_x@1'), /has no run rt_x@1/);
+});
+
+test('a heartbeat gap over 5 minutes moves open deadlines on by the gap: sleep is not a missing report', async () => {
+  const { R, c, r, store } = await ledger();
+  const e = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) });
+  R.markDelivered(c, e.id, nine(23));
+  // The Mac slept from 09:05 to 10:05: the first tick after it sees a 60-minute gap.
+  assert.deepEqual(R.sweepRuns(store, nine(23) + 65 * MIN, { gapMs: 60 * MIN }), []);
+  assert.equal(c.runs[0].deadline, new Date(nine(23) + 90 * MIN).toISOString());
+  assert.deepEqual(R.sweepRuns(store, nine(23) + 80 * MIN, { gapMs: 4 * MIN }), [], 'a short gap moves nothing');
+  assert.equal(R.sweepRuns(store, nine(23) + 91 * MIN, { gapMs: MIN })[0].state, 'unreported');
+});
+
+test('grace 0 is done on delivery; an entry typed in by an older listener ends ok; deleting cancels waiting runs but keeps the ledger, trimmed to 30', async () => {
+  const { R, c, r, store } = await ledger();
+  r.grace_min = 0;
+  const e = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) });
+  assert.doesNotMatch(e.text, /routine report/, 'no grace time: the message asks for no report');
+  R.markDelivered(c, e.id, nine(23) + MIN);
+  assert.equal(c.runs[0].state, 'ok');
+  r.grace_min = 30;
+  const old = R.queueRun(c, r, { kind: 'scheduled', slot: nine(24), now: nine(24) });
+  c.queue = c.queue.filter((x) => x.id !== old.id); // an older listener's markDelivered: the entry goes, the run isn't touched
+  R.sweepRuns(store, nine(24) + MIN);
+  assert.equal(c.runs[1].state, 'ok');
+  for (let d = 0; d < 35; d++) R.queueRun(c, r, { kind: 'manual', now: nine(25) + d * MIN, status: 'missed' });
+  assert.equal(c.runs.length, 30, 'the newest 30 of a routine are kept');
+  R.queueRun(c, r, { kind: 'manual', now: nine(26) });
+  R.removeRoutine(c, 'a', nine(26) + MIN);
+  assert.deepEqual([c.runs.at(-1).state, c.runs.at(-1).error], ['cancelled', 'the routine was deleted']);
+  assert.equal(R.listRuns(c, 'a', { limit: 5 })[0].deleted, true, 'a deleted routine\'s runs are listed by its name');
+  assert.throws(() => R.listRuns(c, 'zzz'), /no routine "zzz", and no runs of one/);
+});
+
+test('Run now while a scheduled run still waits: both are their own runs, and each is delivered and reported (the old r.last bug)', async () => {
+  const { R, c, r } = await ledger();
+  const s = R.queueRun(c, r, { kind: 'scheduled', slot: nine(23), now: nine(23) });
+  const m = R.runNow(c, 'a', { now: nine(23) + MIN, by: 'dialog' });
+  R.markDelivered(c, s.id, nine(23) + 2 * MIN);
+  R.markDelivered(c, m.id, nine(23) + 3 * MIN);
+  assert.deepEqual(c.runs.map((x) => [x.trigger.kind, x.state]), [['scheduled', 'delivered'], ['manual', 'delivered']]);
+  R.reportRun(c, s.id, 'ok', { now: nine(23) + 4 * MIN });
+  assert.equal(R.routineStatus(r, nine(23) + 5 * MIN, { runs: c.runs }).state, 'running', 'the run now is still open');
+  R.reportRun(c, m.id, 'ok', { now: nine(23) + 5 * MIN });
+  assert.equal(R.routineStatus(r, nine(23) + 6 * MIN, { runs: c.runs }).state, 'ok');
+});
+
+test('overdue: a due time over 3 minutes past with no run means the timer didn\'t run it', async () => {
+  const { R, c, r } = await ledger(at(2026, 11, 22, 8));
+  assert.equal(R.routineStatus(r, nine(22) + 2 * MIN, { runs: c.runs }).state, 'never');
+  const st = R.routineStatus(r, nine(22) + 4 * MIN, { runs: c.runs });
+  assert.equal(st.state, 'overdue');
+  assert.match(st.words, /^Overdue: due (\S+ )?09:00, and the timer hasn't run it$/);
+  r.done = new Date(nine(22)).toISOString();
+  assert.equal(R.routineStatus(r, nine(22) + 4 * MIN, { runs: c.runs }).state, 'never', 'claimed: not overdue');
+  delete r.done;
+  assert.equal(R.routineStatus(r, nine(22) + 4 * MIN).state, 'never', 'without the ledger there is no overdue');
+});
+
+test('routine runs, report, off --note, --grace and --fail-after through the command; a tick sweeps and logs', async (t) => {
+  const { ok, run, dir, store, tickAt } = setup(t);
+  ok(['create', 'general']);
+  ok(['routine', 'add', 'general', 'check', '--schedule', 'daily 09:00', '--grace', '15m', '--fail-after', '3', 'Check.']);
+  assert.deepEqual([store().channels[0].routines[0].grace_min, store().channels[0].routines[0].fail_after], [15, 3]);
+  assert.match(run(['routine', 'add', 'general', 'x', '--schedule', 'daily 09:00', '--grace', '20h', 'X.']).stderr, /at most 12 hours/);
+  assert.match(run(['routine', 'edit', 'general', 'check', '--fail-after', '0']).stderr, /--fail-after is how many bad runs/);
+  assert.match(ok(['routine', 'runs', 'general', 'check']), /check hasn't run yet/);
+  ok(['routine', 'run', 'general', 'check', '--by', 'cli']);
+  const id = store().channels[0].runs[0].id;
+  assert.ok(run(['routine', 'report', 'general', 'rt_nope@x', 'ok']).stderr.includes(`no run rt_nope@x. Its runs waiting for a report: ${id} (check, queued)`));
+  assert.match(run(['start', 'general', '--run', 'rt_nope@x', 'Do it.']).stderr, /no run rt_nope@x/, 'a bad --run fails before the session starts');
+  assert.match(ok(['routine', 'report', 'general', id, 'ok', '--note', 'All good.']), /Recorded run .* as ok/);
+  const out = JSON.parse(ok(['routine', 'runs', 'general', 'check', '--json']));
+  assert.deepEqual([out.runs.length, out.runs[0].state, out.runs[0].note, out.runs[0].trigger.by, out.routine.status.state], [1, 'ok', 'All good.', 'cli', 'ok']);
+  assert.match(ok(['routine', 'runs', 'general']), /\(run now\) {2}ok {2}\S+ min {2}check: All good\./);
+  assert.match(readFileSync(join(dir, 'tick.log'), 'utf8'), /reported ok/);
+  ok(['routine', 'off', 'general', 'check', '--note', 'On holiday until Dec 2', '--by', 'you']);
+  const listed = JSON.parse(ok(['list', '--json'])).channels[0].routines[0];
+  assert.deepEqual([listed.paused.note, listed.grace_min, listed.fail_after], ['On holiday until Dec 2', 15, 3]);
+  assert.match(listed.status.words, / · "On holiday until Dec 2"$/);
+  assert.match(run(['routine', 'on', 'general', 'check', '--note', 'x']).stderr, /--note goes with off/);
+  ok(['routine', 'on', 'general', 'check']);
+  assert.equal(store().channels[0].routines[0].paused, null, 'on clears the note');
+  // A tick sweeps: a run that hasn't reached the chat past its grace time turns undelivered, in the log too.
+  ok(['routine', 'run', 'general', 'check']);
+  await tickAt(Date.now() + 20 * MIN);
+  assert.equal(store().channels[0].runs[1].state, 'undelivered');
+  assert.match(readFileSync(join(dir, 'tick.log'), 'utf8'), /of #general check undelivered/);
+  assert.ok(JSON.parse(ok(['capabilities', '--json'])).features.includes('routine-runs'));
+});
+
+test('routine list leads with the stale timer, and the chat prompt teaches reporting and runs --json', async () => {
+  const R = await import('../bin/routines.mjs');
+  const out = { timer: { last_tick_at: new Date(at(2026, 11, 23, 10, 42)).toISOString(), stale: true, hint: 'launchctl kickstart -k gui/$(id -u)/x' }, channels: [{ name: 'g', queued: 0, routines: [{ name: 'a', enabled: true, label: 'L', catchup_min: 60, next_at: null, prompt: 'P', status: { words: 'Never run' } }] }] };
+  assert.match(R.listText(out), /^The timer hasn't run since Mon Nov 23, 10:42, so routines won't come due\. Start it again: launchctl kickstart/);
+  assert.doesNotMatch(R.listText({ ...out, timer: { ...out.timer, stale: false } }), /timer/);
+  const p = R.promptText({ name: 'general' });
+  for (const s of ['channels routine report general <run id> ok --note', '--run <run id>', 'channels routine runs general [<routine>] --json', 'failing', 'overdue', '--note "<why>"']) assert.ok(p.includes(s), s);
 });
