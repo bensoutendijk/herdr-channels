@@ -109,11 +109,19 @@ export const startTurn = (c, threadId, text) => c.call('turn/start', { threadId,
 // updatedAt and session file (`path`), without its turns.
 export const readThread = async (c, threadId) => (await c.call('thread/read', { threadId })).thread;
 // Loads a thread the daemon unloaded, and subscribes this connection to it: a pending approval is sent to it again.
-export const resumeThread = async (c, threadId) => (await c.call('thread/resume', { threadId })).thread;
+// `extra`: settings the thread takes from now on (a chat's developerInstructions, rebuilt at each launch).
+export const resumeThread = async (c, threadId, extra = {}) => (await c.call('thread/resume', { threadId, ...extra })).thread;
 // A message that runs once the current turn ends. Codex wants an id of the client's own for each one.
 export const queueMessage = (c, threadId, text) => c.call('thread/queue/add', { threadId, clientUserMessageId: randomUUID(), input: textInput(text) });
 export const queuedMessages = async (c, threadId) => (await c.call('thread/queue/list', { threadId })).data ?? [];
 export const listThreads = async (c, params = {}) => (await c.call('thread/list', params)).data ?? [];
+// Changes a thread's settings from its next turn on (approvalsReviewer, say).
+export const updateThreadSettings = (c, threadId, settings) => c.call('thread/settings/update', { threadId, ...settings });
+// Context the thread's next turn sees, as a developer message, starting no turn (a chat's ride-along news while its
+// hook isn't trusted).
+export const injectNote = (c, threadId, text) => c.call('thread/inject_items', { threadId, items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text }] }] });
+// The hooks the server runs, each with its command and `trustStatus` ('trusted', 'untrusted', …).
+export const listHooks = async (c) => ((await c.call('hooks/list', {})).data ?? []).flatMap((x) => x.hooks ?? []);
 
 // The requests a thread waits on the user for, which Codex sends to a client that subscribes to it (resumeThread),
 // also to one that connects after the request was made. Collected for up to `ms` after subscribing; nothing is

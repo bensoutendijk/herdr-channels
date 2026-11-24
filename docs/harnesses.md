@@ -19,6 +19,31 @@ marks only the non-Claude rows of a mixed channel; and the panel's New Codex ses
 (`start --empty`) opened with `codex resume`. Checked live with a real model in `dev/sandbox`, and on a remote-control
 paired daemon (risk 8, below).
 
+Phase 3, a Codex chat, is built too (§4): `channels harness <channel> --chat codex` and the channel menu's **Chat runs
+on**; the chat's own `codex app-server`, Codex's TUI attached to it, and the listener as a third client; notices,
+wakes and routines as turns (queued behind one that runs), after the same notice gate and judge as a Claude Code
+chat; the ride-along hook, its review answered once by the listener, `thread/inject_items` until it is trusted;
+refresh, Refresh all chats and the Codex version in the Refresh row; and the chat's prompt worded per harness.
+Differences from §4, from the runs on 2026-11-24 (mock and a real model in `dev/sandbox`):
+- **A thread with no turn can't be resumed** by a fresh TUI (no session file yet, "no rollout found"). The chat
+  starts its thread over its own client, which stays subscribed, so the thread is still loaded when the TUI resumes
+  it. A recorded thread that can't be resumed is replaced by a new one.
+- **Codex's automatic reviewer answers the chat's sandbox requests** (`approvalsReviewer: auto_review`, set on the
+  thread). With a real model, `channels start` asked twice under Codex's defaults (once to leave the sandbox, once
+  to write its stdin), and the model didn't suggest a short prefix rule; with the reviewer, `channels list` and
+  `rename-task` ran without asking. What the reviewer finds risky still asks the user.
+- **The hook's command is the same text everywhere** (`"$CHANNELS_NODE" "$CHANNELS_SCRIPT" pending
+  "$CHANNELS_CHANNEL" --hook`), with the values in the chat server's environment, so the trust Codex records holds
+  for every chat and every version. The hook also runs on turns started over the server (a notice, a routine), so
+  what waits rides along with those too.
+- **The prompt's draft** is told from Codex's placeholder by the key hint under it ("? for shortcuts" shows only while
+  the prompt is empty). Codex's placeholder varies, and reads like text on the screen.
+- **Switching back** to the other harness resumes that harness's earlier chat (`chat_was` in the store), rather than
+  always starting a new one.
+- **Task cards**: none, as planned. In a Codex chat a waiting task shows in the panel and the sidebar's dot, a
+  question in a turn the chat asked for is a notice, and a prompt or approval rides along; the chat answers with
+  `channels send` or `channels approve` when told to.
+
 It was checked on 2026-11-22 against Codex CLI 0.171.0 (the current release) and Claude Code 2.1.330, on macOS,
 in two rounds. The first ran Codex in a sandbox `HOME` against a small local stand-in for the OpenAI Responses API
 that answers with scripted turns. That covered everything around the model: sessions, the daemon, approvals,
@@ -532,9 +557,9 @@ The owner's answers to the four questions the real run left open (2026-11-22):
 
 | Phase | Size | Delivers |
 | --- | --- | --- |
-| 1. The seam | S (1–2 days) | `bin/harness/claude.mjs` with everything Claude Code-specific from `bin/channels.mjs`, behind the interface; the listener and `list` go through it; cloud becomes the Claude harness's placement. No behaviour change: the existing tests pass unchanged, plus tests for the interface |
-| 2. Codex tasks | M–L (4–6 days) | `bin/harness/codex.mjs`, `bin/codex-rpc.mjs` (seeded by `dev/codex-rpc.mjs`); `channels start --harness codex` with the question rule and the `CLAUDE.md` fallback, read, send (queued while working), rename, file, dismiss; events and cards in the Claude Code chat; approval cards with Allow / Deny, answered by the listener's client; the panel's standing, harness mark and New session menu; `install.mjs --codex`; `harnesses` in `capabilities` and `list`; terminal mode as the fallback; a README section, and screenshots per the repo's rule |
-| 3. A Codex chat | M (2–3 days) | The per-chat app-server; notices by `turn/start` and the queue; the ride-along hook, its trust prompt answered once by the listener (and `thread/inject_items` until then); routines queued; refresh for a Codex chat; the chat's prompt worded per harness; `channels harness <channel> --chat`, and the channel menu's choice |
+| 1. The seam (**shipped**, v1.7.1) | S (1–2 days) | `bin/harness/claude.mjs` with everything Claude Code-specific from `bin/channels.mjs`, behind the interface; the listener and `list` go through it; cloud becomes the Claude harness's placement. No behaviour change: the existing tests pass unchanged, plus tests for the interface |
+| 2. Codex tasks (**shipped**, v1.8.0) | M–L (4–6 days) | `bin/harness/codex.mjs`, `bin/codex-rpc.mjs` (seeded by `dev/codex-rpc.mjs`); `channels start --harness codex` with the question rule and the `CLAUDE.md` fallback, read, send (queued while working), rename, file, dismiss; events and cards in the Claude Code chat; approval cards with Allow / Deny, answered by the listener's client; the panel's standing, harness mark and New session menu; `install.mjs --codex`; `harnesses` in `capabilities` and `list`; terminal mode as the fallback; a README section, and screenshots per the repo's rule |
+| 3. A Codex chat (**shipped**, v1.12.0) | M (2–3 days) | The per-chat app-server; notices by `turn/start` and the queue; the ride-along hook, its trust prompt answered once by the listener (and `thread/inject_items` until then); routines queued; refresh for a Codex chat; the chat's prompt worded per harness; `channels harness <channel> --chat`, and the channel menu's choice |
 | 4. The hub | M (2–3 days, its own repo) | §7's list, in the server's command; `capabilities` says `harnesses` once it's done |
 | 5. Later, as wanted | S each | Codex Cloud as a cloud placement; "Pair with the Codex app"; Codex's `request_user_input` answered from a card |
 
