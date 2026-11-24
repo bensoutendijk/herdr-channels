@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.13.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.13.0...v1.13.1) (2026-11-24)
+
+### Bug Fixes
+
+* A finished task is continued in place by send, and a copy says why ([#60](https://github.com/bensoutendijk/herdr-channels/issues/60)) ([927061d](https://github.com/bensoutendijk/herdr-channels/commit/927061dad05b7c35f5b49363fd554faf32cb216a))
+
 ## [1.13.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.12.0...v1.13.0) (2026-11-24)
 
 ### Features
