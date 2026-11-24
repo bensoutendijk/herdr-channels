@@ -80,12 +80,14 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 // - routine-status: `status` ({ state, words, at }) and `paused` on each routine, `last.waiting` as { why, since },
 //   and `timer` ({ last_tick_at, stale, hint }) in the list
 // - routine-by: `routine run|on|off|edit … --by <who>`, so the store says who asked
+// - routine-runs: the run ledger: `routine runs <channel> <name> --json` (the History view), each routine's health in
+//   its status (failing, overdue, running, failed, unreported, undelivered), `paused.note`, `routine off … --note`
 // - harnesses: tasks on more than one coding agent (Claude Code, Codex): `harnesses` in the list and in capabilities,
 //   `harness`, `standing` and `caps` on a task not on Claude Code, `harness` on each channel, `start --harness`,
 //   `harness <channel> --tasks`, `approve <task> allow|deny`
 // - send-by: `send <task> --by user`, a message the user sent from the panel: the chat doesn't hear how that turn ends
 // - gate: the notice gate: `viewing <task>|--none` and `notify <channel>`
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "harnesses", "refresh-all", "send-by", "gate", "chat-harness"];
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "routine-runs", "harnesses", "refresh-all", "send-by", "gate", "chat-harness"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
@@ -163,20 +165,51 @@ export function catchupRule(on, at, until) {
 }
 
 // A routine's status (the store's `status`: { state, words, at }, routine-status) as a colour: "blocked" when it needs a
-// look (missed, broken), "working" for a run that has waited a while or says why it waits, else null.
-export function statusTint(r, now = Date.now()) {
+// look (failing, overdue, broken; a missed run too, from a store without the run ledger), "working" for one run that
+// went badly (routine-runs) or a run that has waited a while or says why it waits, else null.
+export function statusTint(r, now = Date.now(), { ledger = false } = {}) {
   const st = r?.status;
   if (!st || !r.enabled) return null;
-  if (st.state === "missed" || st.state === "broken") return "blocked";
+  if (st.state === "failing" || st.state === "overdue" || st.state === "broken") return "blocked";
+  if (st.state === "missed") return ledger ? "working" : "blocked";
+  if (st.state === "failed" || st.state === "unreported" || st.state === "undelivered") return "working";
   if (st.state === "waiting" && (r.last?.waiting || (st.at && now - Date.parse(st.at) > 10 * 60000))) return "working";
   return null;
 }
 
+// The health chip a routine's row shows before its status words (routine-runs): { label, tint, words } with the
+// words left once the chip says the state, or null for a routine whose words say it all.
+export function healthChip(status) {
+  const st = status?.state;
+  const chip = { failing: ["Failing", "blocked"], overdue: ["Overdue", "blocked"], running: ["Running", "accent"] }[st];
+  if (!chip) return null;
+  // Failing's words lose their reason here (the row is short; the tooltip and History have it).
+  let words = `${status.words ?? ""}`.replace(/^(Failing · |Overdue: |Running )/, "");
+  if (st === "failing") words = words.replace(/: .*$/, "");
+  return { label: chip[0], tint: chip[1], words: st === "running" ? words.replace(/^since/, "Since") : words.charAt(0).toUpperCase() + words.slice(1) };
+}
+
+// A run's state (`routine runs --json`) as the History view's pill: its label and colour token.
+export function runPill(state) {
+  return {
+    queued: ["Waiting", "dim"], delivered: ["Running", "accent"], ok: ["Ok", "ansi2"], failed: ["Failed", "blocked"],
+    unreported: ["No report", "working"], undelivered: ["Undelivered", "working"], missed: ["Missed", "working"], cancelled: ["Cancelled", "dim"],
+  }[state] ?? [state ?? "", "dim"];
+}
+
+// A run's length in a few words, from `duration_min`: "2 min", "1 h 5 min", "" when it has none.
+export function runLength(min) {
+  if (min == null || !Number.isFinite(min)) return "";
+  if (min < 1) return "<1 min";
+  if (min < 60) return `${min} min`;
+  return `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ""}`;
+}
+
 // The sidebar clock's tint for a channel: the most urgent of its routines' (statusTint), and the routine that gives it.
-export function routineTint(routines = [], now = Date.now()) {
+export function routineTint(routines = [], now = Date.now(), opts = {}) {
   let out = null;
   for (const r of routines) {
-    const tint = statusTint(r, now);
+    const tint = statusTint(r, now, opts);
     if (tint === "blocked") return { tint, routine: r };
     if (tint && !out) out = { tint, routine: r };
   }

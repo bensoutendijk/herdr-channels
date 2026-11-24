@@ -837,13 +837,13 @@ routines with their next and last runs. With none yet, it offers three starters 
 weekly review, an end-of-day check) that open the editor filled in. You can add, edit or delete a routine, switch it on or off,
 and **Run now** queues its prompt for the chat at once without changing the schedule (on a routine
 that is off, the button says **Run once**). Its row says **Queued for the chat…** until the chat has
-it, then **Delivered** with the time. Switching a routine off drops a scheduled run of it that was
+it, then **Running** until the chat reports how it went, then **Done** with the time and its note. Switching a routine off drops a scheduled run of it that was
 still waiting for the chat; a run you asked for with Run now stays. Each row says where the routine
 stands, in the same words as `channels routine list`: **Waiting 14 min: the chat's terminal didn't
 take it** when a run can't reach the chat yet, **Skipped 09:00: this Mac was asleep until 11:40
 (catch-up 1 hour)** for a run that came too late, **Off since Mon · switched off by you**. The
-small clock in the sidebar turns red while a routine's last run was missed (or its schedule doesn't
-read) and amber while a run is stuck waiting; hovering it says which. You can also ask the chat
+small clock in the sidebar turns red while a routine is failing or overdue (or its schedule doesn't
+read) and amber after one bad run or while a run is stuck waiting; hovering it says which. You can also ask the chat
 ("every weekday at 9, ask me for my plan"): it sets the routine up with `channels routine add`.
 A request no schedule fits ("every 90 minutes") gets the nearest one that does, and the chat says
 what it chose. Something once ("remind me at 3 tomorrow") becomes a routine on that date that
@@ -862,8 +862,42 @@ Added a routine to #general:
   To change: ask in #general's chat, or open Routines in #general's menu (channels routine edit general morning-plan …)
 ```
 
-Ask the chat why a routine didn't run and it reads `channels routine list --json`: whether the
-routine was off, and whether its last run was queued, delivered, missed or skipped, and when.
+Ask the chat why a routine didn't run and it reads `channels routine list --json` and
+`channels routine runs --json`: whether the routine was off, and how each run went, and when.
+
+**Run history and health.** Every run is recorded in the channel's run ledger (`runs` in
+`channels.json`): when it was due, queued, delivered and over, how late it was, what started it (the
+schedule or Run now, and who asked), its outcome, the chat's one-line note and the tasks it started.
+A run's message ends by asking the chat to report back when it's done (or has started the tasks that
+will do it): `channels routine report <channel> <run-id> ok --note "<one line>"`, or `failed --note
+"<why>"`. A task the chat starts for a run with `channels start … --run <run-id>` is listed on it.
+The outcome is one of:
+
+| Outcome | Means |
+|---|---|
+| ok, failed | the chat reported it (a late report on a run that had counted as no report is taken, and marked late) |
+| no report | the chat said nothing within the routine's grace time (30 minutes unless `--grace` says otherwise); with tasks tied to it, the run waits for them (up to 12 hours) and takes their outcome instead |
+| undelivered | it couldn't reach the chat within the grace time (the error says why); it is still typed in when the chat can take it |
+| missed | it came due while the Mac was asleep or off, outside its catch-up window |
+| cancelled | it was waiting when the routine was switched off or deleted |
+
+Each tick checks the open runs. When the gap since the last tick is over 5 minutes, the Mac slept,
+and every open run's deadline moves on by the gap, so sleep never turns a run into "no report". The
+newest 30 runs of each routine are kept, including a deleted routine's (shown as deleted).
+
+From the ledger each routine gets a health, shown as a chip in the Routines dialog: **Failing** when
+its last two finished runs (`--fail-after`) went badly (failed, no report, undelivered or missed), with
+how many in a row and since when; **Overdue** when a time it was due passed over 3 minutes ago with
+no run, so the timer didn't fire; **Running** while the chat has a run and hasn't reported. Otherwise
+the row says how the last run went: **Done 09:00 · 2 min: Nothing needs you**. Click a routine to
+open its **History**: each run's due time, outcome, how long it took, what the chat said (hover for
+all of it), and the tasks it started (click one to open it). `channels routine runs` prints the same,
+newest first, and `--json` gives the records. Switching a routine off can say why, `routine off
+<channel> <name> --note "On holiday until Dec 2"` (the chat passes your reason on), and the dialog shows
+the note until the routine is switched on again.
+
+<img src="docs/routines-history.png" width="480" alt="The History of the morning-check routine in #website, marked Failing, 2 in a row since Mon 09:00. Its runs: Today 09:00, No report, the chat didn't report back within 30 min; Yesterday 09:00, Failed, 6 min, The staging deploy is red; Fri 09:00, 42 min late, Ok, 3 min, Staging is green; Thu 09:00, Missed, This Mac was asleep at the time; Nov 18, Ok, 4 min, One flaky test on main, with the task fix-flaky-checkout-test; Nov 17, Ok, 2 min">
+<img src="docs/routines-health.png" width="420" alt="The Routines dialog for #website: morning-check with a red Failing chip, 2 in a row since Mon 09:00; inbox-sweep with a Running chip, since 21:16, 1 task; dep-updates, Done Fri 16:00, 9 min, Opened a PR; and release-notes, off since Mon, switched off by the chat, On holiday until Dec 2">
 
 In the editor, the name fills itself from the prompt's first words until you type one. A problem
 shows under the field it is about, and Create stays dimmed with the reason (Needs a name, Needs a
@@ -873,8 +907,7 @@ runs on wake until 10:00, else it's skipped") and the time zone.
 
 <img src="docs/routines-editor.png" width="480" alt="Editing the nightly-digest routine: Cron is picked with the line 30 2 * * 0,3,5, the catch-up window is 1 hour, and the lines at the bottom say Wed, Fri, Sun at 02:30. Next Wed 02:30, then Fri 02:30; If the Mac sleeps through 02:30, it runs on wake until 03:30, else it's skipped. Times are this Mac's (Europe/Amsterdam); and a warning that 02:30 doesn't happen on Mar 28, 2027 (the clocks go forward), so that run is skipped">
 
-<img src="docs/routines.png" width="420" alt="The Routines dialog for the #website channel with four routines: morning-plan, Weekdays at 09:00, next Tomorrow 09:00, Delivered 22:51 · run now; inbox-sweep, Every hour at :15, switched off, Off since 22:50 · switched off by you; nightly-digest, Wed, Fri, Sun at 02:30, next Wed 02:30, Never run; and release-notes, Only when you run it, Never run. The footer says times are this Mac's local time (Europe/Amsterdam)">
-<img src="docs/routines-status.png" width="420" alt="The Routines dialog for #general with a line at the top: The routines timer hasn't run since 23:00, so routines won't come due, and the command to start it again. Below it standup, Every day at 09:00, with its status in red: Skipped 09:00: this Mac was asleep; morning-plan, Never run; and inbox-sweep, Off since 23:00 · switched off by you">
+<img src="docs/routines-status.png" width="420" alt="The Routines dialog for #general with a line at the top: The routines timer hasn't run since 21:24, so routines won't come due, and the command to start it again. Below it standup, Every day at 09:00, with its status in amber: Skipped 09:00: this Mac was asleep; morning-plan, Never run; and inbox-sweep, Off since 21:24 · switched off by you">
 <img src="docs/routines-empty.png" width="420" alt="The Routines dialog for #general with no routines yet: a line on what a routine does and whose clock it keeps, three starters to click (morning-plan, Weekdays at 09:00; weekly-review, Fridays at 16:00; end-of-day, Weekdays at 17:30), each with its prompt, and below them: or ask the chat, every weekday at 9, ask me for my plan">
 
 **Schedules** use the Mac's local time:
@@ -925,8 +958,8 @@ and once when the Mac wakes. Each tick records every run that is due in the stor
 sent, under the store's lock, so two ticks at once can never fire a routine twice. It then queues the
 prompt for the chat, and the chat's listener types it in. What the tick does is logged in `tick.log`
 in the store, and each tick leaves its heartbeat in `tick.json` (when, on what version, what it did).
-When that is more than 5 minutes old, the Routines dialog says the timer hasn't run since then, with
-the command that starts it again. Check that the timer is loaded with
+When that is more than 5 minutes old, the Routines dialog and `channels routine list` say the timer
+hasn't run since then, with the command that starts it again. Check that the timer is loaded with
 `launchctl print gui/$(id -u)/dev.herdr-channels.tick`.
 
 `--by` on `routine run`, `on` and `off` records who asked (`dialog`, `chat`, `cli`, or `you`): a
@@ -973,17 +1006,21 @@ channels notices <channel id>
 channels open <session>
 channels chat <channel> --bg [--json]
 channels routine list [<channel>] [--json]
-channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] [--dry-run] <prompt | ->
-channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--dry-run]
+channels routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--grace <time>] [--fail-after <n>] [--off] [--dry-run] <prompt | ->
+channels routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--grace <time>] [--fail-after <n>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--note <why>] [--dry-run]
 channels routine rm <channel> <name>
-channels routine run|on|off <channel> <name> [--by <who>]
+channels routine run|on|off <channel> <name> [--by <who>] [--note <why>]
+channels routine runs <channel> [<name>] [--limit <n>] [--json]
+channels routine report <channel> <run-id> ok|failed [--note <text | ->]
 channels routine preview <schedule> [--json]
 channels refresh [--auto] [--all] [--json]
 channels update [--check] [--bg] [--json]
 channels tick
 ```
 
-A catch-up window is a number of minutes or a length such as `15m`, `2h` or `1d`. `channels chat
+A catch-up window is a number of minutes or a length such as `15m`, `2h` or `1d`; a grace time is
+minutes or `15m`, `2h` (up to 12 hours), and `0` means a run is done once it is delivered.
+`channels start … --run <run-id>` ties the new task to a routine run (see [Routines](#routines)). `channels chat
 <channel> --bg` makes sure the chat runs in its herdr-core terminal and prints that terminal.
 `channels routine preview` shows a schedule in words with its next three runs, or what is wrong
 with it.
