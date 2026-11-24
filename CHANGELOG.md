@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.12.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.11.0...v1.12.0) (2026-11-24)
+
+### Features
+
+* A channel's chat can run on Codex ([#56](https://github.com/bensoutendijk/herdr-channels/issues/56)) ([1f3e935](https://github.com/bensoutendijk/herdr-channels/commit/1f3e935c5bc1cccf0966d48deb2ce27f5270d5d4))
+
 ## [1.11.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.10.0...v1.11.0) (2026-11-23)
 
 ### Features
