@@ -546,13 +546,25 @@ export async function chatConnect(socket, { waitMs = 20_000, sleep = (ms) => new
   }
 }
 
-// The chat's thread: the one recorded, loaded again and given this launch's prompt; else a new one, named #<channel>.
-// The client stays subscribed, which keeps the thread loaded until Codex's TUI resumes it. Answers { thread, fresh }.
+// The chat runs with Codex's own defaults (the workspace-write sandbox, asking before it leaves it), with Codex's
+// automatic reviewer answering those requests (as `--permission-mode auto` does for a task): `channels` works outside
+// the chat's folder, in the channels store and the sessions it starts, so every call of it leaves the sandbox, and a
+// person asked twice per call would soon stop reading. What the reviewer finds risky still comes to the user.
+export const CHAT_SETTINGS = { approvalsReviewer: 'auto_review' };
+
+// The chat's thread: the one recorded, loaded again and given this launch's prompt and settings; else a new one, named
+// #<channel>. The client stays subscribed, which keeps the thread loaded until Codex's TUI resumes it. Answers
+// { thread, fresh }.
 export async function chatThread(c, { threadId, cwd, prompt, name }) {
   if (threadId) {
-    try { return { thread: await rpc.resumeThread(c, threadId, { developerInstructions: prompt }), fresh: false }; } catch { /* never used, or gone: a new one */ }
+    let thread = null;
+    try { thread = await rpc.resumeThread(c, threadId, { developerInstructions: prompt }); } catch { /* never used, or gone: a new one */ }
+    if (thread) {
+      await rpc.updateThreadSettings(c, threadId, CHAT_SETTINGS).catch(() => null);
+      return { thread, fresh: false };
+    }
   }
-  const thread = await rpc.startThread(c, { cwd, developerInstructions: prompt });
+  const thread = await rpc.startThread(c, { cwd, developerInstructions: prompt, ...CHAT_SETTINGS });
   await rpc.setThreadName(c, thread.id, name);
   await rpc.resumeThread(c, thread.id).catch(() => null);
   return { thread, fresh: true };

@@ -115,6 +115,8 @@ export const resumeThread = async (c, threadId, extra = {}) => (await c.call('th
 export const queueMessage = (c, threadId, text) => c.call('thread/queue/add', { threadId, clientUserMessageId: randomUUID(), input: textInput(text) });
 export const queuedMessages = async (c, threadId) => (await c.call('thread/queue/list', { threadId })).data ?? [];
 export const listThreads = async (c, params = {}) => (await c.call('thread/list', params)).data ?? [];
+// Changes a thread's settings from its next turn on (approvalsReviewer, say).
+export const updateThreadSettings = (c, threadId, settings) => c.call('thread/settings/update', { threadId, ...settings });
 // Context the thread's next turn sees, as a developer message, starting no turn (a chat's ride-along news while its
 // hook isn't trusted).
 export const injectNote = (c, threadId, text) => c.call('thread/inject_items', { threadId, items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text }] }] });

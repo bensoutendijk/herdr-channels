@@ -77,6 +77,7 @@ export async function fakeCodex({ socket, codexHome, hooks = [] }) {
         return reply({ thread: view(t) });
       }
       case 'thread/name/set': if (!th) return err('no such thread'); th.name = p.name; return reply({});
+      case 'thread/settings/update': if (!th) return err('no such thread'); th.settings = { ...(th.settings ?? {}), ...p }; return reply({});
       case 'thread/read': return th ? reply({ thread: view(th) }) : err(`thread not found: ${p.threadId}`);
       case 'thread/list': return reply({ data: [...threads.values()].map(view), nextCursor: null });
       case 'thread/resume':

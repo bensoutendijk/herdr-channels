@@ -65,7 +65,7 @@ test('harness --chat: the channel\'s chat runs on Codex; list says so; Codex off
   const s = setup(t);
   await s.ok(['create', 'site']);
   assert.match(await s.ok(['harness', 'site']), /tasks run on Claude Code \(the default\); its chat runs on Claude Code \(the default\)/);
-  assert.match(await s.ok(['harness', 'site', '--chat', 'codex']), /#site's chat now runs on Codex: a new session on Codex/);
+  assert.match(await s.ok(['harness', 'site', '--chat', 'codex']), /#site's chat now runs on Codex\.$/m);
   assert.deepEqual(JSON.parse(await s.ok(['harness', 'site', '--json'])), { channel: 'site', tasks: 'claude', chat: 'codex' });
   // Setting the tasks' harness leaves the chat's.
   await s.ok(['harness', 'site', '--tasks', 'codex']);
@@ -105,6 +105,7 @@ test('a Codex chat: its own server with the chat\'s prompt and the hook, a threa
   assert.equal(threads[0].name, '#site');
   assert.equal(threads[0].params.cwd, s.projects);
   assert.match(threads[0].params.developerInstructions, /You are the standing chat of the channel #site/);
+  assert.equal(threads[0].params.approvalsReviewer, 'auto_review', 'Codex\'s reviewer answers its requests to leave the sandbox');
   assert.equal(existsSync(join(s.dir, `chat-${c.id}.json`)), false, 'the chat\'s record goes when it ends');
   await until(() => !existsSync(socket));
 });
@@ -247,7 +248,7 @@ test('the chat\'s prompt names its harness; a Codex chat has no cards, and runs 
     assert.doesNotMatch(codexP, /card above|<channel source=|Tell chat|Bash/);
     assert.match(codexP, /This chat has no task cards: the tasks panel marks the task as waiting/);
     assert.match(codexP, /a message opening with "\[task notice\]" \(sent by the channels listener, not typed by the user\)/);
-    assert.match(codexP, /outside the sandbox: ask for escalated permissions, and suggest the prefix rule \["channels"\]/);
+    assert.match(codexP, /outside the sandbox: ask for escalated permissions/);
     assert.match(codexP, /`channels approve <session> allow\|deny` answers it/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -1289,7 +1289,7 @@ export function chatPrompt(dir, name, { projects = projectsDir(), harness = DEFA
       ? `The channel's description, as it read when this chat launched. It is to the channel what a CLAUDE.md is to a repo:\n<channel-description>\n${description}\n</channel-description>`
       : `#${name} has no description yet.`,
     '',
-    cx ? 'Work with the channel through `channels`, run in your shell. It works outside this folder (the channels store, and the sessions it starts), so run every `channels` command outside the sandbox: ask for escalated permissions, and suggest the prefix rule ["channels"] so the user can allow it once for good.'
+    cx ? 'Work with the channel through `channels`, run in your shell. It works outside this folder (the channels store, and the sessions it starts), so run every `channels` command outside the sandbox: ask for escalated permissions (Codex\'s reviewer answers those requests).'
       : 'Work with the channel through `channels` (run it with Bash):',
     `- \`channels list ${name}\`: the channel's tasks. A task is one Claude Code background session on this Mac, named ${LOCAL}/<session id>.`,
     `- \`channels start ${name} [--repo <project>] [--name <short name>] [--wake-on finish|question|any] -\`, with the brief on stdin: when something the user and you discuss becomes real work, start a task for it with a brief that stands on its own: what to do and why, what is already decided, and what done looks like. The task gets only its brief; it doesn't see this chat or the description. The user then talks to the task directly in the channel's tasks panel: you aren't a go-between unless they ask.`,
@@ -3131,7 +3131,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       if (chatOn && chatOn.id !== DEFAULT_HARNESS && !(await chatOn.installed({ dir, deps }).catch(() => null))) fail(`${chatOn.label} isn't installed here (\`${deps.codex} --version\` gave nothing), so #${name}'s chat can't run on it.`);
       const { now, was } = updateStore(dir, (store) => {
         const c = channelOf(store, name, { archived: true });
-        const before = show(c);
+        const before = { ...show(c), had: Boolean(c.chat) };
         const h = { ...(c.harness ?? {}) };
         if (tasks) { if (tasks.id === DEFAULT_HARNESS) delete h.tasks; else h.tasks = tasks.id; }
         if (chatOn) { if (chatOn.id === DEFAULT_HARNESS) delete h.chat; else h.chat = chatOn.id; }
@@ -3152,7 +3152,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       if (tasks) lines.push(`#${name}'s tasks now run on ${tasks.label}, unless a start says otherwise (--harness).`);
       if (chatOn) {
         lines.push(was.chat === now.chat ? `#${name}'s chat already runs on ${chatOn.label}.`
-          : `#${name}'s chat now runs on ${chatOn.label}: a new session on ${chatOn.label} (the ${words(was.chat)} one is kept, and comes back if you switch again).${restart === 'restarted' ? ' It restarted.' : restart ? ' It restarts once its turn is over and its prompt is empty.' : ''}`);
+          : `#${name}'s chat now runs on ${chatOn.label}${was.had ? ` (the ${words(was.chat)} session is kept, and comes back if you switch again)` : ''}.${restart === 'restarted' ? ' It restarted.' : restart ? ' It restarts once its turn is over and its prompt is empty.' : ''}`);
       }
       console.log(lines.join('\n'));
       return 0;
