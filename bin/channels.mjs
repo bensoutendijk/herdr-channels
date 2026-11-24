@@ -1082,8 +1082,8 @@ async function send({ dir, deps, ref, text, wake = null, by = 'chat' }) {
   }
   const copyId = sent.copy_session_id ?? null;
   const copyRef = `${LOCAL}/${copyId ?? `job:${woke}`}`;
-  const out = { id: s.session_id, machine: LOCAL, delivered_as: 'copy_started', job: woke, copy: { id: copyRef, session_id: copyId, job: woke }, filed_in: null };
-  const head = `Claude Code didn't continue ${LOCAL}/${s.session_id}: it started a copy of it, ${copyRef} (job ${woke}), and the message went to the copy.`;
+  const out = { id: s.session_id, machine: LOCAL, delivered_as: 'copy_started', job: woke, copy: { id: copyRef, session_id: copyId, job: woke }, why: sent.why ?? null, filed_in: null };
+  const head = `Claude Code didn't continue ${LOCAL}/${s.session_id}: it started a copy of it, ${copyRef} (job ${woke}), and the message went to the copy.${sent.why ? ` ${sent.why}` : ''}`;
   if (!filed || filed.archived) return { ...out, note: `${head} The original isn't a task in an open channel, so the copy wasn't filed anywhere.${copyRemoteNote()}` };
   const was = filed.task;
   const task = {

@@ -72,7 +72,9 @@ export function readLive(home) {
   for (const f of files) {
     const s = readJson(join(dir, f));
     if (!s?.sessionId || !Number.isInteger(s.pid) || !alive(s.pid)) continue;
-    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null, bridge: s.bridgeSessionId ?? null, version: s.version ?? null });
+    // Another process can hold the same session (someone has it open in a terminal): the job's own process wins.
+    if (out.get(s.sessionId)?.job && !s.jobId) continue;
+    out.set(s.sessionId, { pid: s.pid, status: s.status ?? null, waitingFor: s.waitingFor ?? null, name: s.name ?? '', nameSource: s.nameSource ?? null, job: s.jobId ?? null, cwd: s.cwd ?? null, bridge: s.bridgeSessionId ?? null, version: s.version ?? null, kind: s.kind ?? null });
   }
   return out;
 }
@@ -580,7 +582,7 @@ async function typeIntoView({ deps, ref, jobId, sid, job, body }) {
 // stopped, as that would stop the work: the message is typed into its view instead (typeIntoView). A session still
 // working, or showing a dialog, isn't interrupted; one that isn't a background job can't be reached.
 // Answers { delivered_as: 'resumed', job }, { delivered_as: 'typed', job } or { delivered_as: 'copy_started', job,
-// copy_session_id }: a copy is Claude Code's own doing, and the caller files it.
+// copy_session_id, why }: a copy is Claude Code's own doing (why says what it and send saw), and the caller files it.
 export async function send({ deps, facts: { s, job, live, st }, body, machine, stopWaitMs }) {
   const ref = `${machine}/${s.session_id}`;
   if (!job && !s.job) fail(`${ref} isn't a background session, so a message can't reach it: continue it where it runs.`);
@@ -590,15 +592,34 @@ export async function send({ deps, facts: { s, job, live, st }, body, machine, s
   // Its turn is over but background work it started still runs: stopping it would stop that work, and resuming a
   // session whose process runs starts a copy. So the message is typed into its view, as the user would.
   if (live && st.state === 'waiting_on_job') return typeIntoView({ deps, ref, jobId, sid: s.session_id, job, body });
-  if (live) {
+  const secs = `${Math.round(stopWaitMs / 100) / 10}s`;
+  // The job's own process, to stop: not someone's interactive Claude Code that has the session open.
+  const own = live?.kind === 'interactive' ? null : live;
+  if (own) {
     const stop = await deps.run(deps.claude, ['stop', jobId], { cwd: deps.home, env: cleanEnv(), timeout: 60_000 });
     if (stop.code !== 0) fail(`Couldn't stop ${jobId} to wake it: ${cut(oneLine(stop.err || stop.out || 'no output'), 240)}`);
-    if (!(await exited(deps, live.pid, stopWaitMs))) {
-      fail(`${machine}/${s.session_id} was told to stop, but its process (pid ${live.pid}) still runs after ${Math.round(stopWaitMs / 100) / 10}s. The message wasn't sent and nothing was started, since resuming it now would start a copy. Send it again in a moment.`);
+    if (!(await exited(deps, own.pid, stopWaitMs))) {
+      fail(`${ref} was told to stop, but its process (pid ${own.pid}) still runs after ${secs}. The message wasn't sent and nothing was started, since resuming it now would start a copy. Send it again in a moment.`);
     }
   }
-  const r = await deps.run(deps.claude, ['--bg', '--resume', s.session_id, body], { cwd: job?.cwd || s.cwd || deps.projects, env: cleanEnv(), timeout: 90_000 });
-  const woke = (/backgrounded · (\S+)/.exec(`${r.out}${r.err}`) || [])[1];
+  // Claude Code starts a copy when any background process of its own still holds the session, not only the one
+  // stopped above (issue #58): another record of the session, or a worker its daemon still lists. Those are waited
+  // for too, as long as the stop was.
+  const left = await released(deps, s.session_id, stopWaitMs);
+  if (left.length) {
+    fail(`${ref} still has a Claude Code background process after ${secs} (${left.map(holderLine).join('; ')}). The message wasn't sent and nothing was started, since resuming it now would start a copy. Send it again in a moment.`);
+  }
+  // Resumed from the folder the session last worked in, as its transcript says (a worktree it moved into, say),
+  // which is where Claude Code keeps its transcript; the folder it started in when that one is gone.
+  const file = job?.transcript && existsSync(job.transcript) ? job.transcript : findTranscript(deps.home, s.session_id);
+  const worked = transcriptCwd(file);
+  const cwd = [worked, own?.cwd, job?.cwd, s.cwd].find((d) => d && existsSync(d)) || deps.projects;
+  // The message goes after `--`: a message that starts with "-" would otherwise be read as options, and a resume
+  // with options of its own starts a copy (and drops the message).
+  const before = { stillRan: Boolean(own && alive(own.pid)), others: holders(deps.home, s.session_id) };
+  const r = await deps.run(deps.claude, ['--bg', '--resume', s.session_id, '--', body], { cwd, env: cleanEnv(), timeout: 90_000 });
+  const said = `${r.out}\n${r.err}`;
+  const woke = (/backgrounded · (\S+)/.exec(said) || [])[1];
   if (!woke) fail(`The session didn't resume: ${cut(oneLine(r.err || r.out || 'no output'), 240)}`);
   if (woke === jobId) return { delivered_as: 'resumed', job: woke };
   // A copy: a new session with the same history and the message as its next turn. Its session id is written a
@@ -608,7 +629,81 @@ export async function send({ deps, facts: { s, job, live, st }, body, machine, s
     copyId = jobState(deps.home, woke)?.sessionId ?? null;
     if (!copyId) await deps.sleep(300);
   }
-  return { delivered_as: 'copy_started', job: woke, copy_session_id: copyId };
+  return { delivered_as: 'copy_started', job: woke, copy_session_id: copyId, why: copyWhy({ said, live: own, ...before, cwd, worked }) };
+}
+
+// The folder a session last worked in, from its transcript: each line records the session's folder at the time, and
+// it changes when the session moves into a worktree. null when the transcript doesn't say.
+export function transcriptCwd(file) {
+  if (!file) return null;
+  let text;
+  try {
+    const fd = openSync(file, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const len = Math.min(size, TURN_TAIL);
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally { closeSync(fd); }
+  } catch { return null; }
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"cwd"')) continue;
+    let r;
+    try { r = JSON.parse(lines[i]); } catch { continue; }
+    if (r && !r.isSidechain && typeof r.cwd === 'string' && r.cwd) return r.cwd;
+  }
+  return null;
+}
+
+// The Claude Code processes that hold a session, as Claude Code itself counts them before a resume: every live
+// record of the session (~/.claude/sessions), whatever its pid, but an interactive one that parked it as a background
+// job (an attached view). [{ pid, kind, cwd }].
+export function holders(home, sid) {
+  const dir = join(home, '.claude', 'sessions');
+  const out = [];
+  let files = [];
+  try { files = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return out; }
+  for (const f of files) {
+    const r = readJson(join(dir, f));
+    if (r?.sessionId !== sid || !Number.isInteger(r.pid) || !alive(r.pid)) continue;
+    if (r.kind === 'interactive' && r.parkedJobId) continue;
+    out.push({ pid: r.pid, kind: r.kind ?? null, cwd: r.cwd ?? null });
+  }
+  return out;
+}
+const holderLine = (h) => `pid ${h.pid}${h.kind ? `, ${h.kind}` : ''}${h.via ? `, ${h.via}` : ''}`;
+
+// Waits until no background process holds the session: no live record of it of a background kind, and no worker
+// with a pid in `claude agents`. Interactive ones (someone has it open in a terminal) aren't waited for; Claude Code
+// copies over those, and the copy's note says so. Answers what still holds it after `ms` ([] when nothing does).
+async function released(deps, sid, ms) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const left = holders(deps.home, sid).filter((h) => h.kind !== 'interactive');
+    if (!left.length) {
+      const a = (await listAgents(deps)).find((x) => x?.sessionId === sid && x.kind !== 'interactive' && Number.isInteger(x.pid) && alive(x.pid));
+      if (!a) return [];
+      left.push({ pid: a.pid, kind: a.kind ?? null, via: 'listed by claude agents' });
+    }
+    if (Date.now() > until) return left;
+    await deps.sleep(200);
+  }
+}
+
+// Why a resume started a copy, for the user: Claude Code's own note on it (it prints one, naming the reason), and
+// what send saw as it resumed: a process that still held the session, and the folder it resumed from.
+export function copyWhy({ said = '', live = null, stillRan = false, others = [], cwd = null, worked = null } = {}) {
+  const note = /^note: (.+)$/m.exec(said)?.[1]?.trim() ?? null;
+  const parts = [note ? `Claude Code said: "${note}"` : 'Claude Code gave no reason.'];
+  const seen = [];
+  if (live) seen.push(stillRan ? `its process (pid ${live.pid}) still ran` : `its process (pid ${live.pid}) had exited after the stop`);
+  else seen.push('it had no process running');
+  const more = others.filter((h) => h.pid !== live?.pid);
+  if (more.length) seen.push(`${more.length > 1 ? 'other Claude Code processes' : 'another Claude Code process'} had it open (${more.map(holderLine).join('; ')})`);
+  if (cwd) seen.push(worked && worked !== cwd ? `it was resumed from ${cwd}, not ${worked}, where its transcript says it last worked` : `it was resumed from ${cwd}${worked ? ', where its transcript says it last worked' : ''}`);
+  return `${parts.join(' ')} When it was resumed, ${seen.join(', ')}.`;
 }
 
 // The job a session runs as, when it is a background one.

@@ -45,10 +45,16 @@ if (args[0] === 'stop') {
 if (args[0] === '--bg' && args[1] === '--resume') {
   const jobs = path.join(home, '.claude', 'jobs');
   const job = fs.readdirSync(jobs).find((j) => JSON.parse(fs.readFileSync(path.join(jobs, j, 'state.json'), 'utf8')).sessionId === args[2]);
-  if (fs.existsSync(at('resume-copies')) || records().some((r) => r.sessionId === args[2] && running(r.pid))) {
+  fs.appendFileSync(at('resumes.jsonl'), JSON.stringify({ cwd: process.cwd() }) + '\\n');
+  // The message comes after \`--\`: without it, one that starts with "-" is read as options, and starts a copy.
+  if (args[3] !== '--') { process.stderr.write('note: the flags you passed started a copy\\n'); process.exit(1); }
+  const holder = records().some((r) => r.sessionId === args[2] && running(r.pid));
+  if (fs.existsSync(at('resume-copies')) || holder) {
     const copy = 'eeee' + String(n).padStart(4, '0');
     const dir = path.join(jobs, copy); fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionId: copy + '-0000-4000-8000-000000000000', state: 'working', name: args[3].slice(0, 30), nameSource: 'auto', cwd: process.cwd() }));
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionId: copy + '-0000-4000-8000-000000000000', state: 'working', name: args[4].slice(0, 30), nameSource: 'auto', cwd: process.cwd() }));
+    // As Claude Code's does, it says why on stderr.
+    process.stderr.write('note: session ' + job + (holder ? ' is already running in the background' : ' is open in another Claude Code process') + ', so this started a copy as ' + copy + '.\\n');
     process.stdout.write('backgrounded · ' + copy + ' · x\\n'); process.exit(0);
   }
   process.stdout.write('backgrounded · ' + job + ' · x\\n'); process.exit(0);
@@ -281,9 +287,9 @@ test('send wakes a background session whose turn is over, and refuses one that i
   // copy: send continues the session itself only because it waits for the process to exit first.
   assert.match(ok(['send', 'aaaaaaaa', 'Also', 'check', 'the', 'tax']), /Sent to testmac\/aaaaaaaa-1111.*It continues/);
   assert.equal(running(pid), false);
-  const calls = lines('claude-calls.jsonl').slice(-2);
+  const calls = lines('claude-calls.jsonl').filter((c) => c.args[0] !== 'agents').slice(-2);
   assert.deepEqual(calls[0].args, ['stop', 'aaaaaaaa']);
-  assert.deepEqual(calls[1].args, ['--bg', '--resume', OLD, "From the user via #general's chat: Also check the tax"]);
+  assert.deepEqual(calls[1].args, ['--bg', '--resume', OLD, '--', "From the user via #general's chat: Also check the tax"]);
   assert.equal(calls[1].claudecode, null);
   live(OLD, { status: 'busy' });
   job('aaaaaaaa', { sessionId: OLD, state: 'working', name: 'Fix the total' });
@@ -393,6 +399,105 @@ test('send files a copy Claude Code starts in place of the task, and marks the o
   assert.equal(loose.status, 0, loose.stderr);
   assert.match(loose.stdout, /isn't a task in an open channel, so the copy wasn't filed anywhere/);
   assert.equal(list('--all').channels[0].tasks.length, 3);
+});
+
+// Issue #58: a task that moved into a worktree (of its repo, or of a submodule) keeps its transcript in that
+// worktree's project folder, not the folder it started in. It is resumed from the folder its transcript says it last
+// worked in, and continues in place.
+test('send continues a done task that moved into a worktree or a submodule\'s worktree in place, resumed from that folder', (t) => {
+  const { home, projects, ok, lines, job, live, list } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa', '--name', 'Fix the total']);
+  const app = join(projects, 'app');
+  const worktrees = { repo: join(app, '.claude', 'worktrees', 'fix'), submodule: join(app, 'lib', '.claude', 'worktrees', 'fix') };
+  for (const [kind, wt] of Object.entries(worktrees)) {
+    mkdirSync(wt, { recursive: true });
+    const folder = join(home, '.claude', 'projects', wt.replace(/[^A-Za-z0-9]/g, '-'));
+    mkdirSync(folder, { recursive: true });
+    const file = join(folder, `${OLD}.jsonl`);
+    writeFileSync(file, [
+      { type: 'user', cwd: app, message: { content: 'Fix the total' } },
+      { type: 'assistant', cwd: wt, message: { content: [{ type: 'text', text: 'Fixed, in the worktree.' }] } },
+      { type: 'system', subtype: 'turn_duration', cwd: wt },
+    ].map((e) => JSON.stringify(e)).join('\n'));
+    job('aaaaaaaa', { sessionId: OLD, state: 'done', name: 'Fix the total', cwd: app, linkScanPath: file });
+    live(OLD, { status: 'idle', jobId: 'aaaaaaaa', kind: 'bg', cwd: wt });
+    assert.match(ok(['send', OLD, 'Also', 'the', 'tax']), /Sent to testmac\/aaaaaaaa-1111.*It continues/, kind);
+    assert.equal(lines('resumes.jsonl').at(-1).cwd, wt, `${kind}: resumed from the worktree`);
+  }
+  // A worktree removed since: resumed from the folder the task started in.
+  rmSync(worktrees.submodule, { recursive: true });
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa', kind: 'bg', cwd: worktrees.submodule });
+  assert.match(ok(['send', OLD, 'One more']), /It continues/);
+  assert.equal(lines('resumes.jsonl').at(-1).cwd, app);
+  const tasks = list().channels[0].tasks;
+  assert.deepEqual(tasks.map((x) => x.session_id), [OLD], 'the same task, never a copy');
+});
+
+test('send waits for every background process that holds the session, and refuses while one stays', (t) => {
+  const { home, ok, run, lines, live, running } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa']);
+  const sleepers = [];
+  t.after(() => { for (const p of sleepers) { try { process.kill(p); } catch { /* gone */ } } });
+  const sleeper = () => { const p = Number(spawnSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim()); sleepers.push(p); return p; };
+  const resumes = () => lines('claude-calls.jsonl').filter((c) => c.args[0] === '--bg').length;
+  // A second record of the session, of a background kind, that the stop doesn't end.
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa', kind: 'bg' });
+  const other = sleeper();
+  writeFileSync(join(home, '.claude', 'sessions', 'other.json'), JSON.stringify({ pid: other, sessionId: OLD, kind: 'daemon-worker', status: 'idle' }));
+  let r = run(['send', OLD, 'Blue.'], '', { CHANNELS_STOP_WAIT_MS: '700' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, new RegExp(`still has a Claude Code background process after 0.7s \\(pid ${other}, daemon-worker\\)\\. The message wasn't sent and nothing was started`));
+  assert.equal(resumes(), 0);
+  assert.ok(running(other), 'a process the stop didn\'t name is left alone');
+  rmSync(join(home, '.claude', 'sessions', 'other.json'));
+  // A worker Claude Code's own list still shows with a running process.
+  const worker = sleeper();
+  writeFileSync(join(home, 'agents.json'), JSON.stringify([{ id: 'aaaaaaaa', sessionId: OLD, pid: worker, kind: 'background', state: 'done' }]));
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa', kind: 'bg' });
+  r = run(['send', OLD, 'Blue.'], '', { CHANNELS_STOP_WAIT_MS: '700' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, new RegExp(`\\(pid ${worker}, background, listed by claude agents\\)`));
+  assert.equal(resumes(), 0);
+  // Once it's gone, the message goes through, in place.
+  process.kill(worker);
+  writeFileSync(join(home, 'agents.json'), '[]');
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa', kind: 'bg' });
+  assert.match(ok(['send', OLD, 'Blue.']), /It continues/);
+  assert.equal(resumes(), 1);
+});
+
+test('when Claude Code copies anyway, send says why: Claude Code\'s own note and what it saw as it resumed', (t) => {
+  const { home, ok, live, projects } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa']);
+  // Someone has the session open in an interactive Claude Code: not a background process, so not waited for, and
+  // Claude Code copies over it.
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa', kind: 'bg' });
+  const pid = Number(spawnSync('sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
+  t.after(() => { try { process.kill(pid); } catch { /* gone */ } });
+  writeFileSync(join(home, '.claude', 'sessions', 'open.json'), JSON.stringify({ pid, sessionId: OLD, kind: 'interactive', status: 'idle' }));
+  writeFileSync(join(home, 'agents.json'), JSON.stringify([{ id: 'x', sessionId: OLD, pid, kind: 'interactive' }]));
+  const r = JSON.parse(ok(['send', OLD, '--json', 'Blue.']));
+  assert.equal(r.delivered_as, 'copy_started');
+  assert.match(r.why, /^Claude Code said: "session aaaaaaaa is already running in the background, so this started a copy as eeee\d{4}\."/);
+  assert.match(r.why, /When it was resumed, its process \(pid \d+\) had exited after the stop, another Claude Code process had it open \(pid \d+, interactive\)/);
+  assert.match(r.why, new RegExp(`it was resumed from ${join(projects, 'app').replace(/[/.]/g, '\\$&')}\\.$`));
+  assert.ok(r.note.includes(r.why), 'the note the chat reads carries it');
+});
+
+test('copyWhy names a cwd that isn\'t where the transcript says the session worked, and transcriptCwd reads it', async (t) => {
+  const { copyWhy, transcriptCwd } = await import('../bin/harness/claude.mjs');
+  const why = copyWhy({ said: 'note: could not check whether session abc is running, so this started a copy as def.\nbackgrounded · def', live: { pid: 42 }, stillRan: true, cwd: '/r/app', worked: '/r/app/.claude/worktrees/x' });
+  assert.equal(why, 'Claude Code said: "could not check whether session abc is running, so this started a copy as def." When it was resumed, its process (pid 42) still ran, it was resumed from /r/app, not /r/app/.claude/worktrees/x, where its transcript says it last worked.');
+  assert.match(copyWhy({ said: 'backgrounded · def' }), /^Claude Code gave no reason\. When it was resumed, it had no process running\.$/);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'channels-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 's.jsonl');
+  writeFileSync(file, [{ type: 'user', cwd: '/a' }, { type: 'assistant', cwd: '/b' }, { type: 'assistant', isSidechain: true, cwd: '/c' }, { type: 'x' }].map((e) => JSON.stringify(e)).join('\n'));
+  assert.equal(transcriptCwd(file), '/b');
+  assert.equal(transcriptCwd(join(dir, 'none.jsonl')), null);
 });
 
 test('the chat prompt carries the description and the commands, and nothing about other machines', async (t) => {
@@ -1028,7 +1133,7 @@ test('Remote Control on: start passes --remote-control with the task\'s name; se
   ok(['file', 'design', 'aaaaaaaa']);
   live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
   ok(['send', 'aaaaaaaa', 'Blue.'], '', RC);
-  assert.deepEqual(lines('claude-calls.jsonl').at(-1).args, ['--bg', '--resume', OLD, "From the user via #design's chat: Blue."]);
+  assert.deepEqual(lines('claude-calls.jsonl').at(-1).args, ['--bg', '--resume', OLD, '--', "From the user via #design's chat: Blue."]);
   // A copy Claude Code starts in its place doesn't get the flag: send says so when Remote Control is on.
   rewriteJob(home, 'aaaaaaaa', { sessionId: OLD, state: 'done', name: 'Fix the total' });
   live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
