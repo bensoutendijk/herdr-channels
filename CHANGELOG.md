@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.13.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.12.0...v1.13.0) (2026-11-24)
+
+### Features
+
+* Routines keep a run history, and show when one is failing or overdue ([#59](https://github.com/bensoutendijk/herdr-channels/issues/59)) ([f4b96aa](https://github.com/bensoutendijk/herdr-channels/commit/f4b96aae0626ac28ad00a4a6d1aaa72bfb2326ae))
+
 ## [1.12.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.11.0...v1.12.0) (2026-11-24)
 
 ### Features
