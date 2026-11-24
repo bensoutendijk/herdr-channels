@@ -26,7 +26,7 @@ the herdr mod runs every command on the same machine. No server is involved, unl
 | `bin/channels.mjs` | The `channels` command (a Node script, no dependencies) |
 | `bin/schedule.mjs` | Routine schedules: parsing, and when a routine is due |
 | `bin/routines.mjs` | The routine engine and its words: adding and changing routines, which runs are due, the message a run types into the chat. It touches no file, so a store on another machine can run the same copy |
-| `bin/harness/` | The coding agents a task runs on, one module each behind the same interface ([docs/harnesses.md](docs/harnesses.md)): `claude.mjs` is Claude Code's sessions, records and messages; `codex.mjs` is [Codex tasks](#codex-tasks) |
+| `bin/harness/` | The coding agents a task runs on, one module each behind the same interface ([docs/harnesses.md](docs/harnesses.md)): `claude.mjs` is Claude Code's sessions, records and messages; `codex.mjs` is [Codex tasks](#codex-tasks) and [a Codex chat](#a-codex-chat) |
 | `bin/codex-rpc.mjs` | [Codex tasks](#codex-tasks): every call to Codex's app-server (its background service), standalone |
 | `bin/cloud.mjs` | [Cloud tasks](#cloud-tasks): every call to Claude Code's private sessions API, standalone |
 | `bin/release.mjs` | [Versions and updates](#updating): the installed version, the check against GitHub Releases, `channels update` |
@@ -292,7 +292,7 @@ lists the `refresh-all` feature.
   to a channel's name means it has a routine switched on: hover it for the next run, click it to
   open the channel's Routines.
 
-  <img src="docs/channel-menu.png" width="400" alt="A channel's ··· menu open in the sidebar, with Rename, Instructions, Notifications, Routines, Tasks run on Claude Code, Change icon and Archive">
+  <img src="docs/channel-menu.png" width="400" alt="The docs channel's ··· menu open in the sidebar, with Rename, Instructions, Notifications, Routines, Tasks run on Claude Code, Chat runs on Codex, Change icon and Archive">
 
 - **What waits for you.** A red dot on a channel's icon means one of its tasks needs you: a question,
   a permission prompt or a Codex approval (hover the icon for how many). A channel's name turns bold
@@ -719,9 +719,9 @@ call works again.
 
 ## Codex tasks
 
-A task can run on OpenAI's [Codex CLI](https://github.com/openai/codex) instead of Claude Code. Claude Code stays
-the default for every task, and a channel's chat is always Claude Code: a Codex task is started, followed, answered
-and reported on from the same chat, panel and cards as any other.
+A task can run on OpenAI's [Codex CLI](https://github.com/openai/codex) instead of Claude Code, and so can a
+channel's chat ([A Codex chat](#a-codex-chat)). Claude Code stays the default for both: a Codex task is started,
+followed, answered and reported on from the same chat, panel and cards as any other.
 
 **Requirements.** `codex` installed and signed in (`codex login`). The installer turns Codex tasks on when it finds
 `codex` (`--no-codex` turns them off; `node install.mjs --codex` turns them on later). Off, nothing calls Codex.
@@ -770,10 +770,60 @@ rather than refused as for Claude Code, and channels doesn't report the task fin
 Renaming a Codex task renames it in Codex too.
 
 **What Codex tasks don't have.** Remote Control's claude.ai link, cloud tasks, and copies (Codex never starts one).
-Those menu items and buttons hide for a Codex task. channels adds no hooks to Codex, so Codex never asks you to
-trust one on channels' behalf, and channels never answers Codex's folder-trust question: a new Codex session opens
-in the projects folder, which you trust once by running `codex` there. A Codex chat, the account's Codex usage, and
-Codex tasks through a store on another machine are later work ([docs/harnesses.md](docs/harnesses.md)).
+Those menu items and buttons hide for a Codex task. channels adds no hooks to a Codex task, and never answers
+Codex's folder-trust question: a new Codex session opens in the projects folder, which you trust once by running
+`codex` there. Codex tasks through a store on another machine are later work ([docs/harnesses.md](docs/harnesses.md)).
+
+### A Codex chat
+
+A channel's chat can run on Codex too: the channel's ··· menu, **Chat runs on**, or
+`channels harness <channel> --chat codex`. The chat restarts on Codex once it is idle with an empty prompt, as a new
+Codex session named `#<channel>`; the Claude Code session is kept, and switching back resumes it. The chat pane then
+shows Codex's own terminal app, and what you type there is an ordinary Codex session in your Codex history
+(`codex resume` lists it).
+
+<img src="docs/chat-runs-on.png" width="420" alt="The Chat runs on choice for the docs channel: Claude Code, and Codex with a check, above the line A new chat session on it, once the chat is idle. Switching back resumes the old one.">
+
+![The docs channel's chat running on Codex: a message opening with [task notice] says the readme-getting-started task needs you and asks where the docs site's setup instructions are; the chat looks in the repo and asks the user, the user answers with npm install then npm run dev, and the chat sends that to the task with channels send; the tasks panel shows readme-getting-started ready for review](docs/codex-chat.png)
+
+**How it runs.** The chat has a Codex server of its own (`codex app-server` on a socket in the channels store), with
+the chat's prompt and channels' hook given as settings for that server only: your Codex config files are left alone.
+Codex's terminal app attaches to it, and the channels listener is another client of it, so nothing is typed into
+the chat:
+
+- A task notice (whatever the [notice gate](#task-events) lets through: a turn the chat asked for that failed, one the
+  judge finds moves something, a task that needs you) starts a turn as a message opening with `[task notice]`. While
+  the chat is answering, it waits in Codex's own queue and runs right after, so it never interrupts a turn or lands in
+  something you are typing. It shows as a message rather than Claude Code's faded one-line event, followed by the
+  chat's short reply.
+- Routine runs go in the same way, queued behind any turn in progress.
+- Ride-along news (a task waiting on you in a turn the chat asked for) comes with your next message, through the
+  same `UserPromptSubmit` hook a Claude Code chat has.
+
+**The hook's trust, answered for you.** Codex asks you to review a hook that is new or changed before it runs it
+("Hooks need review"). The first time a Codex chat starts, the listener answers that prompt itself with **Trust all
+and continue**. That also trusts any other new or changed hook you have in Codex at that moment. Codex remembers the
+trust (in your `~/.codex/config.toml`) for the hook's command, which is the same for every chat, so it asks once per
+Mac. Until the hook is trusted (say you chose "Continue without trusting"), ride-along news goes into the chat as
+context its next turn sees.
+
+**Running `channels`.** The chat runs with Codex's default permissions (the `workspace-write` sandbox), and
+`channels` works outside that folder, in the channels store and the sessions it starts, so each `channels` command
+asks to leave the sandbox. Codex's automatic reviewer answers those requests for the chat (as `--permission-mode
+auto` does for a task); anything it finds risky still asks you.
+
+**No task cards.** Task cards and `/cards` come from a Claude Code mod, and Codex has no surface above its prompt for
+them. In a Codex chat, a task that waits on you shows in the tasks panel (its row, its unread dot, and the red dot on
+the channel's icon in the sidebar), where you open it and answer it in its own view. A question in a turn the chat
+asked for still reaches the chat as a notice; a prompt or an approval rides along with your next message. Tell the
+chat what to answer, and it uses `channels send` or `channels approve`.
+
+**Refresh.** Refresh and Refresh all chats restart a Codex chat as they do a Claude Code one: only when its thread is
+idle and its prompt is empty, on the same thread. The Refresh button also restarts a Codex chat that runs an older
+Codex than the one installed now.
+
+**What a Codex chat doesn't have.** Task cards (above), Remote Control's claude.ai link for the chat, and the chat
+in the Codex phone app: its server is the chat's own, not the shared Codex service that the phone pairs with.
 
 ## Routines
 
@@ -903,7 +953,7 @@ channels chat <channel>
 channels start <channel> [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief | ->
 channels start <channel> --cloud --repo <project> [--name <name>] [--wake-on <on>] <brief | ->
 channels start <channel> --harness codex [--empty] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief | ->
-channels harness <channel> [--tasks claude|codex]
+channels harness <channel> [--tasks claude|codex] [--chat claude|codex]
 channels approve <session> allow|deny
 channels file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>]
 channels read <session> [--limit <n>] [--json]
