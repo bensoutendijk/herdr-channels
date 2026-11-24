@@ -1001,10 +1001,15 @@ button does. `channels list --json` reports the installed version and the latest
 `updates.release`.
 
 `channels send` can only reach a background task that has finished its turn. It stops the idle
-session, waits for its process to exit, and resumes the same session with the message. If the
-process is still running after 30 seconds (`CHANNELS_STOP_WAIT_MS`), the command fails and starts
-nothing. If Claude Code starts a copy of the session instead of continuing it, `send` says so, gives
-the copy's session id, and files the copy into the original task's channel in its place; the original
+session, waits until no Claude Code background process holds it (its own, another record of the
+session, or a worker `claude agents` still lists), and resumes the same session with the message,
+from the folder its transcript says it last worked in (a worktree it moved into, a submodule's
+worktree), so it keeps its session id, its place in the panel and its claude.ai link. If something
+still holds it after 30 seconds (`CHANNELS_STOP_WAIT_MS`), the command fails and starts nothing. If
+Claude Code starts a copy of the session instead of continuing it, `send` says so, and why: Claude
+Code's own note on it (still running, open in another Claude Code process, …) and what `send` saw as
+it resumed (whether the original's process still ran, and the folder it resumed from). It gives the
+copy's session id, and files the copy into the original task's channel in its place; the original
 task is marked as superseded by the copy and resolved. Sending to a task that is still working, or
 is showing a permission prompt, fails; answer prompts in the task's view instead.
 
@@ -1037,7 +1042,7 @@ command says so.
 | `CHANNELS_PERMISSION_MODE` | `auto` | Permission mode for a Claude Code task `start` makes; empty uses Claude Code's default (a Codex task uses Codex's own) |
 | `CHANNELS_CLAUDE` | `claude` | The Claude Code executable |
 | `CHANNELS_HC` | `hc` | The herdr-core executable |
-| `CHANNELS_STOP_WAIT_MS` | `30000` | How long `send` waits for a stopped task's process to exit |
+| `CHANNELS_STOP_WAIT_MS` | `30000` | How long `send` waits for a stopped task's processes to exit |
 | `CHANNELS_CHAT_MOD` | `mods/claude` in the clone | The task cards mod a chat loads |
 | `CHANNELS_HERDR_APP` | `herdr-app` | The Herdr desktop app's command, for a card's Open |
 | `CHANNELS_HERDR_MOD` | `channels` | The name the herdr mod was installed under |
