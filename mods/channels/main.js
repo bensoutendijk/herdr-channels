@@ -1128,7 +1128,7 @@ export default class Channels extends View {
     const t = theme();
     const data = shared(DATA);
     const here = current();
-    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: harnessesOn().length > 1 ? 230 : 200, height: (has("routines") ? 190 : 156) + (harnessesOn().length > 1 ? 34 : 0) + (has("gate") ? 34 : 0), props: { menu: c.name } });
+    const menu = (c) => openOverlay({ mod: MOD, kind: "popup", width: harnessesOn().length > 1 ? 230 : 200, height: (has("routines") ? 190 : 156) + (harnessesOn().length > 1 ? (has("chat-harness") ? 68 : 34) : 0) + (has("gate") ? 34 : 0), props: { menu: c.name } });
     const list = channels();
     const drag = this.drag?.moved ? this.drag : null;
     const fresh = new Set(this.knownChannels ? list.filter((c) => !this.knownChannels.has(c.name)).map((c) => c.name) : []);
@@ -1540,6 +1540,11 @@ export default class Channels extends View {
   render_menu() {
     const t = theme();
     const p = props();
+    const harnessItem = (which, icon, label) => h_flex().id(`mn-harness-${which}`).mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
+      .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
+      .on_click(() => { closeOverlay(p.overlay); openOverlay({ mod: MOD, kind: "popup", width: 260, height: 32 + 34 * harnessesOn().length, props: { harnessmenu: p.menu, which } }); })
+      .child(svg(ICON(icon)).size(15)).child(div().flex_1().child(label))
+      .child(div().text_color(t.dim).child(`${harnessLabel(channels().find((c) => c.name === p.menu)?.harness?.[which] ?? "claude")} ›`));
     const item = (id, icon, label, dialog, danger) => h_flex().id(`mn-${id}`).mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
       .text_size(13.5).text_color(danger ? t.blocked : t.foreground).hover((s) => s.bg(t.hover))
       .on_click(() => { closeOverlay(p.overlay); openDialog(dialog, p.menu); })
@@ -1549,12 +1554,9 @@ export default class Channels extends View {
       .child(item("instructions", "file-text", "Instructions", "instructions"))
       .when(has("gate"), (el) => el.child(item("notify", "bell", "Notifications", "notify")))
       .when(has("routines"), (el) => el.child(item("routines", "clock", "Routines", "routines")))
-      // The harness the channel's tasks start on, when more than one is on here.
-      .when(harnessesOn().length > 1, (el) => el.child(h_flex().id("mn-harness").mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
-        .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
-        .on_click(() => { closeOverlay(p.overlay); openOverlay({ mod: MOD, kind: "popup", width: 260, height: 32 + 34 * harnessesOn().length, props: { harnessmenu: p.menu } }); })
-        .child(svg(ICON("square-terminal")).size(15)).child(div().flex_1().child("Tasks run on"))
-        .child(div().text_color(t.dim).child(`${harnessLabel(channels().find((c) => c.name === p.menu)?.harness?.tasks ?? "claude")} ›`))))
+      // The harness the channel's tasks start on, and the one its chat runs on, when more than one is on here.
+      .when(harnessesOn().length > 1, (el) => el.child(harnessItem("tasks", "square-terminal", "Tasks run on")))
+      .when(harnessesOn().length > 1 && has("chat-harness"), (el) => el.child(harnessItem("chat", "message-square", "Chat runs on")))
       .child(item("icon", "layers", "Change icon", "icon"))
       .child(div().mx(8).my(4).h(1).bg(t.border))
       .child(item("archive", "archive", "Archive", "archive"));
@@ -1587,23 +1589,26 @@ export default class Channels extends View {
     return v_flex().size_full().py(4).bg(t.popover).children(harnessesOn().map(item));
   }
 
-  // ---------- the channel's "Tasks run on" choice ----------
+  // ---------- the channel's "Tasks run on" and "Chat runs on" choices ----------
 
   render_harnessmenu() {
     const t = theme();
     const p = props();
-    const now = channels().find((c) => c.name === p.harnessmenu)?.harness?.tasks ?? "claude";
+    const which = p.which === "chat" ? "chat" : "tasks";
+    const now = channels().find((c) => c.name === p.harnessmenu)?.harness?.[which] ?? "claude";
     const item = (h) => h_flex().id(`hm-${h.id}`).mx(4).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
       .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
       .on_click(() => {
         closeOverlay(p.overlay);
         if (h.id === now) return;
-        submit((all) => { for (const c of all) if (c.name === p.harnessmenu) c.harness = { ...(c.harness ?? {}), tasks: h.id }; },
-          'channels harness "$1" --tasks "$2"', [p.harnessmenu, h.id], `make ${h.label} the default for ${p.harnessmenu}'s tasks`);
+        submit((all) => { for (const c of all) if (c.name === p.harnessmenu) c.harness = { ...(c.harness ?? {}), [which]: h.id }; },
+          `channels harness "$1" --${which} "$2"`, [p.harnessmenu, h.id], which === "chat" ? `run ${p.harnessmenu}'s chat on ${h.label}` : `make ${h.label} the default for ${p.harnessmenu}'s tasks`);
       })
       .child(div().w(15).flex_none().when(h.id === now, (el) => el.child(svg(ICON("check")).size(15)))).child(h.label);
     return v_flex().size_full().py(4).bg(t.popover).children(harnessesOn().map(item))
-      .child(div().mx(14).mt(2).text_size(11.5).text_color(t.dim).child("For tasks the chat starts. You can still ask for the other one."));
+      .child(div().mx(14).mt(2).text_size(11.5).text_color(t.dim).child(which === "chat"
+        ? "A new chat session on it, once the chat is idle. Switching back resumes the old one."
+        : "For tasks the chat starts. You can still ask for the other one."));
   }
 
   // ---------- a task's menu ----------

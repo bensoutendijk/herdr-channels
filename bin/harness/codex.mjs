@@ -512,4 +512,111 @@ export async function rename({ deps, task, name }) {
 // task in terminal mode is shown in its own terminal (`terminal`).
 export const openArgv = (t) => (t.codex?.mode === 'terminal' ? { terminal: t.codex.terminal } : { argv: ['codex', 'resume', t.session_id] });
 
-export default { id, label, caps, taskCaps, installed, checkStart, start, startEmpty, scan, look, withLast, row, find, read, send, approve, rename, openArgv, approvalCard };
+// ---------- a channel's chat on Codex (docs/harnesses.md §4) ----------
+//
+// The chat runs a Codex server of its own (`codex app-server --listen unix://<socket>`), with the chat's prompt as
+// developer instructions and channels' UserPromptSubmit hook, given as -c settings so they reach that server only and
+// never the user's config files. The thread is an ordinary Codex session in the user's Codex home; the user types into
+// Codex's own TUI attached to the server (`codex --remote … resume <thread>`), and the listener is another client of the
+// same server: notices and routines go in as turns (queued behind one that runs), not typed.
+
+export const chatSocket = (dir, channelId) => join(dir, `codex-${channelId}.sock`);
+
+// The hook's command. Codex asks the user to trust a hook once per command text, so it is the same text for every chat
+// and every version of channels: what differs (node, this script, the store, the channel) comes from the environment
+// the chat's server runs in (chatEnv).
+export const CHAT_HOOK = '"$CHANNELS_NODE" "$CHANNELS_SCRIPT" pending "$CHANNELS_CHANNEL" --hook';
+export const chatHookEnv = ({ node, script, dir, channelId }) => ({ CHANNELS_NODE: node, CHANNELS_SCRIPT: script, CHANNELS_DIR: dir, CHANNELS_CHANNEL: channelId });
+
+export const chatServerArgs = ({ socket, prompt }) => [
+  'app-server', '--listen', `unix://${socket}`,
+  '-c', `developer_instructions=${toml(prompt)}`,
+  '-c', `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${toml(CHAT_HOOK)},timeout=10}]}]`,
+];
+export const chatTuiArgs = ({ socket, threadId }) => ['--remote', `unix://${socket}`, 'resume', threadId];
+
+// A client of the chat's server, once it answers (it takes a moment to start).
+export async function chatConnect(socket, { waitMs = 20_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    try { return await rpc.connect({ socket, timeoutMs: 5000 }); } catch (err) {
+      if (Date.now() >= until) throw err;
+      await sleep(250);
+    }
+  }
+}
+
+// The chat's thread: the one recorded, loaded again and given this launch's prompt; else a new one, named #<channel>.
+// The client stays subscribed, which keeps the thread loaded until Codex's TUI resumes it. Answers { thread, fresh }.
+export async function chatThread(c, { threadId, cwd, prompt, name }) {
+  if (threadId) {
+    try { return { thread: await rpc.resumeThread(c, threadId, { developerInstructions: prompt }), fresh: false }; } catch { /* never used, or gone: a new one */ }
+  }
+  const thread = await rpc.startThread(c, { cwd, developerInstructions: prompt });
+  await rpc.setThreadName(c, thread.id, name);
+  await rpc.resumeThread(c, thread.id).catch(() => null);
+  return { thread, fresh: true };
+}
+
+// Where the chat's thread stands: 'idle', 'busy' (a turn runs, or one is queued), 'waiting' (on an approval or an
+// answer in the TUI), or null when the server can't say.
+export async function chatState(c, threadId) {
+  let th;
+  try { th = await rpc.readThread(c, threadId); } catch { return null; }
+  const type = th.status?.type;
+  if (type === 'active') return (th.status.activeFlags ?? []).some((f) => /^waitingOn/.test(f)) ? 'waiting' : 'busy';
+  if (type === 'idle') {
+    try { if ((await rpc.queuedMessages(c, threadId)).length) return 'busy'; } catch { /* none known */ }
+    return 'idle';
+  }
+  return type === 'notLoaded' ? 'idle' : null;
+}
+
+// A message into the chat from the listener (a notice, a wake, a routine run): a turn when the chat is idle, queued
+// behind the turn that runs otherwise, so it never interrupts an answer and never lands in a half-typed draft. Answers
+// 'started' or 'queued'.
+export async function chatDeliver(c, threadId, text) {
+  let th = await rpc.readThread(c, threadId);
+  if (th.status?.type === 'notLoaded') th = await rpc.resumeThread(c, threadId);
+  if (th.status?.type === 'active') { await rpc.queueMessage(c, threadId, text); return 'queued'; }
+  // Idle with messages queued: they run first, so this goes behind them.
+  let queued = [];
+  try { queued = await rpc.queuedMessages(c, threadId); } catch { /* none known */ }
+  if (queued.length) { await rpc.queueMessage(c, threadId, text); return 'queued'; }
+  await rpc.startTurn(c, threadId, text);
+  return 'started';
+}
+
+// Whether channels' hook is trusted: null when the server doesn't list it.
+export async function chatHookTrusted(c) {
+  const mine = (await rpc.listHooks(c)).find((h) => h.command === CHAT_HOOK);
+  return mine ? mine.trustStatus === 'trusted' : null;
+}
+export const chatNote = (c, threadId, text) => rpc.injectNote(c, threadId, text);
+
+// Codex's "Hooks need review" prompt on the chat's screen, and whether its cursor is on "Trust all and continue".
+export const hookReview = (screen) => /Hooks need review/.test(screen ?? '') && /Trust all and continue/.test(screen ?? '');
+export const trustAllSelected = (screen) => `${screen ?? ''}`.split('\n').some((l) => /^\s*›\s*\d+\.\s*Trust all and continue/.test(l));
+
+// What is typed in the chat's prompt (the last `›` line on its screen): '' when it is empty, null when no prompt shows.
+// Codex draws a placeholder in an empty prompt ("Ask Codex to do anything", and others), which reads like text; the
+// key hint under it ("? for shortcuts") shows only while the prompt is empty, so it tells the two apart.
+export function chatDraft(screen) {
+  const lines = `${screen ?? ''}`.split('\n');
+  let at = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (/^›(?:\s|$)/.test(lines[i])) { at = i; break; }
+  if (at < 0) return null;
+  if (lines.slice(at + 1).some((l) => /\? for shortcuts/.test(l))) return '';
+  return lines[at].replace(/^›\s?/, '').trim(); // its first line is enough to tell a draft
+}
+
+// The chat's own words, for the judge: its session file read as a task's is.
+export function chatRead(deps, threadId) {
+  return readRollout(findRollout(deps, threadId));
+}
+
+export default {
+  id, label, caps, taskCaps, installed, checkStart, start, startEmpty, scan, look, withLast, row, find, read, send, approve, rename, openArgv, approvalCard,
+  // the chat
+  chatSocket, chatHookEnv, chatServerArgs, chatTuiArgs, chatConnect, chatThread, chatState, chatDeliver, chatHookTrusted, chatNote, hookReview, trustAllSelected, chatDraft, chatRead,
+};

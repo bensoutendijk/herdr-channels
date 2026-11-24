@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export async function fakeCodex({ socket, codexHome }) {
+export async function fakeCodex({ socket, codexHome, hooks = [] }) {
   const threads = new Map();
   const calls = [];
   const clients = new Set();
@@ -71,7 +71,7 @@ export async function fakeCodex({ socket, codexHome }) {
         const id = randomUUID();
         const day = join(codexHome, 'sessions', '2026', '11', '22');
         mkdirSync(day, { recursive: true });
-        const t = { id, name: null, cwd: p.cwd, path: join(day, `rollout-2026-11-22T10-00-00-${id}.jsonl`), status: { type: 'idle' }, updatedAt: now(), queue: [], pending: null, params: p };
+        const t = { id, name: null, cwd: p.cwd, path: join(day, `rollout-2026-11-22T10-00-00-${id}.jsonl`), status: { type: 'idle' }, updatedAt: now(), queue: [], pending: null, params: p, injected: [], resumed: [] };
         writeFileSync(t.path, `${JSON.stringify({ type: 'session_meta', payload: { id, cwd: p.cwd } })}\n`);
         threads.set(id, t);
         return reply({ thread: view(t) });
@@ -82,6 +82,7 @@ export async function fakeCodex({ socket, codexHome }) {
       case 'thread/resume':
         if (!th) return err('no such thread');
         if (th.status.type === 'notLoaded') th.status = { type: 'idle' };
+        th.resumed.push(p);
         c.subs.add(th.id);
         reply({ thread: view(th) });
         if (th.pending) offer(c, th);
@@ -93,6 +94,9 @@ export async function fakeCodex({ socket, codexHome }) {
         th.queue.push({ id: p.clientUserMessageId, text: p.input?.[0]?.text ?? '' });
         return reply({});
       case 'thread/queue/list': return th ? reply({ data: th.queue }) : err('no such thread');
+      case 'thread/inject_items': if (!th) return err('no such thread'); th.injected.push(...(p.items ?? [])); return reply({});
+      // The hooks as a chat's server lists them: `hooks` given by the test, each { command, trustStatus }.
+      case 'hooks/list': return reply({ data: [{ cwd: '/', hooks, warnings: [], errors: [] }] });
       default: return err(`unknown method ${m.method}`);
     }
   };
