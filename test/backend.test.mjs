@@ -55,7 +55,7 @@ test('a task opens on the machine it runs on, or nowhere when Herdr can\'t reach
 test('features: what list --json says, else this repo\'s older command had them all, else none', () => {
   assert.deepEqual(FEATURES, B.ALL_FEATURES, 'the command and the mod agree');
   assert.deepEqual(B.featuresOf({ machine: 'x', features: ['seen', 7] }), ['seen']);
-  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => !['update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness'].includes(f)), 'a command from before the list: only what it had then');
+  assert.deepEqual(B.featuresOf({ machine: 'x', remote_control: false, channels: [] }), B.ALL_FEATURES.filter((f) => !['update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'routine-runs', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness'].includes(f)), 'a command from before the list: only what it had then');
   assert.deepEqual(B.featuresOf({ machine: 'server', channels: [] }), [], 'a hub that lists none');
   assert.deepEqual(B.featuresOf(null), []);
 });
@@ -179,4 +179,19 @@ test('the Routines dialog says when the timer stopped, with the backend\'s comma
   assert.equal(B.staleTimer({ last_tick_at: null }, now), null, 'never ticked: nothing to compare');
   assert.equal(B.staleTimer(null, now), null, 'an older backend says nothing');
   assert.deepEqual(B.staleTimer({ last_tick_at: '2026-11-23T10:40:00Z', hint: 'start it' }, now, () => '10:40'), { text: "The routines timer hasn't run since 10:40, so routines won't come due.", hint: 'start it' });
+});
+
+test('with the run ledger the clock is red only for failing, overdue or broken; one bad run is amber; the row\'s chip says the health', () => {
+  const now = Date.parse('2026-11-23T10:00:00Z');
+  const r = (state, words = state) => ({ name: state, enabled: true, status: { state, words } });
+  const tint = (state, ledger = true) => B.statusTint(r(state), now, { ledger });
+  assert.deepEqual(['failing', 'overdue', 'broken', 'missed', 'failed', 'unreported', 'undelivered', 'running', 'ok'].map((s) => tint(s)), ['blocked', 'blocked', 'blocked', 'working', 'working', 'working', 'working', null, null]);
+  assert.equal(tint('missed', false), 'blocked', 'a store without the ledger: a missed run is still red');
+  assert.equal(B.routineTint([r('failed'), r('failing')], now, { ledger: true }).routine.name, 'failing');
+  assert.deepEqual(B.healthChip({ state: 'failing', words: 'Failing · 3 in a row since Tue 09:00: no report' }), { label: 'Failing', tint: 'blocked', words: '3 in a row since Tue 09:00' });
+  assert.deepEqual(B.healthChip({ state: 'overdue', words: 'Overdue: due 09:00, and the timer hasn\'t run it' }), { label: 'Overdue', tint: 'blocked', words: 'Due 09:00, and the timer hasn\'t run it' });
+  assert.deepEqual(B.healthChip({ state: 'running', words: 'Running since 09:01 · 1 task' }), { label: 'Running', tint: 'accent', words: 'Since 09:01 · 1 task' });
+  assert.equal(B.healthChip({ state: 'ok', words: 'Done 09:00' }), null);
+  assert.deepEqual(B.runPill('unreported'), ['No report', 'working']);
+  assert.deepEqual([B.runLength(null), B.runLength(0), B.runLength(7), B.runLength(65)], ['', '<1 min', '7 min', '1 h 5 min']);
 });

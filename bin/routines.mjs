@@ -16,6 +16,16 @@
 // were when it was queued), by, first, prev, queued_at, text }. Its message is made when it is typed in (renderRun),
 // so it says how late it really is; `text` is the message as it read when queued, for a listener from before that
 // (and older entries have only `text`).
+//
+// The channel's `runs` is the run ledger: one record per run, oldest first, kept after the run is over and after its
+// routine is deleted (the newest RUN_DEFAULTS.keep of each routine). A run is { id (runId), routine, name, trigger:
+// { kind: 'scheduled' | 'manual', label, by }, due_at, queued_at, delivered_at, ended_at, late_min, state, note, error,
+// tasks: [{ session_id, job, name }], grace_min, deadline, reported_late, waiting, reason, catchup_min }. Its state:
+// - queued: waiting for the chat (its queue entry); undelivered once it has waited its grace time (error says why).
+// - delivered: typed into the chat, which reports how it went (reportRun): ok or failed, with a one-line note.
+// - unreported: the chat said nothing by its deadline (sweepRuns), and no task started for it says how it went.
+// - missed: it came due while the timer couldn't run it, outside the catch-up window. cancelled: dropped or deleted.
+// A routine's health (routineStatus with the runs) comes from these; `r.last` is still written for older readers.
 import { randomUUID } from 'node:crypto';
 import { defaultCatchup, due, MANUAL_LABEL, nextDue, parseSchedule, ScheduleError, scheduleWarnings, shortWhen, timeZone } from './schedule.mjs';
 
@@ -25,6 +35,14 @@ export class RoutineError extends Error {}
 const fail = (msg) => { throw new RoutineError(msg); };
 
 export const ROUTINE_DEFAULTS = { catchupMin: 60 };
+
+// The run ledger's settings: how long a delivered run may go without a report (grace_min, a routine's own when set;
+// 0 means it is done once delivered), how many bad runs in a row make a routine failing (fail_after), how many runs of
+// each routine are kept, how long a run waits on tasks started for it, the gap between ticks that means the machine
+// slept, and how long after a due time with no run a routine is overdue.
+export const RUN_DEFAULTS = { graceMin: 30, failAfter: 2, keep: 30, taskCapMs: 12 * 3_600_000, sleepGapMs: 5 * 60_000, overdueMs: 3 * 60_000 };
+const OPEN = new Set(['queued', 'delivered']);
+const BAD = new Set(['failed', 'unreported', 'undelivered', 'missed']);
 
 // What a slot that comes due does while a run of the same routine still waits for the chat: it is skipped, so a busy
 // chat never finds a pile of the same prompt. A constant for now, not a setting of each routine.
@@ -85,6 +103,27 @@ export function catchupMinutes(raw) {
   return n;
 }
 
+// A grace time (--grace): how long a delivered run may go without a report. Minutes, or 15m, 2h; 0 means don't wait.
+export function graceMinutes(raw) {
+  const t = `${raw ?? ''}`.trim().toLowerCase();
+  if (t === 'off' || t === 'none' || t === 'no') return 0;
+  const m = /^(\d+)\s*(m|min|mins|minutes?|h|hours?)?$/.exec(t);
+  if (!m) fail(`A grace time is minutes, or a length like 15m or 2h; 0 means don't wait for a report (got "${raw}").`);
+  const n = Number(m[1]) * (m[2]?.startsWith('h') ? 60 : 1);
+  if (n > 720) fail('A grace time is at most 12 hours.');
+  return n;
+}
+
+// --fail-after: how many bad runs in a row (failed, unreported, undelivered, missed) make a routine failing.
+export function failAfter(raw) {
+  const n = Number(`${raw ?? ''}`.trim());
+  if (!Number.isInteger(n) || n < 1 || n > 20) fail(`--fail-after is how many bad runs in a row make a routine failing, 1 to 20 (got "${raw ?? ''}").`);
+  return n;
+}
+
+// A note on switching a routine off (--note): why, in one line.
+export const pauseNote = (raw) => { const n = cut(oneLine(raw), 200); return n || null; };
+
 // Who asked for a run or a switch (`--by`): dialog, chat or cli for a run; you or chat for on/off. Any short word.
 export function byName(raw) {
   const by = `${raw ?? ''}`.trim().toLowerCase();
@@ -99,8 +138,9 @@ export function routineOf(c, name) {
 }
 
 // A routine as list --json shows it: what's stored, its schedule in words, its next run and its status (routineStatus,
-// in words that name `where`).
-export function showRoutine(r, now = Date.now(), { where = 'this Mac' } = {}) {
+// in words that name `where`). `runs`: its channel's run ledger, which its status and health come from (a backend
+// that keeps none leaves it out, and the status reads `last`).
+export function showRoutine(r, now = Date.now(), { where = 'this Mac', runs = null } = {}) {
   let label = r.schedule;
   let next = null;
   let error = null;
@@ -112,20 +152,23 @@ export function showRoutine(r, now = Date.now(), { where = 'this Mac' } = {}) {
   return {
     id: r.id, name: r.name, prompt: r.prompt, schedule: r.schedule, label, catchup_min: r.catchup_min, enabled: Boolean(r.enabled),
     created_at: r.created_at, next_at: next ? iso(next) : null, last: r.last ?? null, skipped: r.skipped ?? null, paused: r.paused ?? null, error,
-    status: routineStatus(r, now, { where }),
+    grace_min: r.grace_min ?? RUN_DEFAULTS.graceMin, fail_after: r.fail_after ?? RUN_DEFAULTS.failAfter,
+    status: routineStatus(r, now, { where, runs }),
   };
 }
 
 const needPrompt = (prompt) => { if (!`${prompt ?? ''}`.trim()) fail('A routine needs a prompt: what the chat is asked when it runs.'); };
 
 // Adds a routine to channel c. Answers it as showRoutine does. Without a catch-up window it gets its schedule's default (defaultCatchup).
-export function addRoutine(c, { name, prompt, spec, catchupMin, enabled = true, now = Date.now() }) {
+export function addRoutine(c, { name, prompt, spec, catchupMin, graceMin = null, failAfter: fa = null, enabled = true, now = Date.now() }) {
   needPrompt(prompt);
   const s = schedule(spec);
   catchupMin ??= defaultCatchup(s);
   if (c.routines.some((x) => x.name === name)) fail(`#${c.name} already has a routine "${name}".`);
   const at = iso(now);
   const r = { id: `rt_${randomUUID().replace(/-/g, '').slice(0, 10)}`, name, prompt: `${prompt}`.trim(), schedule: s.spec, catchup_min: catchupMin, enabled, created_at: at, since: at, done: null, last: null };
+  if (graceMin != null) r.grace_min = graceMin;
+  if (fa != null) r.fail_after = fa;
   c.routines.push(r);
   return showRoutine(r, now);
 }
@@ -142,41 +185,50 @@ export function checkChange(change) {
 // What a queue entry is: older entries carry no kind, and only a run-now's text says "run now".
 export const entryKind = (e) => e.kind ?? (/^\[routine [^\]]*, run now\]/.test(e.text ?? '') ? 'manual' : 'scheduled');
 
-// Changes routine `name` of channel c: { rename, schedule, prompt, catchupMin, enabled, by }, all at once. Switching it
-// off records who did it and when (`paused`: { by, at }); switching it on clears that. A new schedule,
+// Changes routine `name` of channel c: { rename, schedule, prompt, catchupMin, graceMin, failAfter, enabled, by, note },
+// all at once. Switching it off records who did it, when and why (`paused`: { by, at, note }); switching it on clears
+// that. A note on a routine that is off already replaces its note. A new schedule,
 // or switching it on, starts it afresh: times before now don't count as missed. Switching it off drops its scheduled
 // runs still waiting for the chat (a run now stays: the user asked for it). Answers { routine (as showRoutine
 // does), dropped (how many runs it dropped) }.
 export function editRoutine(c, name, change, now = Date.now()) {
   const ch = checkChange(change);
   const r = routineOf(c, name);
+  if (ch.note != null && (ch.enabled ?? r.enabled)) fail(`A note goes with switching a routine off: ${r.name} stays on, so there's nothing to note.`);
   if (ch.rename != null && ch.rename !== r.name) {
     if (c.routines.some((x) => x.name === ch.rename)) fail(`#${c.name} already has a routine "${ch.rename}".`);
     r.name = ch.rename;
+    // Its runs carry its name, so a run reads right after a rename (and after a delete, with the last name it had).
+    for (const run of c.runs ?? []) if (run.routine === r.id) run.name = r.name;
   }
   const at = iso(now);
   if (ch.schedule != null && ch.schedule !== r.schedule) { r.schedule = ch.schedule; r.since = at; }
   if (ch.prompt != null) r.prompt = `${ch.prompt}`.trim();
   if (ch.catchupMin != null) r.catchup_min = ch.catchupMin;
+  if (ch.graceMin != null) r.grace_min = ch.graceMin;
+  if (ch.failAfter != null) r.fail_after = ch.failAfter;
   if (ch.enabled != null && ch.enabled !== r.enabled) {
     r.enabled = ch.enabled;
-    if (r.enabled) { r.since = at; r.paused = null; } else r.paused = { by: ch.by ?? null, at };
-  }
+    if (r.enabled) { r.since = at; r.paused = null; } else r.paused = { by: ch.by ?? null, at, ...(ch.note ? { note: ch.note } : {}) };
+  } else if (ch.note != null && !r.enabled) r.paused = { ...(r.paused ?? { by: ch.by ?? null, at }), note: ch.note };
   let dropped = 0;
   if (ch.enabled === false) {
     const gone = c.queue.filter((e) => e.routine === r.id && entryKind(e) !== 'manual');
     dropped = gone.length;
     c.queue = c.queue.filter((e) => !gone.includes(e));
     if (r.last?.message && gone.some((e) => e.id === r.last.message)) Object.assign(r.last, { status: 'dropped', dropped_at: at });
+    for (const e of gone) endRun(c, e.id, 'cancelled', now, { error: 'dropped when the routine was switched off' });
   }
   return { routine: showRoutine(r, now), dropped };
 }
 
 // Removes routine `name` from channel c, with any of its runs still waiting for the chat. Answers the routine.
-export function removeRoutine(c, name) {
+// Its runs stay in the ledger (shown as deleted); the ones still waiting are cancelled.
+export function removeRoutine(c, name, now = Date.now()) {
   const r = routineOf(c, name);
   c.routines = c.routines.filter((x) => x !== r);
   c.queue = c.queue.filter((x) => x.routine !== r.id);
+  for (const run of c.runs ?? []) if (run.routine === r.id && run.state === 'queued') endRun(c, run.id, 'cancelled', now, { error: 'the routine was deleted' });
   return r;
 }
 
@@ -211,7 +263,7 @@ const askedBy = (by, who, channel) => ({
 
 // The message a routine types into the chat. The header is "[routine <name> · <trigger> · run <id>]": the trigger is
 // "scheduled 09:00" (with ", running 10:40" when it runs late) or "run now".
-export function routineText({ channel, routine, slot = null, now = Date.now(), manual = false, label = null, id = null, by = null, first = false, prev = null, queuedAt = null, who = 'the user', where = 'this Mac' }) {
+export function routineText({ channel, routine, slot = null, now = Date.now(), manual = false, label = null, id = null, by = null, first = false, prev = null, queuedAt = null, report = false, who = 'the user', where = 'this Mac', cli = 'channels' }) {
   if (label == null) { try { label = parseSchedule(routine.schedule).label; } catch { label = routine.schedule; } }
   const late = !manual && slot != null && now - slot > 2 * 60_000;
   const trigger = manual ? 'run now' : `scheduled ${shortWhen(slot, now)}${late ? `, running ${hm(now)}` : ''}`;
@@ -228,30 +280,35 @@ export function routineText({ channel, routine, slot = null, now = Date.now(), m
   else if (prev?.status === 'missed' && prev.due_at) lines.push(`Its previous run was missed: it was due ${shortWhen(Date.parse(prev.due_at), now)}${prev.reason ? `, while ${where} was ${prev.reason}` : ''}.`);
   lines.push('', `The routine's prompt, as ${who} wrote it:`, '<routine-prompt>', fenceRoutine(routine.prompt), '</routine-prompt>', '',
     replyContract({ now, manual, who, where }));
+  if (report && id) lines.push(reportLine({ channel, id, cli }));
   return lines.join('\n');
 }
 
+// The run's last line: how the chat reports back (reportRun), and how a task it starts is tied to the run.
+export const reportLine = ({ channel, id, cli = 'channels' }) => `- When you've finished (or started the tasks that will do it), report how it went: \`${cli} routine report ${channel} ${id} ok --note "<one line>"\` (or \`failed --note "<why>"\`). Pass \`--run ${id}\` to \`${cli} start\` for any task you start for it.`;
+
 // A queue entry's message, made when it is typed in (now): late, first and who asked as they stand then. An entry
 // from before entries were data has only its text.
-export function renderRun(e, { channel, now = Date.now(), who, where } = {}) {
+export function renderRun(e, { channel, now = Date.now(), who, where, cli } = {}) {
   if (e.prompt == null) return e.text;
   const slot = e.scheduled_for ? Date.parse(e.scheduled_for) : null;
-  return routineText({ channel, routine: { name: e.name, prompt: e.prompt }, slot, now, manual: entryKind(e) === 'manual', label: e.label, id: e.id, by: e.by, first: e.first, prev: e.prev, queuedAt: e.queued_at ? Date.parse(e.queued_at) : null, who, where });
+  return routineText({ channel, routine: { name: e.name, prompt: e.prompt }, slot, now, manual: entryKind(e) === 'manual', label: e.label, id: e.id, by: e.by, first: e.first, prev: e.prev, queuedAt: e.queued_at ? Date.parse(e.queued_at) : null, report: e.report === true, who, where, cli });
 }
 
 // Records a run of routine r in channel c: queued for the chat, or missed (`missed`: { reason: 'asleep'|'off' }, why
 // the timer didn't run it). A run whose id (runId) is queued already is left as it is. Answers the queue entry.
-export function queueRun(c, r, { kind, slot = null, now, status = 'queued', by = null, label = null, missed = null, channel = c.name, who, where }) {
+export function queueRun(c, r, { kind, slot = null, now, status = 'queued', by = null, label = null, missed = null, channel = c.name, who, where, cli }) {
   const id = runId(r, { slot, now });
   if (status === 'queued') {
     const there = c.queue.find((e) => e.id === id);
     if (there) return there;
   }
+  recordRun(c, r, { id, kind, slot, now, state: status, by, label, missed, where });
   const prev = r.last ? { status: r.last.status, due_at: r.last.due_at ?? null, reason: r.last.reason ?? null } : null;
   let entry = null;
   if (status === 'queued') {
-    entry = { id, routine: r.id, name: r.name, kind, scheduled_for: slot != null ? iso(slot) : null, prompt: r.prompt, label, by, first: !r.last, prev: prev?.status === 'missed' ? prev : null, queued_at: iso(now) };
-    entry.text = renderRun(entry, { channel, now, who, where });
+    entry = { id, routine: r.id, name: r.name, kind, scheduled_for: slot != null ? iso(slot) : null, prompt: r.prompt, label, by, first: !r.last, prev: prev?.status === 'missed' ? prev : null, queued_at: iso(now), report: graceOf(r) > 0 };
+    entry.text = renderRun(entry, { channel, now, who, where, cli });
     c.queue.push(entry);
   }
   r.last = {
@@ -262,20 +319,26 @@ export function queueRun(c, r, { kind, slot = null, now, status = 'queued', by =
 }
 
 // "Run now" on routine `name` of channel c: queued for the chat at once. The schedule doesn't move. `by`: who asked.
-export function runNow(c, name, { now = Date.now(), by = null, who, where } = {}) {
+export function runNow(c, name, { now = Date.now(), by = null, who, where, cli } = {}) {
   const r = routineOf(c, name);
-  return queueRun(c, r, { kind: 'manual', now, by, who, where });
+  return queueRun(c, r, { kind: 'manual', now, by, who, where, cli });
 }
 
 // Why queue entry `id` of channel c can't reach the chat yet, on its routine's last run: `waiting` = { why, since }.
 // since stays from the first reason given. Answers whether anything changed.
 export function markWaiting(c, id, why, now = Date.now()) {
+  const text = cut(oneLine(why), 200);
+  if (!text) return false;
+  let changed = false;
+  const run = runOf(c, id);
+  if (run && (run.state === 'queued' || run.state === 'undelivered') && run.waiting?.why !== text) {
+    run.waiting = { why: text, since: run.waiting?.since ?? iso(now) };
+    changed = true;
+  }
   const e = c.queue.find((x) => x.id === id);
   const r = c.routines.find((x) => x.id === e?.routine);
   const l = r?.last;
-  if (!l || l.message !== id || l.status !== 'queued') return false;
-  const text = cut(oneLine(why), 200);
-  if (!text || l.waiting?.why === text) return false;
+  if (!l || l.message !== id || l.status !== 'queued' || l.waiting?.why === text) return changed;
   l.waiting = { why: text, since: l.waiting?.since ?? iso(now) };
   return true;
 }
@@ -287,20 +350,272 @@ export function markDelivered(c, id, now = Date.now()) {
   c.queue = c.queue.filter((x) => x.id !== id);
   const r = c.routines.find((x) => x.id === e?.routine);
   if (r?.last && r.last.message === id) { Object.assign(r.last, { status: 'delivered', delivered_at: iso(now) }); delete r.last.waiting; }
+  const run = runOf(c, id);
+  if (run && (run.state === 'queued' || run.state === 'undelivered')) {
+    delete run.waiting;
+    Object.assign(run, { delivered_at: iso(now), error: null });
+    // A run whose message asked for no report (no grace time, or queued before runs were reported) is done now.
+    if (!run.grace_min || e?.report === false) Object.assign(run, { state: 'ok', ended_at: iso(now), deadline: null });
+    else Object.assign(run, { state: 'delivered', deadline: iso(now + run.grace_min * 60_000) });
+  }
   return e ?? null;
+}
+
+// ---------- the run ledger ----------
+
+const graceOf = (r) => r.grace_min ?? RUN_DEFAULTS.graceMin;
+export const runOf = (c, id) => (c.runs ?? []).find((x) => x.id === id) ?? null;
+
+// A run's record in channel c's ledger, made when it is queued or found missed (queueRun). A run already there is
+// left as it is. Older runs of the routine beyond RUN_DEFAULTS.keep go.
+function recordRun(c, r, { id, kind, slot = null, now, state = 'queued', by = null, label = null, missed = null, where = 'this Mac' }) {
+  c.runs ??= [];
+  const there = runOf(c, id);
+  if (there) return there;
+  if (label == null && kind !== 'manual') { try { label = parseSchedule(r.schedule).label; } catch { label = r.schedule; } }
+  const grace = graceOf(r);
+  const run = {
+    id, routine: r.id, name: r.name, trigger: { kind, label: kind === 'manual' ? 'run now' : label, by: by ?? null },
+    due_at: slot != null ? iso(slot) : null, queued_at: state === 'queued' ? iso(now) : null, delivered_at: null, ended_at: state === 'queued' ? null : iso(now),
+    late_min: slot != null ? Math.max(0, Math.round((now - slot) / 60_000)) : 0, state, note: null, error: null, tasks: [], grace_min: grace,
+    // A queued run that hasn't reached the chat in its grace time (30 min when it has none) is undelivered.
+    deadline: state === 'queued' ? iso(now + (grace || RUN_DEFAULTS.graceMin) * 60_000) : null, reported_late: false,
+    ...(state === 'missed' ? { reason: missed?.reason ?? null, catchup_min: r.catchup_min, error: `${missed?.reason ? `${where} was ${missed.reason} at the time` : `the timer on ${where} didn't run at the time`} (${catchupWords(r.catchup_min)})` } : {}),
+  };
+  c.runs.push(run);
+  trimRuns(c);
+  return run;
+}
+
+// Keeps the newest `keep` runs of each routine (deleted ones too), and every run still open.
+export function trimRuns(c, keep = RUN_DEFAULTS.keep) {
+  const seen = new Map();
+  const out = [];
+  for (let i = (c.runs ?? []).length - 1; i >= 0; i--) {
+    const run = c.runs[i];
+    const n = (seen.get(run.routine) ?? 0) + 1;
+    seen.set(run.routine, n);
+    if (n <= keep || OPEN.has(run.state)) out.push(run);
+  }
+  c.runs = out.reverse();
+}
+
+function endRun(c, id, state, now, { note = null, error = null } = {}) {
+  const run = runOf(c, id);
+  if (!run) return null;
+  Object.assign(run, { state, ended_at: iso(now), deadline: null, ...(note != null ? { note } : {}), ...(error != null ? { error } : {}) });
+  return run;
+}
+
+// The runs a report or a task can still be tied to, in words for an error: "rt_…@… (morning-plan, delivered)".
+const openList = (c) => (c.runs ?? []).filter((x) => OPEN.has(x.state) || x.state === 'unreported' || x.state === 'undelivered')
+  .map((x) => `${x.id} (${x.name}, ${x.state})`).join(', ') || 'none';
+
+// The chat's report on run `id` of channel c: outcome 'ok' or 'failed', with a one-line note. A run that went
+// unreported (or undelivered) takes a late report; one already reported, missed or cancelled refuses it. Answers the run.
+export function reportRun(c, id, outcome, { note = null, now = Date.now() } = {}) {
+  if (outcome !== 'ok' && outcome !== 'failed') fail(`A report is ok or failed (got "${outcome ?? ''}").`);
+  const run = runOf(c, id);
+  if (!run) fail(`#${c.name} has no run ${id}. Its runs waiting for a report: ${openList(c)}.`);
+  if (run.state === 'ok' || run.state === 'failed') fail(`Run ${id} of ${run.name} was already reported ${run.state}${run.note ? ` ("${run.note}")` : ''}: a run is reported once.`);
+  if (run.state === 'missed' || run.state === 'cancelled') fail(`Run ${id} of ${run.name} never reached the chat (${run.state}${run.error ? `: ${run.error}` : ''}), so there is nothing to report.`);
+  const late = run.state === 'unreported' || run.state === 'undelivered';
+  run.delivered_at ??= iso(now);
+  delete run.waiting;
+  endRun(c, id, outcome, now, { note: note == null ? null : cut(oneLine(note), 500) || null });
+  run.error = null;
+  run.reported_late = late;
+  return run;
+}
+
+// Checks that run `id` of channel c can still take a task (before the task starts): it is queued or delivered.
+export function openRun(c, id) {
+  const run = runOf(c, id);
+  if (!run) fail(`#${c.name} has no run ${id}. Its open runs: ${openList(c)}.`);
+  if (!OPEN.has(run.state)) fail(`Run ${id} of ${run.name} is over (${run.state}): a task can be tied only to a run that is queued or delivered.`);
+  return run;
+}
+
+// Ties a task ({ session_id, job, name }) to run `id` of channel c: the run lists it, and when the chat doesn't report,
+// its outcome comes from its tasks (sweepRuns).
+export function linkTask(c, id, task) {
+  const run = openRun(c, id);
+  const key = task.session_id ?? task.job;
+  if (!run.tasks.some((t) => (t.session_id ?? t.job) === key)) run.tasks.push({ session_id: task.session_id ?? null, job: task.job ?? null, name: task.name ?? '' });
+  return run;
+}
+
+// What every tick does after claimDue, in the store's lock: runs past their deadline end. A queued run turns
+// undelivered (with why it waits); a delivered one takes its tasks' outcome when they are all over, waits while one
+// still runs (up to RUN_DEFAULTS.taskCapMs), else turns unreported. A queued run whose entry left the queue without a
+// delivery being recorded here was typed in by a chat's listener from before runs were reported: it is ok.
+// `tasks`: a Map from a linked task's session_id (or job) to 'running' | 'ok' | 'failed' (a backend reads its
+// harnesses for the tasks tasksToCheck names). `gapMs`: the time since the last tick; over RUN_DEFAULTS.sleepGapMs
+// the machine slept, and every open deadline moves on by it. Answers what changed: [{ channel, routine, id, state, why }].
+export function sweepRuns(store, now = Date.now(), { tasks = new Map(), gapMs = 0 } = {}) {
+  const out = [];
+  for (const c of store.channels) {
+    if (c.archived_at) continue;
+    for (const run of c.runs ?? []) {
+      if (!OPEN.has(run.state)) continue;
+      if (gapMs > RUN_DEFAULTS.sleepGapMs && run.deadline) run.deadline = iso(Date.parse(run.deadline) + gapMs);
+      const ended = (state, why) => { endRun(c, run.id, state, now, why); out.push({ channel: c.name, routine: run.name, id: run.id, state, why: run.error ?? run.note ?? null }); };
+      if (run.state === 'queued') {
+        if (!c.queue.some((e) => e.id === run.id)) {
+          if (!c.routines.some((r) => r.id === run.routine)) { ended('cancelled', { error: 'the routine was deleted' }); continue; }
+          run.delivered_at ??= iso(now);
+          ended('ok', {});
+          continue;
+        }
+        if (run.deadline && now > Date.parse(run.deadline)) ended('undelivered', { error: run.waiting?.why ? `it couldn't reach the chat: ${run.waiting.why}` : 'it didn\'t reach the chat in time' });
+        continue;
+      }
+      if (!run.deadline || now <= Date.parse(run.deadline)) continue;
+      const states = run.tasks.map((t) => tasks.get(t.session_id ?? t.job) ?? null);
+      if (states.length && states.every((x) => x === 'ok' || x === 'failed')) {
+        const failed = states.includes('failed');
+        ended(failed ? 'failed' : 'ok', { note: cut(`Tasks: ${run.tasks.map((t, i) => `${t.name || t.session_id}${states[i] === 'failed' ? ' (failed)' : ''}`).join(', ')}`, 500), ...(failed ? { error: 'a task started for it failed' } : {}) });
+        continue;
+      }
+      if (states.length && now - Date.parse(run.delivered_at ?? run.queued_at) < RUN_DEFAULTS.taskCapMs) continue;
+      ended('unreported', { error: states.length ? `its tasks were still running after ${span(RUN_DEFAULTS.taskCapMs)}, and the chat didn't report` : `the chat didn't report back within ${span(run.grace_min * 60_000)}` });
+    }
+  }
+  return out;
+}
+
+// The tasks whose outcome a sweep needs: those of delivered runs past their deadline. [{ channel, task }].
+export function tasksToCheck(store, now = Date.now()) {
+  const out = [];
+  for (const c of store.channels) {
+    if (c.archived_at) continue;
+    for (const run of c.runs ?? []) if (run.state === 'delivered' && run.deadline && now > Date.parse(run.deadline)) for (const t of run.tasks) out.push({ channel: c.name, task: t });
+  }
+  return out;
+}
+
+// The tick log's line for one of sweepRuns' answers.
+export const sweepLine = (x) => `run ${x.id} of #${x.channel} ${x.routine} ${x.state}${x.why ? `: ${x.why}` : ''}`;
+
+// A run as `routine runs --json` shows it: the record, how long it took (minutes, from delivery; null while open or
+// when it never ran), and whether its routine is gone.
+export function showRun(c, run) {
+  const from = Date.parse(run.delivered_at ?? '');
+  const to = Date.parse(run.ended_at ?? '');
+  const took = Number.isFinite(from) && Number.isFinite(to) && (run.state === 'ok' || run.state === 'failed') ? Math.max(0, Math.round((to - from) / 60_000)) : null;
+  return { ...run, duration_min: took, deleted: !c.routines.some((r) => r.id === run.routine) };
+}
+
+// Channel c's runs, newest first: all, or routine `name`'s (a deleted routine's too, by the name its runs kept).
+export function listRuns(c, name = null, { limit = 20 } = {}) {
+  const r = name ? c.routines.find((x) => x.name === name) : null;
+  if (name && !r && !(c.runs ?? []).some((x) => x.name === name)) fail(`#${c.name} has no routine "${name}", and no runs of one. Its routines: ${c.routines.map((x) => x.name).join(', ') || 'none yet'}.`);
+  const mine = (c.runs ?? []).filter((x) => !name || (r ? x.routine === r.id : x.name === name));
+  return mine.slice(-limit).reverse().map((x) => showRun(c, x));
+}
+
+const STATE_WORDS = { queued: 'waiting', delivered: 'running', ok: 'ok', failed: 'failed', unreported: 'no report', undelivered: 'undelivered', missed: 'missed', cancelled: 'cancelled' };
+export const runStateWords = (state) => STATE_WORDS[state] ?? state;
+
+// `routine runs` in words: one line a run, "Mon 09:00  ok  2 min  morning-plan: Nothing needs you".
+export function runsText(runs, { now = Date.now(), name = null } = {}) {
+  if (!runs.length) return name ? `${name} hasn't run yet.` : 'No routine has run yet.';
+  return runs.map((x) => {
+    const at = x.due_at ?? x.queued_at ?? x.ended_at;
+    const when = at ? shortWhen(Date.parse(at), now) : '-';
+    const late = x.late_min > 2 && x.state !== 'missed' ? ` (${x.late_min} min late)` : '';
+    const manual = x.trigger?.kind === 'manual' ? ' (run now)' : '';
+    const took = x.duration_min != null ? `  ${span(x.duration_min * 60_000)}` : '';
+    const what = x.note ?? x.error ?? (x.state === 'delivered' ? 'waiting for the chat\'s report' : x.state === 'queued' ? (x.waiting?.why ?? 'waiting for the chat') : '');
+    const tasks = x.tasks?.length ? `  [tasks: ${x.tasks.map((t) => t.name || t.session_id).join(', ')}]` : '';
+    return `${when}${late}${manual}  ${runStateWords(x.state)}${took}  ${x.name}${x.deleted ? ' (deleted)' : ''}${x.reported_late ? ' (reported late)' : ''}${what ? `: ${what}` : ''}${tasks}`;
+  }).join('\n');
 }
 
 // A routine's state, in one model for the command, the dialog and the sidebar: { state, words, at }. state is off,
 // broken (its schedule doesn't read), never (no run yet), waiting (a run waits for the chat), missed (the last slot
 // passed while the timer couldn't run it), late (the last run reached the chat more than 2 minutes after it was due)
 // or ok. words say it for a person ("Waiting 14 min: a draft is typed in the chat's prompt"); at is when it began.
-export function routineStatus(r, now = Date.now(), { where = 'this Mac' } = {}) {
-  try { parseSchedule(r.schedule); } catch (err) { return { state: 'broken', words: `Can't run: ${err.message}`, at: null }; }
+//
+// With the channel's run ledger (`runs`), it is the routine's health too. Before everything but off and broken:
+// failing (its newest fail_after finished runs all went badly: failed, unreported, undelivered or missed; with streak
+// and failing_since) and overdue (a due time passed over 3 minutes ago with no run: the timer didn't run it). Then
+// waiting (a run waits for the chat), running (the chat has a run and hasn't reported yet), and the newest finished
+// run: ok, late, failed, unreported, undelivered or missed.
+export function routineStatus(r, now = Date.now(), { where = 'this Mac', runs = null } = {}) {
+  let s;
+  try { s = parseSchedule(r.schedule); } catch (err) { return { state: 'broken', words: `Can't run: ${err.message}`, at: null }; }
   if (!r.enabled) {
     const p = r.paused;
     const by = !p?.by ? '' : p.by === 'you' ? ' · switched off by you' : p.by === 'chat' ? ' · switched off by the chat' : p.by === 'cli' ? ' · switched off from the command line' : ` · switched off by ${p.by}`;
-    return { state: 'off', words: p?.at ? `Off since ${dayWords(Date.parse(p.at), now)}${by}` : 'Off', at: p?.at ?? null };
+    const note = p?.note ? ` · "${p.note}"` : '';
+    return { state: 'off', words: `${p?.at ? `Off since ${dayWords(Date.parse(p.at), now)}${by}` : 'Off'}${note}`, at: p?.at ?? null };
   }
+  const mine = Array.isArray(runs) ? runs.filter((x) => x.routine === r.id) : [];
+  if (mine.length) return healthOf(r, s, mine, now, where);
+  if (Array.isArray(runs) && !r.last) { const o = overdue(r, s, now); if (o) return o; }
+  return lastStatus(r, now, where);
+}
+
+// A routine on a schedule whose due time passed over RUN_DEFAULTS.overdueMs ago, unclaimed: the timer didn't run.
+// A scheduled run recorded for that time (its due_at) counts as the timer having run it.
+function overdue(r, s, now, mine = []) {
+  if (!s.cron) return null;
+  const ran = mine.map((x) => Date.parse(x.due_at ?? '') || 0);
+  const from = Math.max(Date.parse(r.since ?? r.created_at ?? '') || 0, Date.parse(r.done ?? '') || 0, ...ran);
+  if (!from) return null;
+  const n = nextDue(s.cron, from);
+  if (n == null || now - n <= RUN_DEFAULTS.overdueMs) return null;
+  return { state: 'overdue', words: `Overdue: due ${shortWhen(n, now)}, and the timer hasn't run it`, at: iso(n) };
+}
+
+const runAt = (x) => Date.parse(x.due_at ?? x.queued_at ?? x.ended_at);
+
+function healthOf(r, s, mine, now, where) {
+  const finished = mine.filter((x) => !OPEN.has(x.state) && x.state !== 'cancelled').reverse();
+  const fa = r.fail_after ?? RUN_DEFAULTS.failAfter;
+  let streak = 0;
+  while (streak < finished.length && BAD.has(finished[streak].state)) streak++;
+  const open = [...mine].reverse().find((x) => OPEN.has(x.state));
+  const skip = r.skipped;
+  const skipped = skip?.due_at && skip.at && open?.queued_at && skip.at > open.queued_at ? ` · skipped ${skip.count > 1 ? `${skip.count}, last ` : ''}${shortWhen(Date.parse(skip.due_at), now)}` : '';
+  if (streak >= fa && streak > 0) {
+    const first = finished[streak - 1];
+    const since = iso(runAt(first));
+    const why = finished[0].note ?? finished[0].error;
+    const doing = open ? ` · ${open.state === 'queued' ? 'a run waits for the chat' : 'a run is going'}` : '';
+    return { state: 'failing', words: `Failing · ${streak} in a row since ${shortWhen(Date.parse(since), now)}${why ? `: ${why}` : ''}${doing}`, at: since, streak, failing_since: since };
+  }
+  const late = overdue(r, s, now, mine);
+  if (late && !open) return late;
+  if (open?.state === 'queued') {
+    const since = Date.parse(open.queued_at);
+    const why = open.waiting?.why;
+    const fresh = now - since < 60_000;
+    const words = why ? `Waiting${fresh ? '' : ` ${span(now - since)}`}: ${why}` : fresh ? 'Queued for the chat…' : `Waiting ${span(now - since)} for the chat`;
+    return { state: 'waiting', words: `${words}${open.trigger?.kind === 'manual' ? ' · run now' : ''}${skipped}`, at: open.queued_at };
+  }
+  if (open) {
+    const tasks = open.tasks.length ? ` · ${plural(open.tasks.length, 'task')}` : '';
+    return { state: 'running', words: `Running since ${shortWhen(Date.parse(open.delivered_at), now)}${tasks}${open.trigger?.kind === 'manual' ? ' · run now' : ''}${skipped}`, at: open.delivered_at };
+  }
+  const x = finished[0] ?? [...mine].reverse()[0];
+  const manual = x.trigger?.kind === 'manual';
+  const when = shortWhen(runAt(x), now);
+  const took = x.delivered_at && x.ended_at ? ` · ${span(Date.parse(x.ended_at) - Date.parse(x.delivered_at))}` : '';
+  const said = x.note ? `: ${x.note}` : '';
+  if (x.state === 'missed') return { state: 'missed', words: `Skipped ${when}${x.reason ? `: ${where} was ${x.reason} until ${hm(Date.parse(x.ended_at))}` : ''} (${catchupWords(x.catchup_min ?? r.catchup_min)})`, at: x.due_at };
+  if (x.state === 'cancelled') return { state: 'ok', words: `${manual ? 'Run now' : 'Due'} ${when} · dropped when switched off`, at: x.ended_at };
+  if (x.state === 'failed') return { state: 'failed', words: `Failed ${when}${took}${said || (x.error ? `: ${x.error}` : '')}`, at: x.ended_at };
+  if (x.state === 'unreported') return { state: 'unreported', words: `No report ${when}: ${x.error ?? 'the chat didn\'t say how it went'}`, at: x.ended_at };
+  if (x.state === 'undelivered') return { state: 'undelivered', words: `Didn't reach the chat ${when}${x.error ? `: ${x.error.replace(/^it /, '')}` : ''}`, at: x.ended_at };
+  const lateMs = !manual && x.due_at && x.delivered_at ? Date.parse(x.delivered_at) - Date.parse(x.due_at) : 0;
+  if (lateMs > 2 * 60_000) return { state: 'late', words: `Done ${when}, ${span(lateMs)} late${took}${said}`, at: x.ended_at };
+  return { state: 'ok', words: `Done ${when}${took}${manual ? ' · run now' : ''}${said}`, at: x.ended_at };
+}
+
+// The status from the routine's `last` alone: a backend that keeps no ledger, or a routine with no run in it yet.
+function lastStatus(r, now, where) {
   const l = r.last;
   const s = r.skipped;
   // Slots skipped while this run waited: only a skip after it was recorded (a run now has no due time).
@@ -355,7 +670,7 @@ export function claimDue(store, now = Date.now(), { who, where, bootedAt = null 
       } else if (action === 'fire') {
         queueRun(c, r, { kind: 'scheduled', slot: d.slot, now, label: s.label, who, where });
         r.skipped = null;
-      } else queueRun(c, r, { kind: 'scheduled', slot: d.slot, now, status: 'missed', missed: { reason: bootedAt != null && bootedAt > d.slot ? 'off' : 'asleep' } });
+      } else queueRun(c, r, { kind: 'scheduled', slot: d.slot, now, status: 'missed', missed: { reason: bootedAt != null && bootedAt > d.slot ? 'off' : 'asleep' }, where });
       out.push({ channel: c.name, routine: r.name, action, due_at: r.done, late_min: Math.round(d.late_ms / 60_000) });
     }
   }
@@ -439,19 +754,24 @@ export function confirmation({ verb, channel, routine, dropped = 0, run = null, 
 // The routine commands' usage, for `cli` on `where`'s clock.
 export const routineUsage = ({ cli = 'channels', where = 'this Mac' } = {}) => [
   `${cli} routine list [<channel>] [--json]`,
-  `${cli} routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--off] [--dry-run] <prompt | ->`,
-  `${cli} routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--dry-run]`,
+  `${cli} routine add <channel> <name> --schedule <schedule> [--catchup <window>] [--grace <time>] [--fail-after <n>] [--off] [--dry-run] <prompt | ->`,
+  `${cli} routine edit <channel> <name> [--schedule <schedule>] [--catchup <window>] [--grace <time>] [--fail-after <n>] [--prompt <text | ->] [--rename <new-name>] [--on | --off] [--note <why>] [--dry-run]`,
   `${cli} routine rm <channel> <name>`,
-  `${cli} routine run|on|off <channel> <name> [--by <who>]   (who asked: dialog, chat or cli for run; you or chat for on/off)`,
+  `${cli} routine run|on|off <channel> <name> [--by <who>] [--note <why>]   (who asked: dialog, chat or cli for run; you or chat for on/off; --note with off)`,
+  `${cli} routine runs <channel> [<name>] [--limit <n>] [--json]   past runs, newest first`,
+  `${cli} routine report <channel> <run-id> ok|failed [--note <text | ->]   the chat's report on a run`,
   `${cli} routine preview <schedule> [--json]`,
   `Schedules (${where}'s local time): "weekdays 09:00", "daily 09:00", "hourly :15", "weekly fri 16:00", "cron <5 fields>", or "manual" (only when run).`,
   `--dry-run checks everything and prints what it would set up, headed "Would set up:", without saving.`,
   `A catch-up window (default by schedule: 15 minutes for several runs a day, 60 for daily, 4 hours for weekly): how late a run the timer on ${where} missed may still fire, e.g. 15m, 2h, 1d or 0.`,
+  `A grace time (default ${RUN_DEFAULTS.graceMin} min): how long the chat has to report a run before it counts as unreported; 0 means a run is done once delivered. --fail-after (default ${RUN_DEFAULTS.failAfter}): how many bad runs in a row make a routine failing.`,
 ].join('\n');
 
 // `routine list` in words: the channels of a list ({ channels: [{ name, routines (as showRoutine), queued }] }).
 export function listText(out, { cli = 'channels' } = {}) {
   const lines = [];
+  const on = out.channels.some((c) => c.routines.some((r) => r.enabled));
+  if (on && out.timer?.stale) lines.push(`The timer hasn't run since ${dayTime(Date.parse(out.timer.last_tick_at), { short: true })}, so routines won't come due.${out.timer.hint ? ` Start it again: ${out.timer.hint}` : ''}`, '');
   for (const c of out.channels) {
     if (!c.routines.length) continue;
     lines.push(`#${c.name}${c.queued ? `  (${c.queued} waiting for the chat)` : ''}`);
@@ -463,6 +783,8 @@ export function listText(out, { cli = 'channels' } = {}) {
   if (!lines.length) lines.push(`No routines yet. Add one with: ${cli} routine add <channel> <name> --schedule "weekdays 09:00" <prompt>`);
   return lines.join('\n');
 }
+
+const fallback = (n) => (n === 2 ? 'two' : `${n}`);
 
 // The chat prompt's paragraph on routines, for channel `name`: what a run looks like and how to answer it, how to set
 // one up (rounding a request no schedule fits, a one-off, proposing with --dry-run, passing on the confirmation),
@@ -476,7 +798,8 @@ export function promptText({ name, who = 'the user', where = 'this Mac', cli = '
     `- Something once ("remind me at 3 tomorrow"): a routine on a cron line for that date and time ("cron 0 15 24 11 *"), with --catchup 1d so it still runs if ${where} was asleep, and a prompt that ends: "Then remove this routine: ${cli} routine rm ${name} <name>". It removes itself when it runs.`,
     `- add and edit take --dry-run: every check runs and the confirmation prints headed "Would set up:", with nothing saved. When you rounded a schedule, made a one-off or aren't sure what ${who} meant, propose it that way and set it up once ${who} agrees.`,
     `- add, edit, on and off print a short confirmation block (the routine, when in words, on or off, the next two runs, the catch-up, the prompt's first line, where to change it). Pass it on to ${who} as it is, in a code block, not retold.`,
-    `- \`${cli} routine list ${name}\` shows them with their next and last runs; \`${cli} routine edit ${name} <name> [--schedule ...] [--catchup ...] [--prompt -] [--on|--off]\`, \`${cli} routine on|off|rm ${name} <name>\` change them and \`${cli} routine run ${name} <name> --by chat\` runs one now (\`routine off … --by chat\` when you switch one off). A run that comes due while the last one still waits for this chat is skipped, not stacked. Change routines only when ${who} asks.`,
+    `- \`${cli} routine list ${name}\` shows them with their next and last runs; \`${cli} routine edit ${name} <name> [--schedule ...] [--catchup ...] [--prompt -] [--on|--off]\`, \`${cli} routine on|off|rm ${name} <name>\` change them and \`${cli} routine run ${name} <name> --by chat\` runs one now (\`routine off … --by chat --note "<why>"\` when you switch one off, with why when ${who} said, "on holiday until Dec 2"). A run that comes due while the last one still waits for this chat is skipped, not stacked. Change routines only when ${who} asks.`,
     `When ${who} asks why a routine didn't run (or ran late, or twice), read \`${cli} routine list ${name} --json\` rather than guess, and answer in plain words with the days and times. Each routine has: enabled (false: switched off, so nothing runs on schedule); next_at (its next run; null when off or manual); error (its schedule no longer reads); last, its most recent run, with due_at, at, late_min, kind (scheduled or manual, a run now) and status: queued (waiting to be typed into this chat, which was busy or not running), delivered (typed into this chat at delivered_at), missed (it came due while ${where} was asleep or off and the timer got to it after the catch-up window, catchup_min, had passed, so it didn't run), dropped (it was waiting when the routine was switched off); and skipped (a later time came due while a run still waited for this chat, so it was skipped, count times, the last at skipped.due_at). Each routine's status ({ state, words }) says all that in one line, the same words the Routines dialog shows: start from it. last.waiting.why says why a queued run hasn't reached this chat yet; a missed last run has reason (asleep or off); paused says who switched a routine off and when; last.id is the run id its message's header showed. The channel's queued counts runs still waiting. A new schedule or switching on starts afresh: times before that are neither run nor missed.`,
+    `Reporting a run: a routine's message ends with how to report it. When you've done what it asks (or started the tasks that will do it), run \`${cli} routine report ${name} <run id> ok --note "<one line>"\`, or \`failed --note "<why>"\` when you couldn't do it. Pass \`--run <run id>\` to \`${cli} start\` for any task you start for a run: when you don't report, the run takes its outcome from those tasks. A run with no report after its grace time counts as unreported, and ${fallback(RUN_DEFAULTS.failAfter)} bad runs in a row make a routine failing. When ${who} asks how a routine has been doing (or why it didn't run on a day), read \`${cli} routine runs ${name} [<routine>] --json\`: each run's state (ok, failed, unreported, undelivered, missed, cancelled, or queued and delivered while open), due_at, delivered_at, ended_at, duration_min, note, error and tasks. Each routine's status there has state failing (with streak and failing_since), overdue (the timer didn't run it), running, waiting or the last run's state.`,
   ].join('\n');
 }

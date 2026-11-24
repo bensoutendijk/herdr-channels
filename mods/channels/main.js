@@ -321,7 +321,7 @@ const active = (channel) => (channel?.routines ?? []).some((r) => r.enabled);
 // The sidebar clock's hover: the channel's next routine run, "Next: morning-plan, Tomorrow 09:00".
 // A routine that needs a look (routineTint) is named instead, with its status in words.
 function nextRoutine(channel) {
-  const look = B.routineTint(channel?.routines ?? []);
+  const look = B.routineTint(channel?.routines ?? [], Date.now(), { ledger: has("routine-runs") });
   if (look) return `${look.routine.name}: ${look.routine.status.words}`;
   const on = (channel?.routines ?? []).filter((r) => r.enabled);
   const next = on.filter((r) => r.next_at).sort((a, b) => Date.parse(a.next_at) - Date.parse(b.next_at))[0];
@@ -845,7 +845,12 @@ const dropLast = (r, on) => (!on && r.last?.status === "queued" && r.last.kind !
 // until the chat has it ("Delivered 10:01"), or the backend's reason it still waits (last.waiting, when it gives one).
 function lastRun(r, t) {
   // The backend's own status (routine-status): one model and its words, the same as `routine list`.
-  if (r.status?.words) return [r.status.words, { missed: t.blocked, broken: t.blocked, waiting: t.working, never: t.dim, off: t.dim }[r.status.state] ?? t.muted];
+  // With the run ledger (routine-runs) one bad run is amber and failing (bad runs in a row) or overdue is red.
+  if (r.status?.words) {
+    const amber = t.ansi3 ?? t.working;
+    const ledger = has("routine-runs");
+    return [r.status.words, { missed: ledger ? amber : t.blocked, broken: t.blocked, failing: t.blocked, overdue: t.blocked, failed: amber, unreported: amber, undelivered: amber, waiting: t.working, never: t.dim, off: t.dim }[r.status.state] ?? t.muted];
+  }
   const l = r.last;
   const hm = (iso) => whenText(iso).replace(/^Today /, "");
   // Slots the tick skipped because this run still waited for the chat (bin/routines.mjs, claimDue): only while
@@ -1185,7 +1190,7 @@ export default class Channels extends View {
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click(() => openDialog("routines", c.name)))
             // Tinted while a routine needs a look: missed or broken, or a run stuck waiting (its status, routine-status).
-            .child(svg(ICON("clock")).size(13).text_color(((tint) => (tint ? t[tint] : selected ? t.muted : t.dim))(B.routineTint(c.routines ?? [])?.tint))))
+            .child(svg(ICON("clock")).size(13).text_color(((tint) => (tint ? t[tint] : selected ? t.muted : t.dim))(B.routineTint(c.routines ?? [], Date.now(), { ledger: has("routine-runs") })?.tint))))
           .when(!drag && (this.hover === key || selected), (el) => el.child(this.tool(`ch-more-${c.name}`, "···", () => menu(c), t))));
     };
     // The held row is drawn last, so it passes over the others.
@@ -1659,8 +1664,10 @@ export default class Channels extends View {
       this.input = InputState.new({ placeholder: "Search emoji, or type one", value: "" });
       this.input.on("change", (_e, cx) => { this.query = `${this.input.value() ?? ""}`.trim().toLowerCase(); cx.notify(); });
     } else if (this.kind === "routines") {
-      this.view = "list"; // or "edit"
+      this.view = "list"; // or "edit", or "history"
       this.form = null; // the routine being edited or made
+      this.hist = null; // the History view's routine and its runs: { id, name, runs, error, at }
+      cx.timer.every(5000, (cx) => { if (this.view === "history") this.loadHistory(cx); });
       this.entered = true; // false for a frame when the view changes, so it slides in
       this.confirm = null; // the routine whose Delete is waiting for a second click
       this.leavingR = new Set(); // routines collapsing out of the list
@@ -2035,13 +2042,20 @@ export default class Channels extends View {
     // With the backend's status (routine-status) its words say the whole state ("Waiting 14 min: …", "Off since Mon ·
     // switched off by you"), after Next; an older backend's row reads Next and Last.
     const said = Boolean(r.status?.words);
+    // The run ledger (routine-runs): a chip says the health (Failing, Overdue, Running) and the words the rest; a click
+    // on the row opens its History.
+    const ledger = has("routine-runs");
+    const chip = ledger && r.enabled ? B.healthChip(r.status) : null;
     const meta = h_flex().gap(14).text_size(12).text_color(t.dim)
       // A manual routine has no next run: its label already says it runs when run.
       .when(r.schedule !== "manual" && !(said && !r.enabled), (el) => el.child(h_flex().flex_none().gap(4).child("Next").child(div().text_color(r.enabled && r.next_at ? t.muted : t.dim).child(r.enabled ? (r.next_at ? whenText(r.next_at) : "-") : "Off"))))
-      .child(h_flex().gap(4).min_w(0).when(!said, (el) => el.child("Last")).child(div().id(`rt-st-${r.id}`).truncate().text_color(lastColor).tooltip(last).child(last)));
+      .child(h_flex().gap(6).min_w(0).items_center().when(!said, (el) => el.child("Last"))
+        .when(Boolean(chip), (el) => el.child(this.pill(chip.label, t[chip.tint] ?? t.muted, t)))
+        .child(div().id(`rt-st-${r.id}`).truncate().text_color(chip ? (chip.tint === "blocked" ? t.blocked : t.muted) : lastColor).tooltip(last).child(chip ? chip.words : last)));
     return h_flex().id(`rt-${r.id}`).flex_none().overflow_hidden().h(closed ? 0 : 78).opacity(closed ? 0 : 1).transition("height", 180).transition("opacity", 150)
       .child(h_flex().id(`rt-in-${r.id}`).flex_1().min_w(0).h(74).px(12).gap(12).items_center().rounded(10)
         .when(hover || confirming, (el) => el.bg(t.raised))
+        .when(ledger && !confirming, (el) => el.cursor_pointer().on_click((_e, cx) => this.openHistory(r, cx)))
         .on_hover(this.hovering(key))
         .child(div().w(30).h(30).flex_none().rounded(8).bg(hover || confirming ? t.background : t.raised).flex().items_center().justify_center()
           .child(svg(ICON("clock")).size(15).text_color(r.enabled ? t.accent : t.dim)))
@@ -2059,9 +2073,91 @@ export default class Channels extends View {
           // The row's actions show on hover, and keep their place either way so nothing moves.
           .child(h_flex().gap(2).items_center().opacity(hover ? 1 : 0).transition("opacity", 120)
             .child(this.smallButton(`rt-run-${r.id}`, h_flex().gap(5).items_center().child(svg(ICON("play")).size(11)).child(r.enabled ? "Run now" : "Run once"), false, (_e, cx) => this.runNow(r, cx), t))
+            .when(ledger, (e) => e.child(this.tool(`rt-hist-${r.id}`, svg(ICON("history")).size(14), (_e, cx) => this.openHistory(r, cx), t)))
             .child(this.tool(`rt-edit-${r.id}`, svg(ICON("square-pen")).size(14), (_e, cx) => this.openEditor(r, cx), t))
             .child(this.tool(`rt-del-${r.id}`, svg(ICON("trash-2")).size(14), (_e, cx) => this.removeRoutine(r, cx), t)))
           .child(this.switchFor(`rt-on-${r.id}`, r.enabled, (on) => this.toggleRoutine(r, on), t))));
+  }
+
+  // A small rounded label in a colour: a routine's health, a run's state.
+  pill(label, color, t) {
+    return div().flex_none().px(7).h(18).flex().items_center().rounded(9).border_1().border_color(color).text_size(11).font_medium().text_color(color).child(label);
+  }
+
+  // ---------- the History view: a routine's runs (routine-runs) ----------
+
+  openHistory(r, cx) {
+    this.hist = { id: r.id, name: r.name, runs: this.hist?.id === r.id ? this.hist.runs : null, error: null, at: 0 };
+    this.slideTo("history", cx);
+    this.loadHistory(cx);
+  }
+
+  loadHistory(cx) {
+    const h = this.hist;
+    const c = this.channelNow();
+    if (!h || !c || h.loading) return;
+    const name = (c.routines ?? []).find((x) => x.id === h.id)?.name ?? h.name;
+    h.loading = true;
+    store('channels routine runs "$1" "$2" --limit 30 --json', [c.name, name]).then((out) => {
+      const got = JSON.parse(out);
+      Object.assign(h, { name, runs: got.runs ?? [], routine: got.routine ?? null, error: null, at: Date.now() });
+    }).catch((err) => { h.error = String(err?.message ?? err); }).finally(() => { h.loading = false; cx.notify(); });
+  }
+
+  historyRow(run, c, t) {
+    const [label, tint] = B.runPill(run.state);
+    const color = t[tint] ?? t.muted;
+    const manual = run.trigger?.kind === "manual";
+    const at = run.due_at ?? run.queued_at ?? run.ended_at;
+    const said = run.note ?? run.error ?? (run.state === "delivered" ? "Waiting for the chat's report" : run.state === "queued" ? (run.waiting?.why ? `Waiting: ${run.waiting.why}` : "Waiting for the chat") : "");
+    const text = `${said.charAt(0).toUpperCase()}${said.slice(1)}${run.reported_late ? " (reported late)" : ""}`;
+    const tasks = run.tasks ?? [];
+    const chip = (x, i) => {
+      const task = (c?.tasks ?? []).find((y) => (x.session_id && y.session_id === x.session_id) || (x.job && y.job === x.job));
+      return h_flex().id(`rh-task-${run.id}-${i}`).flex_none().max_w(140).h(20).px(7).gap(4).items_center().rounded(6).bg(t.raised).text_size(11.5)
+        .text_color(task ? t.foreground : t.dim)
+        .when(Boolean(task), (el) => el.cursor_pointer().hover((st) => st.bg(t.hover)).tooltip("Show the task")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click(() => { this.close(); openTask(task, { channel: c }).catch((err) => fail(`Couldn't open the task: ${String(err?.message ?? err)}`)); }))
+        .child(div().truncate().child(x.name || "task"));
+    };
+    return h_flex().id(`rh-${run.id}`).flex_none().h(40).px(10).gap(10).items_center().rounded(8).hover((st) => st.bg(t.raised))
+      .child(v_flex().w(112).flex_none()
+        .child(div().text_size(12.5).text_color(t.foreground).child(at ? whenText(at) : "-"))
+        .when(manual || (run.late_min > 2 && run.state !== "missed"), (el) => el.child(div().text_size(11).text_color(t.dim).child(manual ? "run now" : `${run.late_min} min late`))))
+      .child(h_flex().w(92).flex_none().child(this.pill(label, color, t)))
+      .child(div().w(52).flex_none().text_size(12).text_color(t.dim).child(B.runLength(run.duration_min)))
+      .child(div().id(`rh-note-${run.id}`).flex_1().min_w(0).truncate().text_size(12.5).text_color(run.note ? t.muted : t.dim).when(Boolean(text), (el) => el.tooltip(text)).child(text))
+      .children(tasks.slice(0, 2).map(chip))
+      .when(tasks.length > 2, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`+${tasks.length - 2}`)));
+  }
+
+  render_history(t, c, head, button) {
+    const h = this.hist ?? {};
+    const r = (c?.routines ?? []).find((x) => x.id === h.id) ?? null;
+    const st = r?.status ?? h.routine?.status ?? null;
+    const chip = r?.enabled ? B.healthChip(st) : null;
+    const [words, color] = r ? lastRun(r, t) : ["", t.dim];
+    const runs = h.runs ?? [];
+    return v_flex().flex_1().min_h(0)
+      .child(head(h.name ?? "History", (_e, cx) => this.slideTo("list", cx))
+        .child(div().text_size(12.5).text_color(t.dim).child(r ? (r.label ?? r.schedule) : "deleted")))
+      .child(h_flex().pb(14).gap(8).items_center().min_w(0).text_size(13)
+        .when(Boolean(chip), (el) => el.child(this.pill(chip.label, t[chip.tint] ?? t.muted, t)))
+        .child(div().id("rh-health").flex_1().min_w(0).truncate().text_color(chip ? (chip.tint === "blocked" ? t.blocked : t.muted) : color).tooltip(words).child(chip ? chip.words : words)))
+      .child(h_flex().px(10).pb(6).gap(10).text_size(11.5).text_color(t.dim)
+        .child(div().w(112).child("Due")).child(div().w(92).child("Outcome")).child(div().w(52).child("Took")).child(div().flex_1().child("What the chat said")))
+      .child(v_flex().id("rh-list").flex_1().min_h(0).overflow_y_scrollbar().gap(1)
+        .when(h.runs == null && !h.error, (el) => el.child(div().pt(12).px(10).text_size(12.5).text_color(t.dim).child("Reading its runs…")))
+        .when(Boolean(h.error), (el) => el.child(div().pt(12).px(10).text_size(12.5).text_color(t.blocked).child(h.error)))
+        .when(h.runs != null && !runs.length, (el) => el.child(div().pt(12).px(10).text_size(12.5).text_color(t.dim).child("It hasn't run yet. Each run shows here: when it was due, how it went and what the chat said.")))
+        .children(runs.map((x) => this.historyRow(x, c, t))))
+      .child(div().pt(10).pb(14).text_size(12.5).text_color(t.dim)
+        .child(`The chat reports each run as ok or failed, in one line. A run it doesn't report within ${r?.grace_min ?? 30} min counts as no report; ${r?.fail_after ?? 2} bad runs in a row make the routine failing. The newest 30 runs are kept.`))
+      .child(h_flex().gap(8).items_center()
+        .child(button("rh-back", h_flex().gap(6).items_center().child(svg(ICON("chevron-left")).size(14)).child("Routines"), false, (_e, cx) => this.slideTo("list", cx)))
+        .child(div().flex_1())
+        .child(button("rh-done", "Done", true, () => this.close())));
   }
 
   smallButton(id, label, kind, action, t) {
@@ -2083,7 +2179,8 @@ export default class Channels extends View {
       .child(div().flex_1().text_size(16).font_semibold().child(title));
 
     let body;
-    if (this.view === "edit" && this.form) {
+    if (this.view === "history" && this.hist) body = this.render_history(t, c, head, button);
+    else if (this.view === "edit" && this.form) {
       const f = this.form;
       const label = (text) => div().pt(16).pb(8).text_size(13.5).font_medium().child(text);
       const field = (el, w) => el.px(12).rounded(9).border_1().border_color(t.border).bg(t.background).text_size(14).text_color(t.foreground).when(Boolean(w), (e) => e.w(w));
@@ -2201,14 +2298,14 @@ export default class Channels extends View {
     }
     return v_flex().id("ch-dialog").track_focus(this.handle)
       .on_key_down((e, cx) => {
-        if (e.key === "escape") { if (this.view === "edit") { this.form = null; this.slideTo("list", cx); } else this.close(); }
+        if (e.key === "escape") { if (this.view === "edit" || this.view === "history") { this.form = null; this.slideTo("list", cx); } else this.close(); }
         else if (e.key === "enter" && this.view === "edit" && (e.modifiers?.platform || e.modifiers?.control)) this.saveRoutine(cx);
         else return;
         cx.stop_propagation();
       })
       .size_full().min_h(0).p(20).bg(t.popover).text_color(t.foreground)
       .opacity(this.arrived ? 1 : 0).transition("opacity", 130)
-      .child(v_flex().size_full().min_h(0).relative().left(this.entered ? 0 : (this.view === "edit" ? 14 : -14)).opacity(this.entered ? 1 : 0)
+      .child(v_flex().size_full().min_h(0).relative().left(this.entered ? 0 : (this.view === "list" ? -14 : 14)).opacity(this.entered ? 1 : 0)
         .transition("left", 200).transition("opacity", 160)
         .child(body)
         .when(Boolean(failed) && Date.now() - failed.at < 12000, (el) => el.child(div().pt(8).text_size(12.5).text_color(t.blocked).child(failed?.message ?? ""))));

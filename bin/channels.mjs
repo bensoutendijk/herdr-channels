@@ -144,6 +144,7 @@ export function readStore(dir) {
       if (!Array.isArray(c.tasks)) c.tasks = [];
       if (!Array.isArray(c.routines)) c.routines = [];
       if (!Array.isArray(c.queue)) c.queue = [];
+      if (!Array.isArray(c.runs)) c.runs = [];
     }
     if (!(s.v >= 2)) channels.sort((a, b) => `${a.created_at ?? ''}`.localeCompare(`${b.created_at ?? ''}`));
     return { v: STORE_VERSION, channels };
@@ -441,7 +442,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'routine-runs', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness'];
 
 // The harnesses this command can run tasks on, for the mod and the chat: each one's id, label, whether it is on here,
 // its version when installed, and what it offers (caps). Claude Code first.
@@ -493,7 +494,7 @@ export function listChannels({ dir, home = homedir(), all = false, only = null, 
     channels: store.channels.filter((c) => (only ? c.name === only : all || !c.archived_at)).map((c) => ({
       id: c.id, name: c.name, position: position.get(c) ?? null, icon: c.icon ?? null, created_at: c.created_at, archived_at: c.archived_at ?? null,
       description_path: descriptionPath(dir, c.name), chat: c.chat ?? null, chat_terminal: chatRunning(dir, c.id)?.terminal ?? null,
-      routines: c.routines.map((r) => showRoutine(r, Date.now(), WORDS)), queued: c.queue.length,
+      routines: c.routines.map((r) => showRoutine(r, Date.now(), { ...WORDS, runs: c.runs })), queued: c.queue.length,
       harness: { tasks: channelHarness(c), chat: c.harness?.chat || DEFAULT_HARNESS },
       // The gate: the channel's notification rules.
       notify: c.notify ?? '',
@@ -2104,7 +2105,7 @@ function editRoutine({ dir, channel, name, change, now = Date.now(), dry = false
 }
 
 function removeRoutine({ dir, channel, name }) {
-  return updateStore(dir, (store) => R.removeRoutine(channelOf(store, channel), name));
+  return updateStore(dir, (store) => R.removeRoutine(channelOf(store, channel), name, Date.now()));
 }
 
 // Whether the channel's chat is running: `channels chat` records its process and terminal while it runs.
@@ -2207,8 +2208,16 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
     try { closeSync(openSync(lock, 'wx')); } catch { return { skipped: true, runs: [] }; }
   }
   try {
+    const beat = readJson(tickFile(dir));
     const runs = updateStore(dir, (store) => R.claimDue(store, now, { ...WORDS, bootedAt: Date.now() - uptime() * 1000 }));
     for (const x of runs) tickLog(dir, R.claimLine(x));
+    // The run ledger: runs past their deadline end (unreported, undelivered, or their tasks' outcome). A gap since
+    // the last tick over 5 minutes means the Mac slept, and moves every open deadline on by it.
+    try {
+      const tasks = await runTaskStates({ dir, deps, now });
+      const gapMs = beat?.at ? Date.now() - Date.parse(beat.at) : 0;
+      for (const x of updateStore(dir, (store) => R.sweepRuns(store, now, { tasks, gapMs }))) tickLog(dir, R.sweepLine(x));
+    } catch (err) { tickLog(dir, `couldn't sweep routine runs: ${err.message}`); }
     let sentCount = 0;
     let errors = 0;
     // Every channel with routine runs waiting gets its chat running: the ones queued now, and any that waited
@@ -2249,6 +2258,25 @@ export async function tick({ dir, deps, now = Date.now(), ensure = ensureChat })
   } finally {
     rmSync(lock, { force: true });
   }
+}
+
+// Where the tasks tied to routine runs past their deadline stand (R.tasksToCheck), for the sweep: a Map from session
+// id (or job) to 'running', 'ok' or 'failed'. A task this command can't look at is left out (it counts as running).
+async function runTaskStates({ dir, deps, now }) {
+  const out = new Map();
+  const store = readStore(dir);
+  for (const { channel, task: link } of R.tasksToCheck(store, now)) {
+    const key = link.session_id ?? link.job;
+    const t = store.channels.find((c) => c.name === channel)?.tasks.find((x) => (link.session_id && x.session_id === link.session_id) || (link.job && x.job === link.job));
+    if (!t || isCloud(t)) continue;
+    const h = harnessOf(t);
+    if (!h?.facts || !harnessOn(h)) continue;
+    try {
+      const { st } = await h.facts({ deps, id: t.session_id ?? t.job, machine: t.machine });
+      out.set(key, st.state === 'failed' ? 'failed' : st.state === 'done' ? 'ok' : 'running');
+    } catch { /* not found: left out */ }
+  }
+  return out;
 }
 
 // Types a channel's waiting routine runs (its queue) into its chat, oldest first, through `deliver(text)`; each one
@@ -2729,7 +2757,7 @@ function listenLine(e, judged = () => null) {
   }
 }
 
-const VALUED = new Set(['--repo', '--name', '--model', '--by', '--set', '--folder', '--description', '--icon', '--limit', '--permission-mode', '--wake-on', '--why', '--schedule', '--catchup', '--prompt', '--rename', '--harness', '--tasks', '--chat']);
+const VALUED = new Set(['--repo', '--name', '--model', '--by', '--set', '--folder', '--description', '--icon', '--limit', '--permission-mode', '--wake-on', '--why', '--schedule', '--catchup', '--prompt', '--rename', '--harness', '--tasks', '--chat', '--grace', '--fail-after', '--note', '--run']);
 export function parseArgs(args) {
   const opts = {};
   const pos = [];
@@ -2748,7 +2776,7 @@ export function parseArgs(args) {
 
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
-const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | harness <channel> [--tasks claude|codex] [--chat claude|codex] | approve <session> allow|deny | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--harness claude|codex] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] <brief|-> | file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | viewing <session>|--none | notify <channel> [--set <text>|-] | why <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|preview ... | refresh [--auto] [--all] [--json] | update [--check] [--bg] [--json] | tick';
+const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | harness <channel> [--tasks claude|codex] [--chat claude|codex] | approve <session> allow|deny | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--harness claude|codex] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] [--run <run id>] <brief|-> | file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | viewing <session>|--none | notify <channel> [--set <text>|-] | why <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|runs|report|preview ... | refresh [--auto] [--all] [--json] | update [--check] [--bg] [--json] | tick';
 const ROUTINE_USAGE = R.routineUsage(WORDS);
 
 async function routineCommand({ dir, deps, pos, opts }) {
@@ -2758,6 +2786,30 @@ async function routineCommand({ dir, deps, pos, opts }) {
     const out = listChannels({ dir, home: deps.home, only: rest.length ? channelName(rest[0]) : null });
     if (opts.json) console.log(JSON.stringify({ machine: out.machine, timer: out.timer, channels: out.channels.map((c) => ({ id: c.id, name: c.name, routines: c.routines, queued: c.queued })) }));
     else console.log(R.listText(out, WORDS));
+    return 0;
+  }
+  if (verb === 'runs') {
+    // The run ledger, newest first: a channel's, or one routine's (a deleted one's too).
+    if (rest.length < 1 || rest.length > 2) fail(ROUTINE_USAGE);
+    const limit = opts.limit == null ? 20 : Number(opts.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) fail('--limit is how many runs to show, 1 to 200.');
+    const store = readStore(dir);
+    const c = channelOf(store, channelName(rest[0]), { archived: true });
+    const name = rest[1] ? routineName(rest[1]) : null;
+    const runs = R.listRuns(c, name, { limit });
+    const r = name ? c.routines.find((x) => x.name === name) : null;
+    if (opts.json) console.log(JSON.stringify({ channel: c.name, routine: r ? showRoutine(r, Date.now(), { ...WORDS, runs: c.runs }) : null, timer: timerInfo(dir), runs }));
+    else console.log(R.runsText(runs, { name }));
+    return 0;
+  }
+  if (verb === 'report') {
+    // The chat's word on a run it was given: ok or failed, with a one-line note.
+    if (rest.length !== 3) fail(ROUTINE_USAGE);
+    const channel = channelName(rest[0]);
+    const note = opts.note == null ? null : opts.note === '-' ? readStdin() : opts.note;
+    const run = updateStore(dir, (store) => R.reportRun(channelOf(store, channel), rest[1], rest[2], { note, now: Date.now() }));
+    tickLog(dir, `run ${run.id} of #${channel} ${run.name} reported ${run.state}${run.reported_late ? ' (late)' : ''}`);
+    console.log(opts.json ? JSON.stringify(run) : `Recorded run ${run.id} of #${channel}'s ${run.name} as ${run.state}${run.reported_late ? ' (a late report: it had counted as unreported)' : ''}.`);
     return 0;
   }
   if (verb === 'preview') {
@@ -2775,7 +2827,7 @@ async function routineCommand({ dir, deps, pos, opts }) {
   if (verb === 'add') {
     if (opts.schedule == null) fail(`--schedule is needed.\n${ROUTINE_USAGE}`);
     const text = opts.prompt != null ? (opts.prompt === '-' ? readStdin() : opts.prompt) : rest.length === 3 && rest[2] === '-' ? readStdin() : rest.slice(2).join(' ');
-    const r = addRoutine({ dir, channel, name, prompt: text, spec: opts.schedule, catchupMin: opts.catchup == null ? undefined : catchupMinutes(opts.catchup), enabled: !opts.off, dry: opts.dryRun });
+    const r = addRoutine({ dir, channel, name, prompt: text, spec: opts.schedule, catchupMin: opts.catchup == null ? undefined : catchupMinutes(opts.catchup), graceMin: opts.grace == null ? null : R.graceMinutes(opts.grace), failAfter: opts.failAfter == null ? null : R.failAfter(opts.failAfter), enabled: !opts.off, dry: opts.dryRun });
     console.log(opts.json ? JSON.stringify(opts.dryRun ? { ...r, dry_run: true } : r) : R.confirmation({ verb, channel, routine: r, dry: opts.dryRun, ...WORDS }));
     return 0;
   }
@@ -2788,9 +2840,18 @@ async function routineCommand({ dir, deps, pos, opts }) {
       if (opts.catchup != null) change.catchupMin = catchupMinutes(opts.catchup);
       if (opts.prompt != null) change.prompt = opts.prompt === '-' ? readStdin() : opts.prompt;
       if (opts.rename != null) change.rename = routineName(opts.rename);
+      if (opts.grace != null) change.graceMin = R.graceMinutes(opts.grace);
+      if (opts.failAfter != null) change.failAfter = R.failAfter(opts.failAfter);
       if (opts.on || opts.off) change.enabled = Boolean(opts.on);
+      if (opts.note != null) change.note = R.pauseNote(opts.note === '-' ? readStdin() : opts.note) ?? '';
       if (!Object.keys(change).length) fail(`Nothing to change.\n${ROUTINE_USAGE}`);
-    } else change.enabled = verb === 'on';
+    } else {
+      change.enabled = verb === 'on';
+      if (opts.note != null) {
+        if (verb === 'on') fail('--note goes with off: why the routine is switched off. Switching it on clears the note.');
+        change.note = R.pauseNote(opts.note === '-' ? readStdin() : opts.note) ?? '';
+      }
+    }
     if (by) change.by = by;
     const { routine, dropped } = editRoutine({ dir, channel, name, change, dry: opts.dryRun });
     console.log(opts.json ? JSON.stringify({ ...routine, dropped, ...(opts.dryRun ? { dry_run: true } : {}) }) : R.confirmation({ verb, channel, routine, dropped, dry: opts.dryRun, ...WORDS }));
@@ -3074,12 +3135,17 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       return 0;
     }
     if (sub === 'start') {
-      if (pos.length < (opts.empty ? 1 : 2)) fail('channels start <channel> [--harness claude|codex] [--empty] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] <brief | ->');
+      if (pos.length < (opts.empty ? 1 : 2)) fail('channels start <channel> [--harness claude|codex] [--empty] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--run <routine run id>] <brief | ->');
       const name = channelName(pos[0]);
       const brief = pos.length === 2 && pos[1] === '-' ? readStdin() : pos.slice(1).join(' ');
       const empty = Boolean(opts.empty);
       const wake = opts.wakeOn == null ? null : wakeOn(opts.wakeOn);
+      // --run: the routine run this task is for. Checked before the session starts, tied to it once it has.
+      if (opts.run != null) R.openRun(channelOf(readStore(dir), name), opts.run);
       const t = await start({ dir, deps, name, repo: opts.repo, title: opts.name, model: opts.model, mode: opts.permissionMode ?? null, brief, wake: wake === 'none' ? null : wake, cloud: Boolean(opts.cloud), harness: opts.harness ?? null, empty });
+      if (opts.run != null) {
+        try { updateStore(dir, (store) => R.linkTask(channelOf(store, name), opts.run, t)); } catch (err) { console.error(`Started, but not tied to run ${opts.run}: ${err.message}`); }
+      }
       if (opts.json) console.log(JSON.stringify({ channel: name, ...t }));
       else if (isCloud(t)) console.log(`Started ${taskRef(t)} in #${name} (${t.repo}, from ${t.cloud.branch || 'its branch'} on GitHub): ${t.name}${t.wake ? `. The chat is woken on its next ${t.wake.on === 'any' ? 'event' : t.wake.on}.` : ''}\nOn claude.ai: ${t.cloud.url}`);
       else {
