@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.14.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.14.0...v1.14.1) (2026-11-25)
+
+### Bug Fixes
+
+* A chat whose session record is being rewritten no longer looks stopped, and CI's two flaky tests hold steady ([#64](https://github.com/bensoutendijk/herdr-channels/issues/64)) ([ef986c8](https://github.com/bensoutendijk/herdr-channels/commit/ef986c8acbdf4b020000aa40e26f90ddf9e866f9))
+
 ## [1.14.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.13.1...v1.14.0) (2026-11-25)
 
 ### Features
