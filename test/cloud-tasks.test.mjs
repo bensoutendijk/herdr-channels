@@ -231,7 +231,7 @@ test('file adopts a cloud session by id, cse id or link; its state then isn\'t n
   await ok(['create', 'ops']);
   fake.sessions = [session({ worker_status: 'idle', summary: 'Done already', last_event_at: '2099-11-19T19:00:00Z' }), session({ id: OTHER, url: `https://claude.ai/code/${OTHER}`, title: 'Phone task' })];
   assert.match(await ok(['file', 'design', `https://claude.ai/code/${SID}?from=cli&m=0`]), new RegExp(`^Filed cloud/${SID} into #design: Fix the footer\\nOn claude\\.ai: `));
-  assert.match((await cli(['file', 'ops', `cse_${SFX}`])).err, /is a task in #design; dismiss it there first/);
+  assert.match((await cli(['file', 'ops', `cse_${SFX}`])).err, /is a task in #design: move it with `channels move-task cloud\/session_\w+ ops`/);
   await ok(['file', 'ops', `cloud/${OTHER}`, '--name', 'My phone task']);
   const s = store();
   assert.equal(s.channels[0].tasks[0].told.kind, 'done');

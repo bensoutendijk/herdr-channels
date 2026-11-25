@@ -174,8 +174,9 @@ With a store on another machine:
   and refused. A command that lists no features gets the basics only (channels, chats, tasks,
   resolve, rename, icon, instructions, archive). The features are `chat-bg` (the chat in a background
   terminal), `seen` (unread dots, and bold names in the sidebar), `refresh` (the Refresh row, from `updates` in `list --json`),
-  `routines`, `rename-task` and `refresh-all` (Refresh all chats: `<command> refresh --all --json`,
-  which prints `{ "summary": "..." }`). A task's `asking` in `list --json` (`{ state, at }`: a
+  `routines`, `rename-task`, `refresh-all` (Refresh all chats: `<command> refresh --all --json`,
+  which prints `{ "summary": "..." }`) and `move-task` (a task menu's Move to channel…:
+  `<command> move-task <task> <channel>`, which keeps the task's record whole, resolved or not). A task's `asking` in `list --json` (`{ state, at }`: a
   `question`, `prompt` or `approval`, and when it was filed) lets the sidebar stop marking a question
   nobody answered in two days; without it, every waiting task is marked.
 - With the `routines` feature, the server keeps the routines and its own timer fires them, so they run
@@ -319,7 +320,9 @@ lists the `refresh-all` feature.
   check mark resolves a task: it is hidden from the panel, and the session is not stopped or deleted.
   A task's `···` menu (or a right-click on it), the pencil in an open task's header, or a click on
   its name there renames it. The rename reaches Claude Code itself, so `claude agents` shows the same
-  name, and the task's copies and its cards above the chat take it too.
+  name, and the task's copies and its cards above the chat take it too. **Move to channel…** in the
+  same menu moves the task to another channel, as it is: its name, its cards, whether the chat
+  watches it, and resolved or not.
 
   <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: its header has the task's name, Needs input, and Rename, Resolve and Close buttons; below, the task's Claude Code session asks which homepage headline to use, with three options to choose from">
 
@@ -998,6 +1001,7 @@ channels notify <channel> [--set <text> | --set -] [--json]
 channels why <session>
 channels link <session> [--open] [--json]
 channels rename-task <session> <new-name>
+channels move-task <session> <channel>
 channels dismiss <session> [--by <who>]
 channels listen <channel> --once
 channels pending <channel> [--hook]
@@ -1061,13 +1065,27 @@ the turn is over but a background task is still running: run `channels watch <se
 and send once that wakes the chat.
 
 `channels rename-task` renames a task the way Claude Code's own agents view (`claude agents`) does:
-the background session's job record gets the new name, marked as given by the user. A running
-session takes the name on at once without starting a turn, and Claude Code's automatic naming
-never replaces it. The task's copies are renamed with it, and so are its cards above the chat's
-prompt. A session that isn't a background job (an interactive one filed with `channels file`) can
-only be renamed from inside, with `/rename`, since Claude Code offers no way to do it from
-outside: for those the panel shows the new name and `claude agents` keeps the old one, and the
-command says so.
+the background session's job record gets the new name, marked as given by the user, and Claude
+Code's automatic naming never replaces it. `claude agents` lists the name the session's running
+process holds, though, and a running session usually takes the new one from its job record within
+a moment, without starting a turn, but not always. So the command then looks at the running
+session's own record: it says `claude agents` shows the new name only when that agrees, and
+otherwise that the session still shows the old one until its next turn, or until `/rename` inside
+it. Claude Code has no other way to rename a running background session from outside (its
+`rename_session` control request reaches only an SDK host or Remote Control). The task's copies are
+renamed with it, and so are its cards above the chat's prompt. A session that isn't a background job
+(an interactive one filed with `channels file`) can only be renamed from inside, with `/rename`: for
+those the panel shows the new name and `claude agents` keeps the old one, and the command says so.
+
+`channels file` files a session into a channel under the name the store held for it, if it had one:
+a copy's (which takes the name of the task it replaced) or one given with `rename-task` or `--name`.
+`--name` gives it a new one. Either way the name is given to the session too, as `rename-task`
+does, so the list and `claude agents` agree; a session that isn't a background job keeps it in the
+store. A session that is a task in another channel isn't filed again: `channels move-task <session>
+<channel>` moves it, record and all: its name and harness, whether it is resolved, its unread mark,
+the chat's watch on it, the copies it replaced, its cards and any notice still on its way to the
+chat. Nothing of the session's is touched and neither chat takes a turn. Filing a resolved task
+again with `file` opens it again; `move-task` leaves it resolved.
 
 ### Environment variables
 

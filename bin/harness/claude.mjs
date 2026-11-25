@@ -710,11 +710,12 @@ export function copyWhy({ said = '', live = null, stillRan = false, others = [],
 export const jobOf = (home, t) => t.job ?? (t.session_id ? readJobs(home).get(t.session_id)?.job : null) ?? null;
 
 // Renames a background session in Claude Code, as its own agents view (`claude agents`, Rename) does: the job's
-// state.json gets the name with nameSource "user". A running session watches that file and takes the name on at once
-// (no turn starts), `claude agents` lists it, `claude respawn` and a resume keep it, and Claude Code's own naming
-// never replaces a name the user gave. The session's process writes the same file as it works, read-change-write, so
-// a write of ours can be lost to one of its writes: the name is read back and written again until it holds.
-// true when the job holds the name, false when it has no state to rename.
+// state.json gets the name with nameSource "user". `claude respawn` and a resume keep it, and Claude Code's own naming
+// never replaces a name the user gave. A running session usually takes the name on from that file within a moment (no
+// turn starts), but not always: `claude agents` lists what its process holds, its own record in ~/.claude/sessions,
+// so takeName below checks that (and helps it along) before anyone is told the agents view shows it. The session's process writes the
+// same file as it works, read-change-write, so a write of ours can be lost to one of its writes: the name is read
+// back and written again until it holds. true when the job holds the name, false when it has no state to rename.
 export async function renameJob(deps, job, name) {
   if (!job || !/^[A-Za-z0-9_-]{1,64}$/.test(job)) return false;
   const file = join(deps.home, '.claude', 'jobs', job, 'state.json');
@@ -732,6 +733,37 @@ export async function renameJob(deps, job, name) {
   }
   const s = readJson(file);
   return Boolean(s && s.name === name && s.nameSource === 'user');
+}
+
+// Whether the session's running process has taken a name written to its job (renameJob): its own record in
+// ~/.claude/sessions is what `claude agents` and the panel show. Looked at for a moment (CHANNELS_LIVE_NAME_MS), as the
+// process takes a new name from the job's file shortly after it is written. { live: false } when no process runs it
+// (the next one starts with the job's name); else { live: true, took, shows }: shows is the name it still has.
+export async function liveName(deps, sessionId, name, waitMs = Number(process.env.CHANNELS_LIVE_NAME_MS ?? 1500)) {
+  if (!sessionId) return { live: false };
+  const until = Date.now() + waitMs;
+  for (;;) {
+    const l = readLive(deps.home).get(sessionId) ?? null;
+    if (!l) return { live: false };
+    if (l.name === name) return { live: true, took: true, shows: name };
+    if (Date.now() >= until) return { live: true, took: false, shows: l.name || '' };
+    await deps.sleep(250);
+  }
+}
+
+// Gets a running session to take a name renameJob gave its job, and says whether it did (liveName's answer). Claude
+// Code 2.1.332's process takes a name from its job's file only when it differs from the last name it saw there, and
+// a copy (`claude --bg --resume` while the original ran) first saw the original's name there before it named itself
+// from its message: renamed back to the task's name, it ignores the write and keeps its own. So when it hasn't taken
+// the name, the job is given a passing name first, then the name again, each of which it takes as a change.
+export async function takeName(deps, job, sessionId, name) {
+  const first = await liveName(deps, sessionId, name);
+  if (!first.live || first.took) return first;
+  const passing = `${name} (renaming)`;
+  if (!(await renameJob(deps, job, passing))) return first;
+  await liveName(deps, sessionId, passing);
+  if (!(await renameJob(deps, job, name))) return first;
+  return liveName(deps, sessionId, name);
 }
 
 // The harness's own rename: true when Claude Code holds the name (a background job), false when only the store can.

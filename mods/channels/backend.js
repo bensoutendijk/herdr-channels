@@ -87,7 +87,8 @@ export function herdrMachine(task, { backend, data, known = [] }) {
 //   `harness <channel> --tasks`, `approve <task> allow|deny`
 // - send-by: `send <task> --by user`, a message the user sent from the panel: the chat doesn't hear how that turn ends
 // - gate: the notice gate: `viewing <task>|--none` and `notify <channel>`
-export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "routine-runs", "harnesses", "refresh-all", "send-by", "gate", "chat-harness"];
+// - move-task: `move-task <task> <channel>`, which moves a task (dismissed or not) with its record whole
+export const ALL_FEATURES = ["chat-bg", "seen", "routines", "rename-task", "refresh", "update", "routine-edit-on", "routine-manual", "routine-dry-run", "routine-status", "routine-by", "routine-runs", "harnesses", "refresh-all", "send-by", "gate", "chat-harness", "move-task"];
 // What this repo's command could do before it listed its features.
 const UNLISTED = ["chat-bg", "seen", "routines", "rename-task", "refresh"];
 
