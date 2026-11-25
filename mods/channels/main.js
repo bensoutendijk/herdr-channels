@@ -12,8 +12,8 @@
 //   one shows it live in the panel. + starts a fresh session in the projects folder.
 // - the menu ({ menu: channel }) and the dialogs ({ dialog: "new" | "rename" | "instructions" |
 //   "icon" | "routines" | "archive", channel }), opened as overlays; a task's menu ({ taskmenu:
-//   task id }) and its Rename dialog ({ dialog: "rename-task", task: task id }) too, and a cloud task's Send
-//   dialog ({ dialog: "send-task", task: task id }).
+//   task id }) and its Rename dialog ({ dialog: "rename-task", task: task id }) too, a cloud task's Send
+//   dialog ({ dialog: "send-task", task: task id }), and the channels to move a task to ({ movemenu: task id }).
 //
 // The main area is herdr's shown tab. A channel's chat runs in one herdr-core terminal, named
 // chat-<channel id>, which `channels chat <name> --bg` starts (a routine starts the same one when
@@ -758,15 +758,34 @@ function current() {
 const ask = (dialog, channel, width, height) => openOverlay({ mod: MOD, kind: "dialog", width, height, props: { dialog, channel } });
 const DIALOGS = { new: [520, 250], rename: [460, 220], instructions: [620, 470], notify: [620, 520], icon: [560, 560], routines: [640, 680], archive: [440, 190] };
 const openDialog = (dialog, channel) => ask(dialog, channel, ...DIALOGS[dialog]);
-// A task's menu (Rename, Open on claude.ai when it has a link, Resolve) opens at the pointer; its Rename dialog looks
-// like a channel's.
+// A task's menu (Rename, Move to channel…, Open on claude.ai when it has a link, Resolve) opens at the pointer; its
+// Rename dialog looks like a channel's.
 const findTask = (id) => channels().flatMap((c) => c.tasks ?? []).find((x) => x.id === id) ?? null;
-// The menu's items above its line (Rename, Send, Open on claude.ai) and below it (Resolve), as render_taskmenu draws them.
-const menuTop = (task) => (canRename(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
+// The open channels a task can move to: every one but its own (`channels move-task`, which keeps its record whole).
+const moveTargets = (task) => (task && has("move-task") ? channels().filter((c) => !c.archived_at && !(c.tasks ?? []).some((x) => x.id === task.id)) : []);
+const canMove = (task) => moveTargets(task).length > 0;
+// The menu's items above its line (Rename, Move, Send, Open on claude.ai) and below it (Resolve), as render_taskmenu
+// draws them.
+const menuTop = (task) => (canRename(task) ? 1 : 0) + (canMove(task) ? 1 : 0) + (isCloud(task) && !task.dismissed ? 1 : 0) + (remoteLink(task) ? 1 : 0);
 const menuItems = (task) => menuTop(task) + (task.dismissed ? 0 : 1);
-const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) ? 200 : 180, height: 10 + 34 * menuItems(task) + (menuTop(task) && !task.dismissed ? 9 : 0), props: { taskmenu: task.id } });
+const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "popup", width: remoteLink(task) || canMove(task) ? 200 : 180, height: 10 + 34 * menuItems(task) + (menuTop(task) && !task.dismissed ? 9 : 0), props: { taskmenu: task.id } });
 const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
 const renameTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 240, props: { dialog: "rename-task", task: task.id } });
+// The channels to move a task to, in a popup of their own, as the channel menu's "Tasks run on" opens its choices.
+const moveMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: 240, height: 12 + 34 * moveTargets(task).length, props: { movemenu: task.id } });
+const moveTask = (task, to) => {
+  submit((all) => {
+    const from = all.find((c) => (c.tasks ?? []).some((x) => x.id === task.id));
+    const dest = all.find((c) => c.name === to.name);
+    if (!from || !dest) return;
+    const moving = from.tasks.filter((x) => x.id === task.id);
+    from.tasks = from.tasks.filter((x) => x.id !== task.id);
+    dest.tasks = [...(dest.tasks ?? []), ...moving];
+  }, 'channels move-task "$1" "$2"', [task.id, to.name], `move ${task.name || "the task"} to ${to.name}`);
+  note(`Moved ${task.name || "the task"} to ${iconOf(to)} ${to.name}.`);
+  // It leaves this channel's list: one open in the panel goes back to the list, as Resolve does.
+  if (isShown(task)) showTasks();
+};
 const resolveTask = (id) => {
   const task = findTask(id);
   submit((all) => eachTask(all, id, (x) => { x.dismissed = true; x.dismissed_at = new Date().toISOString(); x.dismissed_by = BY; }),
@@ -873,7 +892,7 @@ function lastRun(r, t) {
 export default class Channels extends View {
   init(_props, cx) {
     const p = props() ?? {};
-    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.sidemenu ? "sidemenu" : p.taskmenu ? "taskmenu" : p.newmenu ? "newmenu" : p.harnessmenu ? "harnessmenu" : p.head ? "head" : p.foot ? "foot" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
+    this.role = p.dialog ? "dialog" : p.menu ? "menu" : p.sidemenu ? "sidemenu" : p.taskmenu ? "taskmenu" : p.newmenu ? "newmenu" : p.harnessmenu ? "harnessmenu" : p.movemenu ? "movemenu" : p.head ? "head" : p.foot ? "foot" : p.taskhead ? "taskhead" : p.panel ? "panel" : p.bar ? "bar" : p.down ? "down" : "sidebar";
     this.hover = null;
     this.drag = null; // the channel row being held, see dragMove
     this.handle = cx.focus_handle();
@@ -1628,11 +1647,25 @@ export default class Channels extends View {
       .child(svg(ICON(icon)).size(15)).child(label);
     return v_flex().size_full().py(4).bg(t.popover)
       .when(canRename(task), (el) => el.child(item("rename", "square-pen", "Rename", () => { if (task) renameTask(task); })))
+      .when(canMove(task), (el) => el.child(item("move", "arrow-right-left", "Move to channel…", () => moveMenu(task))))
       .when(isCloud(task) && !task?.dismissed, (el) => el.child(item("send", "send", "Send message…", () => sendTask(task))))
       .when(Boolean(remoteLink(task)), (el) => el.child(item("remote", "external-link", "Open on claude.ai", () => { openRemote(task); })))
       .when(Boolean(task) && !task.dismissed, (el) => el
         .when(menuTop(task) > 0, (e2) => e2.child(div().mx(8).my(4).h(1).bg(t.border)))
         .child(item("resolve", "check", "Resolve", () => { resolveTask(task.id); if (isShown(task)) showTasks(); })));
+  }
+
+  // ---------- the channels a task can move to ----------
+
+  render_movemenu() {
+    const t = theme();
+    const p = props();
+    const task = findTask(p.movemenu);
+    const item = (c) => h_flex().id(`mv-${c.name}`).mx(4).px(10).h(34).flex_none().gap(10).items_center().rounded(6).cursor_pointer()
+      .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
+      .on_click(() => { closeOverlay(p.overlay); if (task) moveTask(task, c); })
+      .child(div().w(18).flex_none().text_size(14).child(iconOf(c))).child(div().flex_1().truncate().child(c.name));
+    return v_flex().size_full().py(6).bg(t.popover).children(moveTargets(task).map(item));
   }
 
   // ---------- the dialogs ----------

@@ -154,7 +154,7 @@ function setup(t) {
 
 test('an empty store lists no channels, and list --json says which machine answers', (t) => {
   const { ok, list } = setup(t);
-  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'routine-runs', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, harnesses: [{ id: 'claude', label: 'Claude Code', on: true, installed: true, version: '2.1.329', caps: { rename: true, remoteControl: true, cloud: true, approvals: false, open: true, sendWhileWorking: 'refuse', question: 'job', copies: true } }, { id: 'codex', label: 'Codex', on: false, installed: false, version: null, caps: { rename: true, remoteControl: false, cloud: false, approvals: true, open: true, sendWhileWorking: 'queue', question: 'heuristic', copies: false } }], channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', harnesses: { claude: '2.1.329' }, asked: null, behind: { channels: 0, claude: 0, restart: 0 }, chats: [] } });
+  assert.deepEqual(list(), { machine: HERE, features: ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'routine-runs', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness', 'move-task'], remote_control: false, cloud: { on: false, attach: false, ok_at: null, error: null }, timer: { last_tick_at: null, stale: null, hint: 'launchctl kickstart -k gui/$(id -u)/dev.herdr-channels.tick' }, harnesses: [{ id: 'claude', label: 'Claude Code', on: true, installed: true, version: '2.1.329', caps: { rename: true, remoteControl: true, cloud: true, approvals: false, open: true, sendWhileWorking: 'refuse', question: 'job', copies: true } }, { id: 'codex', label: 'Codex', on: false, installed: false, version: null, caps: { rename: true, remoteControl: false, cloud: false, approvals: true, open: true, sendWhileWorking: 'queue', question: 'heuristic', copies: false } }], channels: [], updates: { build: null, release: { current: null, latest: null, tag: null, url: null, available: false, checked_at: null, error: null, update: null }, claude: '2.1.329', harnesses: { claude: '2.1.329' }, asked: null, behind: { channels: 0, claude: 0, restart: 0 }, chats: [] } });
   assert.match(ok([]), /No channels yet/);
 });
 
@@ -237,7 +237,7 @@ test('file takes a session by id, the start of one, a job or a transcript; anoth
   assert.match(run(['file', 'general', `${HERE}/${OLD}`]).stderr, /already a task in #general/);
   assert.match(run(['file', 'general', 'server/2ebb0d50']).stderr, /this machine's only: "server" isn't testmac/);
   ok(['create', 'other']);
-  assert.match(run(['file', 'other', OLD]).stderr, /is a task in #general; dismiss it there first/);
+  assert.match(run(['file', 'other', OLD]).stderr, new RegExp(`is a task in #general: move it with .channels move-task ${HERE}/${OLD} other.`));
 });
 
 test('dismiss hides a task and records who, never touching the session; a dismissed task can be filed again elsewhere', (t) => {
@@ -1091,6 +1091,143 @@ test('rename-task keeps the name in the store for a session Claude Code can\'t r
   assert.equal(JSON.parse(readFileSync(join(home, '.claude', 'jobs', 'aaaaaaaa', 'state.json'), 'utf8')).nameSource, 'user');
   transcript('99999999-0000-4000-8000-000000000000', [{ type: 'user', cwd: '/', message: { content: 'hi' } }]);
   assert.match(run(['rename-task', '99999999-0000-4000-8000-000000000000', 'X']).stderr, /isn't a background session, so Claude Code can't rename it from outside: use \/rename in the session itself/);
+});
+
+// Issue #61, gap 2: the job's file holds the name, but a running process may not have taken it yet, and `claude
+// agents` lists what the process holds.
+test('rename-task says when the running session still shows the old name, and only claims the agents view when it agrees', (t) => {
+  const { home, ok, job, live } = setup(t);
+  ok(['create', 'design']);
+  ok(['start', 'design', 'Draw the logo']);
+  job('dddd0001', { sessionId: SID, state: 'done', name: 'Draw the logo', nameSource: 'auto', cwd: '/' });
+  live(SID, { status: 'idle', jobId: 'dddd0001', name: 'Draw the logo', nameSource: 'auto' });
+  const fast = { CHANNELS_LIVE_NAME_MS: '300' };
+  const out = ok(['rename-task', SID, 'Logo'], '', fast);
+  assert.match(out, new RegExp(`Renamed ${HERE}/${SID} in #design to "Logo" in Claude Code \\(in its job's record\\): its running session still shows "Draw the logo", so \`claude agents\` and the panel keep that until its next turn from \`channels send\`, or until \`/rename Logo\` is run inside it\\.`));
+  assert.doesNotMatch(out, /shows the new name/);
+  assert.equal(JSON.parse(readFileSync(join(home, '.claude', 'jobs', 'dddd0001', 'state.json'), 'utf8')).name, 'Logo');
+  // The process took it: the agents view shows it.
+  live(SID, { status: 'idle', jobId: 'dddd0001', name: 'Logo again', nameSource: 'user' });
+  assert.match(ok(['rename-task', SID, 'Logo again'], '', fast), /in Claude Code: `claude agents` shows the new name\./);
+  assert.match(JSON.parse(ok(['rename-task', SID, 'Logo 3', '--json'], '', fast)).lagging[0].shows, /^Logo again$/);
+});
+
+// Issue #61, gap 1, with the issue's steps: a copy keeps the task's name in the store only, and filing it into another
+// channel kept the copy's automatic name.
+test('file keeps the name the store held for a copy, and gives it to the copy\'s job', (t) => {
+  const { home, ok, list, live } = setup(t);
+  ok(['create', 'general']);
+  ok(['create', 'other']);
+  ok(['file', 'general', 'aaaaaaaa', '--name', 'Pick the colour']);
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'resume-copies'), '');
+  const [, copyJob] = /\(job (eeee\d{4})\)/.exec(ok(['send', OLD, 'Blue.'])) ?? [];
+  const copy = `${copyJob}-0000-4000-8000-000000000000`;
+  const state = () => JSON.parse(readFileSync(join(home, '.claude', 'jobs', copyJob, 'state.json'), 'utf8'));
+  assert.deepEqual([state().name, state().nameSource], ["From the user via #general's c", 'auto'], 'Claude Code named the copy from its message');
+  assert.equal(list().channels[0].tasks[0].name, 'Pick the colour');
+  ok(['dismiss', copy]);
+  assert.match(ok(['file', 'other', copy]), new RegExp(`Filed ${HERE}/${copy} into #other: Pick the colour`));
+  assert.equal(list().channels.find((c) => c.name === 'other').tasks[0].name, 'Pick the colour');
+  assert.deepEqual([state().name, state().nameSource], ['Pick the colour', 'user'], 'the job has it too');
+  // --name on file takes effect for a session with a job, and for one without (kept in the store).
+  ok(['dismiss', copy]);
+  ok(['file', 'general', copy, '--name', 'Colour, final']);
+  assert.equal(list().channels[0].tasks.find((x) => x.session_id === copy).name, 'Colour, final');
+  assert.equal(state().name, 'Colour, final');
+  ok(['file', 'other', GONE, '--name', 'Talk']);
+  const gone = list().channels.find((c) => c.name === 'other').tasks.find((x) => x.session_id === GONE);
+  assert.deepEqual([gone.name, gone.named], ['Talk', 'user']);
+  ok(['dismiss', GONE]);
+  ok(['file', 'general', GONE]);
+  assert.equal(list().channels[0].tasks.find((x) => x.session_id === GONE).name, 'Talk', 'kept on a second filing');
+});
+
+test('file --name on a session with a job names it in Claude Code, so list shows it', (t) => {
+  const { home, ok, list } = setup(t);
+  ok(['create', 'general']);
+  ok(['file', 'general', 'aaaaaaaa', '--name', 'Total, again']);
+  assert.equal(list().channels[0].tasks[0].name, 'Total, again');
+  const s = JSON.parse(readFileSync(join(home, '.claude', 'jobs', 'aaaaaaaa', 'state.json'), 'utf8'));
+  assert.deepEqual([s.name, s.nameSource], ['Total, again', 'user']);
+});
+
+// Issue #61, gap 3: a move that keeps the task's record whole, without a dismissal that never happened.
+test('move-task moves a task with its record whole: dismissed or not, name, watch, unread, cards, notices and copies', (t) => {
+  const { home, ok, run, list, store, job, transcript, live } = setup(t);
+  ok(['create', 'design']);
+  ok(['create', 'other']);
+  ok(['start', 'design', '--name', 'Draw the logo', 'Draw the logo']);
+  ok(['rename-task', SID, 'Logo, kept']);
+  transcript(SID, said('Which colour?\n- Teal\n- Coral'));
+  job('dddd0001', { sessionId: SID, state: 'blocked', needs: 'which colour?', name: 'Logo, kept', nameSource: 'user', cwd: '/' }, 2);
+  ok(['listen', 'design', '--once']);
+  ok(['watch', SID, '--wake-on', 'finish', '--why', 'tell me when it is done']);
+  const before = store().channels[0];
+  const was = JSON.parse(JSON.stringify(before.tasks[0]));
+  assert.equal(before.inbox.length, 1);
+  const calls = readFileSync(join(home, 'claude-calls.jsonl'), 'utf8');
+  assert.match(ok(['move-task', SID, 'other']), new RegExp(`Moved ${HERE}/${SID} \\(Logo, kept\\) from #design to #other, with its card\\. The session itself is untouched\\.`));
+  assert.equal(readFileSync(join(home, 'claude-calls.jsonl'), 'utf8'), calls, 'nothing of Claude Code\'s was run');
+  const [d, o] = store().channels;
+  assert.deepEqual([d.tasks.length, o.tasks.length, (d.inbox ?? []).length, o.inbox.length], [0, 1, 0, 1]);
+  assert.deepEqual(o.tasks[0], was, 'the record is the same, field for field');
+  assert.equal(o.tasks[0].dismissed_at, null);
+  assert.equal(o.inbox[0].task, `${HERE}/${SID}`);
+  const shown = list().channels.find((c) => c.name === 'other').tasks[0];
+  assert.deepEqual([shown.name, shown.unread?.kind, shown.wake?.on], ['Logo, kept', 'needs', 'finish']);
+  // A dismissed task stays dismissed when it moves, and back again.
+  ok(['dismiss', SID, '--by', 'sam']);
+  assert.match(ok(['move-task', SID, 'design']), /from #other to #design, with its card\. It stays dismissed\./);
+  const back = store().channels[0].tasks[0];
+  assert.deepEqual([back.dismissed_by, Boolean(back.dismissed_at)], ['sam', true]);
+  // A copy's chain moves with it, and --json says so.
+  ok(['file', 'other', 'aaaaaaaa', '--name', 'Pick the colour']);
+  live(OLD, { status: 'idle', jobId: 'aaaaaaaa' });
+  writeFileSync(join(home, 'resume-copies'), '');
+  const [, copyJob] = /\(job (eeee\d{4})\)/.exec(ok(['send', OLD, 'Blue.'])) ?? [];
+  const copy = `${copyJob}-0000-4000-8000-000000000000`;
+  const r = JSON.parse(ok(['move-task', copy, 'design', '--json']));
+  assert.deepEqual([r.from, r.to, r.moved, r.dismissed], ['other', 'design', 2, false]);
+  const moved = Object.fromEntries(list('--all').channels[0].tasks.map((x) => [x.session_id, x]));
+  assert.deepEqual([moved[copy].name, moved[OLD].superseded_by], ['Pick the colour', `${HERE}/${copy}`]);
+  // Refusals.
+  assert.match(run(['move-task', copy, 'design']).stderr, /is already in #design/);
+  assert.match(run(['move-task', copy, 'nowhere']).stderr, /No channel #nowhere/);
+  assert.match(run(['move-task', 'ffffffff']).stderr, /channels move-task <session> <channel>/);
+  assert.match(run(['move-task', 'ffffffff', 'other']).stderr, /No task testmac\/ffffffff in any channel/);
+  ok(['archive', 'other']);
+  assert.match(run(['move-task', copy, 'other']).stderr, /#other is archived/);
+});
+
+// Claude Code 2.1.332 takes a name from its job's file only when it differs from the last one it saw there; a copy
+// first saw the original task's name. takeName gives the job a passing name first, then the name again.
+test('takeName gets a running copy to take back the name it started with, via a passing name', async (t) => {
+  const { takeName } = await import('../bin/harness/claude.mjs');
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'channels-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const file = join(home, '.claude', 'jobs', 'j1', 'state.json');
+  const rec = join(home, '.claude', 'sessions', `${process.pid}.json`);
+  mkdirSync(join(home, '.claude', 'jobs', 'j1'), { recursive: true });
+  mkdirSync(join(home, '.claude', 'sessions'), { recursive: true });
+  writeFileSync(file, JSON.stringify({ sessionId: 's1', state: 'blocked', name: 'blue color choice', nameSource: 'auto' }));
+  writeFileSync(rec, JSON.stringify({ pid: process.pid, sessionId: 's1', jobId: 'j1', name: 'blue color choice', nameSource: 'auto' }));
+  // The process: on each look, a name in the job's file that differs from the last one it saw becomes its own.
+  let seen = 'Pick the colour';
+  const names = [];
+  const sleep = async () => {
+    const s = JSON.parse(readFileSync(file, 'utf8'));
+    if (s.name !== seen) { seen = s.name; names.push(s.name); writeFileSync(rec, JSON.stringify({ ...JSON.parse(readFileSync(rec, 'utf8')), name: s.name, nameSource: 'peer' })); }
+  };
+  const { renameJob } = await import('../bin/harness/claude.mjs');
+  assert.equal(await renameJob({ home, sleep }, 'j1', 'Pick the colour'), true);
+  assert.deepEqual(names, [], 'the write of the name it saw first is not a change to it');
+  assert.deepEqual(await takeName({ home, sleep }, 'j1', 's1', 'Pick the colour'), { live: true, took: true, shows: 'Pick the colour' });
+  assert.deepEqual(names, ['Pick the colour (renaming)', 'Pick the colour']);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).name, 'Pick the colour');
+  // No process: nothing to take it, and nothing more is written.
+  rmSync(rec);
+  assert.deepEqual(await takeName({ home, sleep }, 'j1', 's1', 'Other'), { live: false });
 });
 
 test('renameJob writes the name again when the session\'s own write lost it', async (t) => {

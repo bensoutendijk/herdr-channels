@@ -23,6 +23,7 @@
 //   channels link <session> [--open]          its claude.ai/code link, when it has Remote Control; --open opens it
 //   channels start <channel> --cloud --repo <project> [--name <name>] [--wake-on <on>] <brief | ->   a cloud task (see below)
 //   channels rename-task <session> <new-name>   renames the session in Claude Code too, as `claude agents` does
+//   channels move-task <session> <channel>   moves a task to another channel with its record whole (dismissed or not)
 //   channels dismiss <session> [--by <who>]
 //   channels listen <channel> [--once]        what the chat runs beside itself; by hand, for a look at what it would do
 //   channels pending <channel> [--hook]       events waiting for the chat's next message; --hook is the chat's own hook
@@ -442,7 +443,7 @@ function taskRow(t, sessionId, name, remote = null) {
 
 // Channels in the user's order. A channel's position (1 is the top) counts the channels that aren't archived; an
 // archived channel has none. The herdr mod moves a channel with that number.
-export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'routine-runs', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness'];
+export const FEATURES = ['chat-bg', 'seen', 'routines', 'rename-task', 'refresh', 'update', 'routine-edit-on', 'routine-manual', 'routine-dry-run', 'routine-status', 'routine-by', 'routine-runs', 'harnesses', 'refresh-all', 'send-by', 'gate', 'chat-harness', 'move-task'];
 
 // The harnesses this command can run tasks on, for the mod and the chat: each one's id, label, whether it is on here,
 // its version when installed, and what it offers (caps). Claude Code first.
@@ -567,17 +568,43 @@ function move({ dir, name, position }) {
   });
 }
 
-// Adds a task to a channel. A session is a task in one channel at a time: one dismissed elsewhere moves here.
+// Adds a task to a channel. A session is a task in one channel at a time: one dismissed elsewhere is filed here
+// afresh (open again). An open task elsewhere is moved with `channels move-task`, which keeps its record whole.
 export function addTask(store, name, task) {
   const c = channelOf(store, name);
+  refuseFiled(store, name, task.machine, task.session_id ?? task.job);
   for (const other of store.channels) {
     const t = other.tasks.find((x) => sameSession(x, task.machine, task.session_id ?? task.job));
-    if (!t) continue;
-    if (!t.dismissed_at) fail(other.name === name ? `${task.machine}/${task.session_id} is already a task in #${name}.` : `${task.machine}/${task.session_id} is a task in #${other.name}; dismiss it there first.`);
-    other.tasks = other.tasks.filter((x) => x !== t);
+    if (t) other.tasks = other.tasks.filter((x) => x !== t);
   }
   c.tasks.push(task);
   return task;
+}
+
+// Refuses filing a session that is an open task already: in channel `name`, or in another (which move-task moves).
+function refuseFiled(store, name, machine, id) {
+  for (const other of store.channels) {
+    const t = other.tasks.find((x) => sameSession(x, machine, id) && !x.dismissed_at);
+    if (!t) continue;
+    const ref = `${machine}/${t.session_id ?? id}`;
+    fail(other.name === name ? `${ref} is already a task in #${name}.` : `${ref} is a task in #${other.name}: move it with \`channels move-task ${ref} ${name}\`, which keeps its record (name, cards, watch, unread) whole.`);
+  }
+}
+
+// The name the store holds for a session over its harness's, from any record of it in any channel (a dismissed one
+// too): a copy's kept name (keptName), or one given with rename-task or file --name that the harness couldn't hold.
+// null when the harness's own name is the task's.
+function heldName(store, deps, machine, ids) {
+  for (const c of store.channels) {
+    for (const t of c.tasks) {
+      if (!ids.some((id) => id && sameSession(t, machine, id))) continue;
+      if (t.machine === LOCAL && harnessId(t) === DEFAULT_HARNESS) {
+        const kept = claude.keptName(t, claude.jobState(deps.home, t.job));
+        if (kept) return kept;
+      } else if (t.named === 'user' && t.name) return t.name;
+    }
+  }
+  return null;
 }
 
 const PROJECT = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
@@ -721,8 +748,23 @@ async function file({ dir, deps, name, ref, title, folder, harness = null }) {
       try { s = await HARNESSES.codex.find({ deps, id, machine: LOCAL }); h = HARNESSES.codex; } catch { throw err; }
     }
   }
-  const task = { machine, session_id: s.session_id, job: s.job, ...(h.id === DEFAULT_HARNESS ? {} : { harness: h.id, [h.id]: { mode: 'service' } }), name: title || s.name, ...(title && h.id !== DEFAULT_HARNESS ? { named: 'user' } : {}), repo: projectOf(deps.projects, folder || s.cwd), folder: folder || s.cwd };
-  return fileTask({ dir, deps, name, task, how: 'filed' });
+  // The name it is filed under: --name, else the one the store held for it (a copy's kept name, a rename the harness
+  // couldn't hold), else the harness's. A name of ours is given to the session itself where the harness can hold it,
+  // as rename-task does (else the store keeps it, named by the user), so the list and the agents view agree.
+  const before = readStore(dir);
+  refuseFiled(before, name, machine, s.session_id ?? s.job);
+  const want = title || heldName(before, deps, machine, [s.session_id, s.job]);
+  const task = { machine, session_id: s.session_id, job: s.job, ...(h.id === DEFAULT_HARNESS ? {} : { harness: h.id, [h.id]: { mode: 'service' } }), name: want || s.name, repo: projectOf(deps.projects, folder || s.cwd), folder: folder || s.cwd };
+  let lagging = [];
+  if (want && h.id === DEFAULT_HARNESS) {
+    if (s.job && (await renameJob(deps, s.job, want))) lagging = await laggingNames(deps, [{ ref: `${machine}/${s.session_id}`, session_id: s.session_id, job: s.job }], want);
+    else task.named = 'user';
+  } else if (want) {
+    if (want !== s.name && harnessOn(h) && capsOf(task).rename) await h.rename({ deps, task, name: want }).catch(() => false);
+    task.named = 'user';
+  }
+  const t = await fileTask({ dir, deps, name, task, how: 'filed' });
+  return lagging.length ? { ...t, lagging } : t;
 }
 
 // Adopts a cloud session started elsewhere (the phone, claude.ai, another machine). Where it stands now isn't news.
@@ -732,12 +774,16 @@ async function fileCloud({ dir, deps, name, id, title }) {
   const s = freshCloud(cache) ? cache.sessions?.[id] ?? null : null;
   const kind = s ? cloudKind(s) : null;
   const at = new Date().toISOString();
-  return updateStore(dir, (store) => addTask(store, name, {
-    machine: CLOUD_MACHINE, session_id: id, job: null, name: title || s?.title || '', ...(title ? { named: 'user' } : {}), repo: null, folder: null,
-    cloud: s ? cloudSnap(s) : { url: cloudUrl(id) },
-    added_at: at, how: 'filed', dismissed_at: null, dismissed_by: null,
-    told: kind ? cloudMark(s, kind) : null, asked: null,
-  }));
+  return updateStore(dir, (store) => {
+    // --name, else the name the store held for it: Claude Code can't rename a cloud session from outside.
+    const want = title || heldName(store, deps, CLOUD_MACHINE, [id]);
+    return addTask(store, name, {
+      machine: CLOUD_MACHINE, session_id: id, job: null, name: want || s?.title || '', ...(want ? { named: 'user' } : {}), repo: null, folder: null,
+      cloud: s ? cloudSnap(s) : { url: cloudUrl(id) },
+      added_at: at, how: 'filed', dismissed_at: null, dismissed_by: null,
+      told: kind ? cloudMark(s, kind) : null, asked: null,
+    });
+  });
 }
 
 // The tasks a session ref names in the store: by its session id, the start of one (6 or more characters) or its
@@ -770,6 +816,44 @@ function dismiss({ dir, ref, by }) {
     t.dismissed_by = by ?? null;
     t.unread = null;
     return { already: false, channel: c.name, task: t };
+  });
+}
+
+// Moves a task to another channel, its record whole: its name, harness, dismissed or not, unread, watch registration,
+// what the chat last heard of it and asked it, with the copies it replaced (its chain) and its cards (the channel's
+// inbox entries for them, delivered or not). Nothing of the session's is touched, and nothing is said to either chat:
+// a card that waited moves with the task, and the new channel's chat gets one not yet delivered as it would have.
+// A task dismissed stays dismissed. Any older record of the same session in the new channel (a dismissed one) goes,
+// as filing does. { from, to, task, moved (how many records), dismissed }.
+function moveTask({ dir, ref, to }) {
+  return updateStore(dir, (store) => {
+    const { open, found, missing } = filedTasks(store, ref);
+    const hit = open[0] ?? found[0] ?? null;
+    if (!hit) fail(missing);
+    const dest = channelOf(store, to);
+    const id = taskRef(hit.t);
+    if (dest === hit.c) fail(`${id} is already in #${to}.`);
+    const chain = chainOf(hit.c, hit.t);
+    const refs = new Set(chain.map(taskRef));
+    for (const x of chain) {
+      const there = dest.tasks.find((y) => sameSession(y, x.machine, x.session_id ?? x.job));
+      if (there && !there.dismissed_at && !x.dismissed_at) fail(`${taskRef(x)} is already a task in #${to}.`);
+    }
+    dest.tasks = dest.tasks.filter((y) => !chain.some((x) => sameSession(y, x.machine, x.session_id ?? x.job)));
+    hit.c.tasks = hit.c.tasks.filter((x) => !refs.has(taskRef(x)));
+    dest.tasks.push(...chain);
+    const cards = (hit.c.inbox ?? []).filter((e) => refs.has(e.task));
+    if (cards.length) {
+      hit.c.inbox = hit.c.inbox.filter((e) => !refs.has(e.task));
+      dest.inbox = [...(dest.inbox ?? []).filter((e) => !refs.has(e.task)), ...cards];
+    }
+    // A notice still on its way to the old channel's chat goes to the new one's instead.
+    const notices = (hit.c.notices ?? []).filter((n) => refs.has(n.task));
+    if (notices.length) {
+      hit.c.notices = hit.c.notices.filter((n) => !refs.has(n.task));
+      dest.notices = [...(dest.notices ?? []).filter((n) => !refs.has(n.task)), ...notices];
+    }
+    return { from: hit.c.name, to, task: hit.t, ref: id, moved: chain.length, cards: cards.length, dismissed: Boolean(hit.t.dismissed_at) };
   });
 }
 
@@ -823,6 +907,7 @@ async function renameTask({ dir, deps, ref, name }) {
     const held = h && h.id !== DEFAULT_HARNESS ? harnessOn(h) && capsOf(x.task).rename && (await h.rename({ deps, task: x.task, name })) : Boolean(x.job && (await renameJob(deps, x.job, name)));
     (held ? renamed : kept).push(x);
   }
+  const lagging = await laggingNames(deps, renamed.filter((x) => !x.task || harnessId(x.task) === DEFAULT_HARNESS), name);
   const inClaude = new Set(renamed.map((x) => x.ref));
   if (hit) {
     updateStore(dir, (s) => {
@@ -837,7 +922,29 @@ async function renameTask({ dir, deps, ref, name }) {
       for (const e of c.inbox ?? []) if (refs.has(e.task)) e.name = name;
     });
   }
-  return { channel: hit?.c.name ?? null, ref: hit ? taskRef(hit.t) : targets[0].ref, name, renamed: renamed.map((x) => x.ref), kept: kept.map((x) => x.ref), harness: hit ? harnessId(hit.t) : DEFAULT_HARNESS };
+  return { channel: hit?.c.name ?? null, ref: hit ? taskRef(hit.t) : targets[0].ref, name, renamed: renamed.map((x) => x.ref), kept: kept.map((x) => x.ref), lagging, harness: hit ? harnessId(hit.t) : DEFAULT_HARNESS };
+}
+
+// The Claude Code sessions renamed in their job whose running process still shows another name, as `claude agents`
+// does: [{ ref, shows }]. Each one running is helped to take the name (takeName), in turn.
+async function laggingNames(deps, renamed, name) {
+  const out = [];
+  for (const x of renamed) {
+    const sid = x.session_id ?? claude.jobState(deps.home, x.job)?.sessionId ?? null;
+    const l = await claude.takeName(deps, x.job, sid, name);
+    if (l.live && !l.took) out.push({ ref: x.ref, shows: l.shows });
+  }
+  return out;
+}
+
+// What a rename in Claude Code's records means for what `claude agents` shows, in a sentence: the new name, or the
+// old one its running session still has. A session started again takes the name from its job (as `channels send`
+// does for its next turn).
+function agentsShow(lagging, name) {
+  if (!lagging.length) return '`claude agents` shows the new name.';
+  const one = lagging.length === 1;
+  const shows = [...new Set(lagging.map((x) => x.shows).filter(Boolean))];
+  return `${one ? 'its running session' : `${lagging.length} running sessions (${lagging.map((x) => x.ref).join(', ')})`} still ${one ? 'shows' : 'show'} ${shows.length ? shows.map((s) => `"${s}"`).join(', ') : 'the old name'}, so \`claude agents\` and the panel keep that until ${one ? 'its' : 'their'} next turn from \`channels send\`, or until \`/rename ${name}\` is run inside ${one ? 'it' : 'each'}.`;
 }
 
 // A cloud task's name: Claude Code has no supported way to rename a cloud session from outside it, so the name is
@@ -1306,7 +1413,7 @@ export function chatPrompt(dir, name, { projects = projectsDir(), harness = DEFA
     ...(cloudOn() ? [`- Cloud tasks are on for this Mac: \`channels start ${name} --cloud --repo <project> [--name <short name>] [--wake-on ...] -\` starts the task as a Claude Code cloud session at claude.ai/code instead of on this Mac, named cloud/<session id>. It works from the repo's copy on GitHub at the pushed branch, so the repo must be committed and pushed (start refuses otherwise: tell the user). Use it only when the user asks for a cloud task, or agrees to one. Its events come like a local task's, up to half a minute late; its report is claude.ai's one-line summary of its turn, and its whole session is on claude.ai (\`channels link <session>\`). \`channels send\` reaches it, but while it asks something the text waits behind the question: the user answers questions on claude.ai. Dismissing one doesn't archive it on claude.ai.`] : []),
     ...(codexOn() ? [codexPromptLine(dir, name, { cards: !cx })] : []),
     ...(remoteOn() ? [(cx ? '- Remote Control is on for this channel: the Claude Code tasks' : '- Remote Control is on for this channel: this chat and the tasks') + ' `channels start` makes also show at claude.ai/code and in the Claude app, where the user can follow and answer them. `channels link <session>` prints a task\'s claude.ai link, when the user asks for it.'] : []),
-    '- `channels dismiss <session> --by chat`: take one of this channel\'s tasks off the panel, when the user asks or agrees it is finished with. It never stops the session.',
+    '- `channels dismiss <session> --by chat`: take one of this channel\'s tasks off the panel, when the user asks or agrees it is finished with. It never stops the session. `channels move-task <session> <channel>` moves a task to another channel when the user asks, keeping its name and cards; never dismiss and file it again to move it.',
     `- \`channels describe ${name}\` shows the description; \`channels describe ${name} --set -\`, with the text on stdin, replaces it. Change it only when the user asks. It loads into this chat at the next launch.`,
     '',
     R.promptText({ name, ...WORDS }),
@@ -2776,7 +2883,7 @@ export function parseArgs(args) {
 
 const readStdin = () => readFileSync(0, 'utf8');
 const when = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : '-');
-const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | harness <channel> [--tasks claude|codex] [--chat claude|codex] | approve <session> allow|deny | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--harness claude|codex] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] [--run <run id>] <brief|-> | file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | viewing <session>|--none | notify <channel> [--set <text>|-] | why <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|runs|report|preview ... | refresh [--auto] [--all] [--json] | update [--check] [--bg] [--json] | tick';
+const USAGE = 'usage: channels [list [<channel>] [--all] [--json]] | harness <channel> [--tasks claude|codex] [--chat claude|codex] | approve <session> allow|deny | create <name> [--icon <text>] [--description <text>] | archive <name> | move <channel> <position> | rename <channel> <new-name> | icon <channel> <text> | describe <name> [--set <text>|-] | chat <channel> | read <session> [--limit <n>] [--json] | send <session> [--wake-on <on>] <text|-> | start <channel> [--harness claude|codex] [--cloud] [--repo <project>] [--name <name>] [--model <model>] [--permission-mode <mode>] [--wake-on <on>] [--run <run id>] <brief|-> | file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>] | watch <session> --wake-on finish|question|any|none [--why <text>] | seen <session> | viewing <session>|--none | notify <channel> [--set <text>|-] | why <session> | link <session> [--open] [--json] | rename-task <session> <new-name> | move-task <session> <channel> | dismiss <session> [--by <who>] | listen <channel> --once | pending <channel> [--hook] | chat <channel> --bg [--json] | routine list|add|edit|rm|run|on|off|runs|report|preview ... | refresh [--auto] [--all] [--json] | update [--check] [--bg] [--json] | tick';
 const ROUTINE_USAGE = R.routineUsage(WORDS);
 
 async function routineCommand({ dir, deps, pos, opts }) {
@@ -3159,7 +3266,15 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
       if (pos.length !== 2) fail('channels file <channel> <session> [--harness claude|codex] [--name <name>] [--folder <path>]');
       const name = channelName(pos[0]);
       const t = await file({ dir, deps, name, ref: pos[1], title: opts.name, folder: opts.folder, harness: opts.harness ?? null });
-      console.log(`Filed ${t.machine}/${t.session_id} into #${name}${t.name ? `: ${t.name}` : ''}${isCloud(t) ? `\nOn claude.ai: ${t.cloud?.url ?? cloudUrl(t.session_id)}` : ''}`);
+      console.log(`Filed ${t.machine}/${t.session_id} into #${name}${t.name ? `: ${t.name}` : ''}${isCloud(t) ? `\nOn claude.ai: ${t.cloud?.url ?? cloudUrl(t.session_id)}` : ''}${t.lagging?.length ? `\nIts job has the name, but ${agentsShow(t.lagging, t.name)}` : ''}`);
+      return 0;
+    }
+    if (sub === 'move-task') {
+      if (pos.length !== 2) fail('channels move-task <session> <channel>   (moves a task, dismissed or not, with its name, cards and watch)');
+      const r = moveTask({ dir, ref: pos[0], to: channelName(pos[1]) });
+      if (opts.json) { console.log(JSON.stringify({ from: r.from, to: r.to, task: r.ref, moved: r.moved, cards: r.cards, dismissed: r.dismissed })); return 0; }
+      const more = [r.moved > 1 ? `the ${r.moved === 2 ? 'copy' : `${r.moved - 1} copies`} it replaced` : '', r.cards ? `${r.cards === 1 ? 'its card' : `its ${r.cards} cards`}` : ''].filter(Boolean);
+      console.log(`Moved ${r.ref}${r.task.name ? ` (${r.task.name})` : ''} from #${r.from} to #${r.to}${more.length ? `, with ${more.join(' and ')}` : ''}.${r.dismissed ? ' It stays dismissed.' : ''} The session itself is untouched.`);
       return 0;
     }
     if (sub === 'rename-task') {
@@ -3174,7 +3289,7 @@ export async function channels(args, { deps = defaultDeps(), dir = channelsDir(d
         return 0;
       }
       const lines = [];
-      if (r.renamed.length) lines.push(`Renamed ${r.ref}${where} to "${r.name}" in Claude Code${r.renamed.length > 1 ? `, with its ${r.renamed.length - 1} ${r.renamed.length === 2 ? 'copy' : 'copies'}` : ''}: \`claude agents\` shows the new name.`);
+      if (r.renamed.length) lines.push(`Renamed ${r.ref}${where} to "${r.name}" in Claude Code${r.renamed.length > 1 ? `, with its ${r.renamed.length - 1} ${r.renamed.length === 2 ? 'copy' : 'copies'}` : ''}${r.lagging.length ? ' (in its job\'s record)' : ''}: ${agentsShow(r.lagging, r.name)}`);
       if (r.kept.length) {
         if (!r.channel) fail(`${r.ref} isn't a background session, so Claude Code can't rename it from outside: use /rename in the session itself.`);
         lines.push(`${r.kept.join(', ')} ${r.kept.length > 1 ? 'aren\'t background sessions' : 'isn\'t a background session'}, so Claude Code can't rename ${r.kept.length > 1 ? 'them' : 'it'} from outside (only /rename inside does): the panel shows "${r.name}", \`claude agents\` keeps the old name.`);

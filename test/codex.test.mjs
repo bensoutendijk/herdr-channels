@@ -160,9 +160,15 @@ test('rename reaches Codex; read, file and an unloaded thread; a Codex task has 
   assert.match(await ok(['file', 'other', idOf(ref), '--harness', 'codex', '--name', 'Adopted']), /Filed testmac\/.* into #other: Adopted/);
   const filed = store().channels[1].tasks[0];
   assert.deepEqual({ harness: filed.harness, named: filed.named }, { harness: 'codex', named: 'user' });
-  // And without --harness, when Claude Code doesn't know it.
+  assert.equal(fake.threads.get(idOf(ref)).name, 'Adopted', '--name reaches Codex too');
+  // And without --harness, when Claude Code doesn't know it; it keeps the name the store held (issue #61).
   await ok(['dismiss', ref]);
-  assert.match(await ok(['file', 'site', idOf(ref)]), /Filed/);
+  assert.match(await ok(['file', 'site', idOf(ref)]), /Filed .*: Adopted/);
+  // move-task keeps a Codex task's record whole: its harness, name and dismissed state.
+  await ok(['dismiss', ref]);
+  assert.match(await ok(['move-task', ref, 'other']), /from #site to #other\. It stays dismissed\./);
+  const moved = store().channels[1].tasks[0];
+  assert.deepEqual([moved.harness, moved.name, moved.named, Boolean(moved.dismissed_at)], ['codex', 'Adopted', 'user', true]);
 });
 
 test('an empty Codex session (the panel\'s New Codex session) has a name and no turn', async (t) => {
