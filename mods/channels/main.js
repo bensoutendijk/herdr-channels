@@ -772,8 +772,7 @@ const taskMenu = (task) => menuItems(task) && openOverlay({ mod: MOD, kind: "pop
 const sendTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 300, props: { dialog: "send-task", task: task.id } });
 const renameTask = (task) => openOverlay({ mod: MOD, kind: "dialog", width: 460, height: 240, props: { dialog: "rename-task", task: task.id } });
 // The channels to move a task to, in a popup of their own, as the channel menu's "Tasks run on" opens its choices.
-const MOVE_ROWS = 10; // past this many channels the list scrolls
-const moveMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: 240, height: 12 + 34 * Math.min(MOVE_ROWS, moveTargets(task).length), props: { movemenu: task.id } });
+const moveMenu = (task) => openOverlay({ mod: MOD, kind: "popup", width: 240, height: 12 + 34 * moveTargets(task).length, props: { movemenu: task.id } });
 const moveTask = (task, to) => {
   submit((all) => {
     const from = all.find((c) => (c.tasks ?? []).some((x) => x.id === task.id));
@@ -1666,7 +1665,7 @@ export default class Channels extends View {
       .text_size(13.5).text_color(t.foreground).hover((s) => s.bg(t.hover))
       .on_click(() => { closeOverlay(p.overlay); if (task) moveTask(task, c); })
       .child(div().w(18).flex_none().text_size(14).child(iconOf(c))).child(div().flex_1().truncate().child(c.name));
-    return v_flex().id("mv-list").size_full().min_h(0).py(6).bg(t.popover).overflow_y_scrollbar().children(moveTargets(task).map(item));
+    return v_flex().size_full().py(6).bg(t.popover).children(moveTargets(task).map(item));
   }
 
   // ---------- the dialogs ----------

@@ -326,7 +326,9 @@ lists the `refresh-all` feature.
 
   <img src="docs/task-view.png" width="420" alt="A task opened live in the tasks panel: its header has the task's name, Needs input, and Rename, Resolve and Close buttons; below, the task's Claude Code session asks which homepage headline to use, with three options to choose from">
 
-  <img src="docs/task-menu.png" width="420" alt="The tasks panel with Build pricing page working and two tasks ready for review, Pick a hero headline and Draft the launch notes; a task's menu is open over the first, offering Rename and Resolve">
+  <img src="docs/task-menu.png" width="420" alt="The tasks panel in #website with Build pricing page working and two tasks ready for review, Draft the launch notes and Pick a hero headline; a task's menu is open over the second, offering Rename, Move to channel… and Resolve">
+
+  <img src="docs/task-move.png" width="420" alt="The same tasks panel after Move to channel…: a small list of the other channels, launch, design and ops, each with its icon, opened beside Pick a hero headline">
 
 - **Spaces: plain Herdr.** Below the channels is Herdr's own **Spaces** list, the same one Herdr's
   own layout shows, for a shell, a plain Claude Code session or anything else Herdr runs. It works as
@@ -635,7 +637,7 @@ menu, a button in its header when it is open in the panel, and a button on its c
 opens the link in your browser with macOS `open`. `channels link <session>` prints it, `--open` opens it, and
 `channels read` shows it on its first lines.
 
-<img src="docs/task-menu-claude-ai.png" width="420" alt="The tasks panel with a task's menu open, offering Rename, Open on claude.ai and Resolve">
+<img src="docs/task-menu-claude-ai.png" width="420" alt="The tasks panel with a task's menu open over Draft the launch notes, offering Rename, Move to channel…, Open on claude.ai and Resolve">
 
 <img src="docs/task-header-claude-ai.png" width="420" alt="An open task's header in the tasks panel, Write the release notes, Ready for review, with an Open on claude.ai button beside Rename, Resolve and Close; below it the task's Claude Code session says /rc active">
 
