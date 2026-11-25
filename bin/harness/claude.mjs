@@ -30,6 +30,9 @@ export const caps = {
 export const readJson = (file) => {
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
 };
+// A record another process may be writing as we read it (Claude Code rewrites ~/.claude/sessions/<pid>.json in
+// place): a read that finds it half written is tried once more before it counts as unreadable.
+const readRecord = (file) => readJson(file) ?? (existsSync(file) ? readJson(file) : null);
 const countLines = (file) => {
   try { return readFileSync(file, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; }
 };
@@ -70,7 +73,7 @@ export function readLive(home) {
   let files = [];
   try { files = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return out; }
   for (const f of files) {
-    const s = readJson(join(dir, f));
+    const s = readRecord(join(dir, f));
     if (!s?.sessionId || !Number.isInteger(s.pid) || !alive(s.pid)) continue;
     // Another process can hold the same session (someone has it open in a terminal): the job's own process wins.
     if (out.get(s.sessionId)?.job && !s.jobId) continue;
@@ -666,7 +669,7 @@ export function holders(home, sid) {
   let files = [];
   try { files = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return out; }
   for (const f of files) {
-    const r = readJson(join(dir, f));
+    const r = readRecord(join(dir, f));
     if (r?.sessionId !== sid || !Number.isInteger(r.pid) || !alive(r.pid)) continue;
     if (r.kind === 'interactive' && r.parkedJobId) continue;
     out.push({ pid: r.pid, kind: r.kind ?? null, cwd: r.cwd ?? null });

@@ -58,7 +58,8 @@ fs.appendFileSync(at('chat-launches.jsonl'), JSON.stringify({ args: args.slice(0
 const sessions = path.join(home, '.claude', 'sessions');
 fs.mkdirSync(sessions, { recursive: true });
 const record = path.join(sessions, process.pid + '.json');
-const write = () => fs.writeFileSync(record, JSON.stringify({ pid: process.pid, sessionId: id, version, status: read('status', 'idle') }));
+// Written whole (a temp file, then renamed over it), so a reader never finds the record half written.
+const write = () => { fs.writeFileSync(record + '.tmp', JSON.stringify({ pid: process.pid, sessionId: id, version, status: read('status', 'idle') })); fs.renameSync(record + '.tmp', record); };
 write();
 const until = Date.now() + Number(read('lifetime', '25000'));
 const t = setInterval(() => { write(); if (Date.now() > until) process.exit(0); }, 50);
@@ -185,12 +186,14 @@ test('a chat left behind mid-turn restarts itself once its turn is over, with no
   const id = JSON.parse(ok(['list', '--json'])).channels[0].id;
   const { address } = JSON.parse(ok(['chat', 'general', '--bg', '--json']));
   set('status', 'busy');
+  // The chat outlives the wait below, so a new pid can only be the listener's restart.
+  set('lifetime', '60000');
   runTerminal(lines('hc-runs.jsonl')[0].argv, address);
   const first = await until(() => chatFile(id));
   build('b2');
   set('status', 'idle');
-  // Its listener looks every LISTEN.refreshMs (15 s).
-  const second = await until(() => { const c = chatFile(id); return c && c.pid !== first.pid ? c : null; }, 25000);
+  // Its listener looks every LISTEN.refreshMs (15 s), and a slow runner can miss one look: two looks and slack.
+  const second = await until(() => { const c = chatFile(id); return c && c.pid !== first.pid ? c : null; }, 40000);
   assert.ok(second, 'restarted by its listener');
   assert.deepEqual([second.build, second.session_id, second.terminal], ['b2', first.session_id, address]);
   assert.equal(lines('stops.jsonl').length, 1);

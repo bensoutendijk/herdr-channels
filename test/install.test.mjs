@@ -159,7 +159,10 @@ test('the repo names no person, home folder or host of its own', () => {
   const hits = [];
   for (const f of files) {
     if (!existsSync(join(repo, f))) continue;
-    let text = readFileSync(join(repo, f), 'utf8');
+    const bytes = readFileSync(join(repo, f));
+    // Images and other binary files aren't text: their bytes can spell a word by chance. A NUL marks them.
+    if (bytes.includes(0)) continue;
+    let text = bytes.toString('utf8');
     // The license's copyright line names the author, on purpose.
     if (f === 'LICENSE') text = text.replace(/^Copyright \(c\) .*$/m, '');
     for (const w of words) if (w.test(text)) hits.push(`${f}: ${w}`);
