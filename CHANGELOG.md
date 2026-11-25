@@ -2,6 +2,12 @@
 
 Every release of herdr-channels, newest first. Each one is a GitHub Release too: https://github.com/bensoutendijk/herdr-channels/releases
 
+## [1.14.0](https://github.com/bensoutendijk/herdr-channels/compare/v1.13.1...v1.14.0) (2026-11-25)
+
+### Features
+
+* Move a task to another channel whole, and a filed or renamed task keeps its name ([#62](https://github.com/bensoutendijk/herdr-channels/issues/62)) ([d7a09a6](https://github.com/bensoutendijk/herdr-channels/commit/d7a09a60c6a9480a94fd3adcda7158796bbf6c03))
+
 ## [1.13.1](https://github.com/bensoutendijk/herdr-channels/compare/v1.13.0...v1.13.1) (2026-11-24)
 
 ### Bug Fixes
