@@ -1,20 +1,70 @@
 # herdr-channels
 
-Slack-style channels for the [herdr](https://herdr.dev) app, backed by Claude Code and running
-entirely on your machine.
+A chat for each of your workstreams that plans the work, hands it to Claude Code and Codex sessions
+running side by side, and tells you what came back. It runs in the [Herdr](https://herdr.dev) app on
+your Mac.
 
-A channel groups the work on one topic. Each channel has an icon, a description, a long-lived
-Claude Code chat, a list of tasks, and routines: prompts its chat receives on a schedule. A task is a Claude Code background session (`claude --bg`)
-that you can open live in the tasks panel next to the chat. The chat can start tasks, read them and
-send them messages. When a task finishes or asks a question, the tasks panel shows it, a card above
-the chat's prompt lets you answer or dismiss it without the chat taking a turn, and the chat hears
-about it with your next message; it is interrupted only when it asked to be.
+![The channels layout in Herdr. Left, the channel list, where #website has a red dot on its icon because a task waits on you. Middle, the #website chat: one-line notices from the contributing and hero-headline tasks, each followed by the chat saying in a few lines what the task did and what is still open, and above the prompt a card where the Codex pricing-page task asks to run headless Chrome outside its sandbox, with Allow, Deny, Open and Dismiss. Right, the tasks panel: pricing-page under Needs input, and hero-headline, contributing and page-title ready for review](preview.png)
 
-Everything is local: the channel store is a folder on disk, tasks run under your own `claude`, and
-the herdr mod runs every command on the same machine. No server is involved, unless you turn on
-[cloud tasks](#cloud-tasks) (off by default), which run tasks at claude.ai/code.
+You talk to a channel's chat. It writes a brief for each piece of work and starts a task for it: a
+whole Claude Code or Codex session of its own. You keep talking while the tasks run. When one
+finishes, the chat hears about it in one line and tells you what matters. When one needs you, a card
+above the chat's prompt asks you, and your answer goes straight to the task.
 
-![The channels layout in Herdr: the channel list on the left, where #website has a red dot on its icon for the task waiting on you, with Herdr's spaces list below it; the #website channel's Claude Code chat in the middle, where one-line notices from the Add a contributing guide and Add a page title tasks are followed by the chat saying in a few lines what they did, above a task card saying Pick a homepage headline waits on a permission prompt; and the tasks panel on the right with one task that needs input, one working and two ready for review](preview.png)
+## What it does
+
+- **A chat per workstream.** Each channel (`#website`, `#api-server`) has a long-lived chat, on Claude
+  Code or Codex, with instructions of its own. It keeps its history when it restarts.
+- **Tasks that are real sessions.** A task is a full Claude Code or Codex session working in a repo,
+  with its own brief. Many run at once. Open any of them live in the tasks panel and type into it.
+- **News without noise.** A finished task reaches the chat as a one-line notice, the way a subagent's
+  result does. A notice gate, with a small judge, keeps out what moves nothing: a rephrasing, a small
+  fix, a report you already read.
+- **Questions on cards.** A task's question or permission prompt shows as a card above the chat's
+  prompt. Answer, open or dismiss it without the chat taking a turn, by click, by key or with
+  `/cards`. A Codex task's approval gets **Allow** and **Deny**. A red dot in the sidebar marks a
+  channel where something waits on you.
+- **Routines.** Prompts a chat gets on a schedule ("every weekday at 9, ask me for my plan"). Set
+  them up in a dialog or by asking the chat, run one now, and see why a run didn't happen.
+- **On your phone, or in the cloud.** With Remote Control, chats and tasks show at claude.ai/code
+  and in the Claude app, where you can answer them. Cloud tasks run at claude.ai/code while the Mac
+  sleeps. Both are off until you turn them on.
+- **Keeps itself current.** Releases on GitHub, an **Update** button in the sidebar, and **Refresh**
+  to move chats to a newer Claude Code or Codex without cutting into a turn.
+- **One Mac, or a hub.** Everything runs on your Mac by default: the store is a folder on disk and
+  tasks run under your own `claude` and `codex`. The sidebar can also front a store on a home server
+  that keeps the chats running while the laptop sleeps.
+
+## Why tasks, not subagents
+
+A Claude Code subagent is good for a quick side job inside one turn. A task is for work that takes a
+while, that you want to watch or steer, or that should outlive the conversation that started it.
+
+| | Subagent | Task |
+|---|---|---|
+| Lives | Inside the session that started it | On its own, as long as the work takes |
+| You can talk to it | Only through the agent that started it | Yes: open it and type, or answer its card |
+| Its own view | A line in the parent's transcript | A live session in the tasks panel |
+| When the chat restarts | Gone | Keeps running |
+| Harness | The parent's | Claude Code or Codex, per task, or the cloud |
+| On a schedule | No | A routine can have the chat start one |
+
+A task can still use subagents of its own.
+
+## How it's built
+
+It is more than a layout: a store, a command, and processes that watch the tasks for you.
+
+| Piece | What it does |
+|---|---|
+| The `channels` command | Keeps the store (a JSON file on disk) and does every action: start, send, read, approve, routines. The chats run it too |
+| A listener per chat | Reads the tasks' records every few seconds, turns finishes and questions into events, and runs the notice gate |
+| The notice gate and judge | Rules, then a short `claude -p` call, decide whether a finish is worth a turn of the chat |
+| The notice server | An MCP server that pushes each notice into a Claude Code chat |
+| The Herdr mod | The sidebar, header bar, tasks panel and dialogs |
+| The chat's mod | The task cards above a Claude Code chat's prompt, and `/cards` |
+| Harnesses | Claude Code and Codex behind one interface ([docs/harnesses.md](docs/harnesses.md)) |
+| The timer | A launchd agent that runs `channels tick` every minute: routines, and the update check |
 
 ## Contents
 
@@ -755,7 +805,7 @@ permissions: the `workspace-write` sandbox, asking before it leaves it (the netw
 `bypassPermissions` (no sandbox, no approvals).
 
 **Following it.** Everything in [Task events](#task-events) holds: a finish, or a question, reaches the chat as a
-one-line notice; a question is a card you can answer; the unread dot and Tell chat work as before. A Codex task's
+one-line notice; a question is a card you can answer; the unread dot works as before. A Codex task's
 row in the panel has a small mark when the channel has tasks on both harnesses, and its header names the harness
 and its sandbox. Opening it runs `codex resume` in the panel: you watch and type into the live session, mid-turn too;
 leaving it leaves the task running.
